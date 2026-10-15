@@ -20,10 +20,7 @@
   "workers_dev": true,
   // バージョンごとのプレビュー URL は作らない(ログイン画面の入口を増やさない)
   "preview_urls": false,
-  // カスタムドメインを使う場合の例(任意)。使うならコメントを外し、自分のドメインに書き換える
-  // "routes": [
-  //   { "pattern": "ops.example.com", "custom_domain": true }
-  // ],
+  // カスタムドメインを使う場合は、下の "env" に環境を定義して `pnpm run deploy:env <名前>` でデプロイする(任意)
   "observability": {
     "enabled": true
   },
@@ -44,5 +41,32 @@
     "LANGUAGE": "ja",
     // 日時表示のタイムゾーン(IANA 名)
     "TIMEZONE": "Asia/Tokyo"
+  },
+  // ── カスタムドメインで公開する場合の環境(任意) ──
+  // 下の "gmkz" は作者の環境(wardogs-ops.gmkz.jp)。自分のドメインで公開したい人は、このブロックをコピーして
+  // キー名(gmkz)と pattern を自分のものに変え、`pnpm run deploy:env <キー名>` でデプロイする(README 2 章の補足)。
+  // 環境では vars と d1_databases が引き継がれないため、上と同じ内容を書く。ボタン利用者はこのブロックを無視してよい。
+  "env": {
+    "gmkz": {
+      "name": "wardogs-ops",
+      // 入口をカスタムドメインの 1 つにする
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [
+        { "pattern": "wardogs-ops.gmkz.jp", "custom_domain": true }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "wardogs-ops-db",
+          "migrations_dir": "db/migrations"
+        }
+      ],
+      "vars": {
+        "AUDIT_REQUIRED": "true",
+        "LANGUAGE": "ja",
+        "TIMEZONE": "Asia/Tokyo"
+      }
+    }
   }
 }

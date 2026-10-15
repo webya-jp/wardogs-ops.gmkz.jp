@@ -16,6 +16,7 @@
     "check": "astro check",
     "test": "vitest run",
     "deploy": "wrangler deploy && wrangler d1 migrations apply DB --remote",
+    "deploy:env": "node scripts/deploy-env.mjs",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
     "cf-typegen": "wrangler types src/types/worker-configuration.d.ts",
