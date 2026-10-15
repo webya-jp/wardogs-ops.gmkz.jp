@@ -8,7 +8,7 @@ WARDOGS のコミュニティサーバーを運営している人向けの、**�
 - プログラミングの知識は要りません。この手順書のとおりに、画面上でボタンを押して値を入力していけば使えます。
 - このパネルは非公式のツールです。WARDOGS の開発元・販売元とは関係ありません。RCON(後述)の仕様は公式の資料が見つかっておらず、**非公式の資料をもとに作っています**。サーバーのバージョンによっては一部の操作が使えないことがあります(使えない操作のボタンは自動で押せなくなります)。
 
-> **公開前です。** 画面と API は実装済みで、付属のモック RCON で動作確認しています。本物の WARDOGS サーバーでの確認はまだです(RCON の仕様が非公式資料ベースのため)。下の「Deploy to Cloudflare」ボタンとフォーク手順の `<<REPO_URL>>` は、リポジトリを公開したときに実際の URL に差し替えます。
+> **公開前です。** 画面と API は実装済みで、付属のモック RCON で動作確認しています。本物の WARDOGS サーバーでの確認はまだです(RCON の仕様が非公式資料ベースのため)。下の「Deploy to Cloudflare」ボタンとフォーク手順の `https://github.com/webya-jp/wardogs-ops.gmkz.jp` は、リポジトリを公開したときに実際の URL に差し替えます。
 
 ---
 
@@ -77,7 +77,7 @@ WARDOGS のコミュニティサーバーを運営している人向けの、**�
 
 1. 下のボタンを押します。
 
-   [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=<<REPO_URL>>)
+   [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/webya-jp/wardogs-ops.gmkz.jp)
 
    (ボタンの URL の書式: `https://deploy.workers.cloudflare.com/?url=<このリポジトリの URL>`)
 2. Cloudflare にログインし、GitHub との連携を許可します。Cloudflare があなたの GitHub アカウントにこのリポジトリのコピーを作ります。
@@ -89,7 +89,7 @@ WARDOGS のコミュニティサーバーを運営している人向けの、**�
 
 ### 方法 B: フォークしてダッシュボードで取り込む
 
-1. GitHub でこのリポジトリ(`<<REPO_URL>>`)を開き、右上の **Fork** を押して自分のアカウントにフォークします。リポジトリは **公開(Public)のまま** で構いません(秘密の値はリポジトリに入れません)。
+1. GitHub でこのリポジトリ(`https://github.com/webya-jp/wardogs-ops.gmkz.jp`)を開き、右上の **Fork** を押して自分のアカウントにフォークします。リポジトリは **公開(Public)のまま** で構いません(秘密の値はリポジトリに入れません)。
 2. Cloudflare のダッシュボードで **Workers & Pages** → **Create application** → **Import a repository** を選び、フォークしたリポジトリを選びます。
 3. 設定:
    - Project name(Worker の名前): `wardogs-ops`(`wrangler.jsonc` の `name` と同じにする必要があります)
