@@ -54,7 +54,7 @@ export async function insertPending(db: D1Database, p: PendingInput): Promise<nu
 export async function finishAudit(
   db: D1Database,
   id: number,
-  r: { status: Exclude<AuditStatus, 'pending'>; now: number; rconStatus: number | null; errorCode: ApiErrorCode | null },
+  r: { status: 'succeeded' | 'failed'; now: number; rconStatus: number | null; errorCode: ApiErrorCode | null },
 ): Promise<void> {
   await db
     .prepare(`UPDATE audit_log SET status = ?2, finished_at = ?3, rcon_status = ?4, error_code = ?5 WHERE id = ?1`)
@@ -101,7 +101,7 @@ export async function recordSessionEvent(
     .run();
 }
 
-interface AuditRow {
+export interface AuditRow {
   id: number;
   created_at: number;
   finished_at: number | null;
@@ -118,7 +118,12 @@ interface AuditRow {
 
 const ERROR_CODES: ReadonlySet<string> = new Set(API_ERROR_CODES);
 
-function toEntry(r: AuditRow): AuditEntry {
+/** D1 の status は pending / succeeded / failed のまま。RCON タイムアウトの failed だけ API では 'unknown'(結果不明) */
+export function toApiStatus(status: string, errorCode: string | null): AuditStatus {
+  return status === 'failed' && errorCode === 'RCON_TIMEOUT' ? 'unknown' : (status as AuditStatus);
+}
+
+export function toEntry(r: AuditRow): AuditEntry {
   let params: Record<string, unknown> = {};
   try {
     const v: unknown = JSON.parse(r.params_json ?? '{}');
@@ -131,7 +136,7 @@ function toEntry(r: AuditRow): AuditEntry {
     createdAt: Number(r.created_at),
     finishedAt: r.finished_at === null ? null : Number(r.finished_at),
     event: r.event as AuditEventType,
-    status: r.status as AuditStatus,
+    status: toApiStatus(r.status, r.error_code),
     operator: r.operator,
     sessionTag: r.session_tag,
     targetSteamId: r.target_steam_id,

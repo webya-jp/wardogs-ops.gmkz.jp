@@ -280,8 +280,11 @@ export interface AuditResponse {
 }
 
 export type AuditEventType = WriteAction | 'login' | 'logout';
-/** pending のまま 1 分以上経った行は画面で「結果不明」と表示する */
-export type AuditStatus = 'pending' | 'succeeded' | 'failed';
+/**
+ * pending のまま 1 分以上経った行は画面で「結果不明」と表示する。
+ * `unknown` は API だけの値: RCON がタイムアウトし、実行されたかどうか不明(D1 上は failed + error_code = RCON_TIMEOUT。CHECK 制約は変えない)
+ */
+export type AuditStatus = 'pending' | 'succeeded' | 'failed' | 'unknown';
 
 export interface AuditEntry {
   id: number;

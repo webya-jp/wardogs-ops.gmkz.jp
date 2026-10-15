@@ -137,6 +137,7 @@ export const ja = {
 
   // 確認ダイアログ(confirm.<WriteAction> は全コード必須)
   'confirm.title': '操作の確認',
+  'confirm.titleWithAction': '{title}: {action}',
   'confirm.kick': '{target} をサーバーから退出させます。',
   'confirm.ban': '{target} を BAN します。このプレイヤーは再接続できなくなります。',
   'confirm.unban': '{target} の BAN を解除します。',
@@ -249,6 +250,7 @@ export const ja = {
   'audit.status.succeeded': '成功',
   'audit.status.failed': '失敗',
   'audit.status.unknown': '結果不明',
+  'audit.status.unknownHelp': 'RCON がタイムアウトし、実行されたかどうか不明です。',
 } as const satisfies Record<string, string> &
   Record<`error.${ApiErrorCode}`, string> &
   Record<`validation.${ValidationIssue}`, string> &

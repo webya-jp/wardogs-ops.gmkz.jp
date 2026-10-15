@@ -1,6 +1,7 @@
 // 書き込みの二段階と段階的有効化(D1 なし)の確認。D1 ありの経路は docs/API_TEST.md の wrangler dev 確認で見ている
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { executeAction, prepareAction } from './actions';
+import { listAudit, toApiStatus } from './audit';
 import type { ActionContext } from './actions';
 import { getFeatures, resetD1Cache } from './config';
 import { deriveKeysFrom } from './keys';
@@ -154,5 +155,54 @@ describe('actions (D1 あり。拒否も監査ログに残す)', () => {
     const r = await rows(db);
     expect(r).toHaveLength(1);
     expect(r[0]).toMatchObject({ event: 'kick', status: 'succeeded', error_code: null });
+  });
+});
+
+describe('監査ログの status(RCON タイムアウトは API で unknown)', () => {
+  it('toApiStatus: failed + RCON_TIMEOUT だけ unknown、それ以外は保存値のまま', () => {
+    expect(toApiStatus('failed', 'RCON_TIMEOUT')).toBe('unknown');
+    expect(toApiStatus('failed', 'RCON_UNREACHABLE')).toBe('failed');
+    expect(toApiStatus('failed', null)).toBe('failed');
+    expect(toApiStatus('succeeded', null)).toBe('succeeded');
+    expect(toApiStatus('pending', null)).toBe('pending');
+  });
+
+  it('RCON がタイムアウトした execute は D1 上 failed のまま、listAudit では unknown', async () => {
+    const { makeD1 } = await import('./testing/sqlite-d1');
+    const db = await makeD1();
+    const timeoutFetch: FetchFn = async (url, init) => {
+      const path = new URL(url).pathname;
+      if (path === '/v1/capabilities') return Response.json({ routes: ['GET /v1/players', 'POST /v1/players/{steamId}/kick'] });
+      if (path === '/v1/players') return Response.json({ players: [PLAYER], count: 1 });
+      // 書き込みは応答せず、タイムアウトの abort を待つ
+      return new Promise<Response>((_, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+    };
+    const c = await ctx({ db, deps: { fetchFn: timeoutFetch, log: () => undefined } });
+    const p = await prepareAction(c, { action: 'kick', params: { steamId: PLAYER.steamId } });
+    if (!p.ok) throw new Error('prepare failed');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let e: Awaited<ReturnType<typeof executeAction>>;
+    try {
+      let done = false;
+      const pending = executeAction(c, { action: 'kick', params: p.data.params, confirmToken: p.data.confirmToken }).then((r) => {
+        done = true;
+        return r;
+      });
+      // D1 の処理(実時間)が終わって fetch のタイマーが張られるまで、時間を進め続ける
+      for (let i = 0; i < 200 && !done; i++) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await new Promise<void>((r) => setImmediate(r));
+      }
+      e = await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(e).toMatchObject({ ok: false, code: 'RCON_TIMEOUT' });
+    const raw = (await db.prepare('SELECT status, error_code FROM audit_log').all()).results as Record<string, unknown>[];
+    const { entries } = await listAudit(db, { limit: 10, before: null });
+    expect(raw).toEqual([{ status: 'failed', error_code: 'RCON_TIMEOUT' }]);
+    expect(entries[0]?.status).toBe('unknown');
   });
 });

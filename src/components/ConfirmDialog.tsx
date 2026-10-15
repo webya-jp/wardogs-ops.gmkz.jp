@@ -213,7 +213,7 @@ export default function ConfirmDialog({ i18n, request, mapNames = {}, onClose, o
       }}
     >
       <h2 id="confirm-title">
-        {t('confirm.title')}: {actionLabel}
+        {t('confirm.titleWithAction', { title: t('confirm.title'), action: actionLabel })}
       </h2>
 
       {step === 'input' && request.input && (

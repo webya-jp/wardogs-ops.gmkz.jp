@@ -411,7 +411,7 @@ button:disabled {
 }
 
 .button-small {
-  min-height: 36px;
+  min-height: 44px;
   padding: 4px 10px;
   font-size: 0.875rem;
 }
@@ -559,7 +559,7 @@ td.actions {
 /* 破壊的操作は他のボタンから離して末尾に置く */
 .row-actions .destructive-group {
   display: flex;
-  gap: 8px;
+  gap: 12px;
   margin-left: 16px;
   padding-left: 16px;
   border-left: 1px solid var(--border);
@@ -633,6 +633,10 @@ td.actions {
   .table-cards .row-actions .destructive-group {
     margin-left: auto;
     padding-left: 12px;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 100%;
   }
 
   .table-cards .steam-id {

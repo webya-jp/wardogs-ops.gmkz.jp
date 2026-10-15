@@ -46,6 +46,8 @@
 
 ログイン中のセッション情報、段階的有効化の状態(`features`)、設定の警告(`warnings`。`SetupWarning` の配列)。RCON は呼ばない。
 
+`status` は `pending` / `succeeded` / `failed` / `unknown`。`unknown` = RCON がタイムアウトし、実行されたかどうか不明(DB 上は `failed` + `error_code = RCON_TIMEOUT` のまま。DB スキーマは変えず、API の変換で `unknown` にする)。
+
 `warnings` には設定の警告に加え、全体のログイン失敗が直近 1 時間で 50 回を超えたときに `LOGIN_FAILURES_HIGH` が入る(ログインは止めない。ARCHITECTURE 5.6)。文言は画面がカタログの `setup.warning.<コード>` で引く。
 
 ### `GET /api/capabilities` → `CapabilitiesResponse`

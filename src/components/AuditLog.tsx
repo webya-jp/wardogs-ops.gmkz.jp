@@ -58,10 +58,21 @@ export default function AuditLog({ language, timeZone }: I18nProps) {
   };
 
   const resultCell = (e: AuditEntry) => {
+    if (e.status === 'unknown') {
+      return (
+        <>
+          <span className="badge badge-warn">{t('audit.status.unknown')}</span>
+          <div className="muted">{t('audit.status.unknownHelp')}</div>
+        </>
+      );
+    }
     if (e.status === 'pending') {
       const unknown = now - e.createdAt >= PENDING_UNKNOWN_MS;
       return (
-        <span className="badge badge-warn">{unknown ? t('audit.status.unknown') : t('audit.status.pending')}</span>
+        <>
+          <span className="badge badge-warn">{unknown ? t('audit.status.unknown') : t('audit.status.pending')}</span>
+          {unknown && <div className="muted">{t('audit.status.unknownHelp')}</div>}
+        </>
       );
     }
     if (e.status === 'succeeded') return <span className="badge badge-ok">{t('audit.status.succeeded')}</span>;

@@ -91,6 +91,18 @@ describe('throttle (D1。node:sqlite で実際の SQL を実行)', () => {
     expect((await th.acquire(KEY, T)).locked).toBe(true);
   });
 
+  it('global が上限(200)に達したら、失敗の記録も D1 に書かない', async () => {
+    expect(GLOBAL_D1_WRITE_LIMIT).toBe(200);
+    const db = await makeD1();
+    const store = new D1ThrottleStore(db);
+    for (let i = 0; i < GLOBAL_D1_WRITE_LIMIT; i++) await store.increment(GLOBAL_KEY, T, GLOBAL_WINDOW_MS);
+    const mem = new MemoryThrottleStore();
+    const th = new LoginThrottle({ db, memory: mem });
+    await th.recordFailure(T);
+    expect((await store.get(GLOBAL_KEY))?.failures).toBe(GLOBAL_D1_WRITE_LIMIT);
+    expect((await mem.get(GLOBAL_KEY))?.failures).toBe(1);
+  });
+
   it('D1 が失敗してもメモリで動く', async () => {
     const broken: ThrottleStore = {
       get: async () => {

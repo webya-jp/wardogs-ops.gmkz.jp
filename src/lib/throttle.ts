@@ -3,7 +3,7 @@
 //   15 分の窓で 5 回を超えたら評価せずに拒否する。成功したら行を消す。並行リクエストでも 5 回を超えて評価されない
 // - ロック中(窓内で 5 回に達している)は UPSERT の WHERE で更新しない(書き込みを増やさない)
 // - 全体(global): 失敗を 1 時間の窓で数えるだけ(全体ロックはしない)。50 回超で LOGIN_FAILURES_HIGH の警告。
-//   1,000 回を超えたら以後その時間は D1 に書かずメモリで近似する(D1 の書き込み枠を守る)
+//   200 回を超えたら以後その時間は D1 に書かずメモリで近似する(D1 の書き込み枠を守る。最悪でも 1 日 約 9,600 行)
 // - D1 が無い場合は isolate 内のメモリで同じ規則を近似する(isolate ごとに独立し、再起動で消える)
 import type { SetupWarning } from '../types/api';
 
@@ -13,8 +13,8 @@ export const IP_MAX_FAILURES = 5;
 export const GLOBAL_WINDOW_MS = 60 * 60 * 1000;
 /** これを超えたら画面に警告(SetupWarning の LOGIN_FAILURES_HIGH) */
 export const GLOBAL_ALERT_FAILURES = 50;
-/** これを超えたら D1 への書き込みを止めてメモリで近似する */
-export const GLOBAL_D1_WRITE_LIMIT = 1000;
+/** これを超えたら D1 への書き込みを止めてメモリで近似する(1 時間あたり。失敗 1 回 = 2 行なので最悪 200 × 2 × 24 = 9,600 行/日) */
+export const GLOBAL_D1_WRITE_LIMIT = 200;
 export const GLOBAL_KEY = 'global';
 
 export interface ThrottleRow {
