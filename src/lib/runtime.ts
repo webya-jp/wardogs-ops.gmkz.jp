@@ -4,11 +4,13 @@ import { env as workersEnv } from 'cloudflare:workers';
 import type { APIContext, APIRoute } from 'astro';
 import { discardBody, errName, jsonError, methodNotAllowed } from './http';
 import type { OpsEnv } from '../types/env';
-import { checkConfig, collectWarnings, getFeatures, getRconConfig } from './config';
-import type { ConfigCheck, FeatureState, RconConfig } from './config';
-import { getKeys } from './keys';
+import { checkConfig, collectWarnings, getFeatures } from './config';
+import type { ConfigCheck, FeatureState } from './config';
+import { getKeys, getServerPasswordKeys } from './keys';
 import type { DerivedKeys } from './keys';
-import { getAttachedSession } from './session';
+import { resolveServerForRead, serverCookieName } from './servers';
+import type { ResolvedServer, ServerContext, ServerOutcome } from './servers';
+import { getAttachedSession, readCookie } from './session';
 import type { SessionData } from './session';
 import type { SetupWarning } from '../types/api';
 
@@ -22,11 +24,13 @@ export const IS_DEV = import.meta.env.DEV;
 export interface ApiContext {
   env: OpsEnv;
   config: ConfigCheck;
-  rcon: RconConfig;
   keys: DerivedKeys;
   session: SessionData;
   state: FeatureState;
+  /** 設定と D1 の警告(SERVER_PASSWORDS_UNREADABLE は含まない。/api/session が一覧から足す) */
   warnings: SetupWarning[];
+  /** 対象サーバーの解決・サーバー API に使う */
+  servers: ServerContext;
 }
 
 /**
@@ -36,11 +40,26 @@ export interface ApiContext {
 export async function getApiContext(locals: object): Promise<ApiContext | null> {
   const env = getEnv();
   const config = checkConfig(env);
-  const rcon = getRconConfig(env);
   const session = getAttachedSession(locals);
-  if (!config.ok || !rcon || !session) return null;
-  const [keys, state] = await Promise.all([getKeys(env), getFeatures(env)]);
-  return { env, config, rcon, keys, session, state, warnings: collectWarnings(config, state) };
+  if (!config.ok || !session) return null;
+  const [keys, state, serverKeys] = await Promise.all([getKeys(env), getFeatures(env), getServerPasswordKeys(env)]);
+  return {
+    env,
+    config,
+    keys,
+    session,
+    state,
+    warnings: collectWarnings(config, state),
+    servers: { env, db: state.features.servers ? state.db : null, keys: serverKeys },
+  };
+}
+
+/**
+ * 読み取り API の対象サーバー(docs/API.md 1.2): クエリ `server` → 選択 Cookie → 最初に使えるサーバー
+ */
+export function resolveReadTarget(api: ApiContext, request: Request): Promise<ServerOutcome<ResolvedServer>> {
+  const query = new URL(request.url).searchParams.get('server');
+  return resolveServerForRead(api.servers, query, readCookie(request, serverCookieName(IS_DEV)));
 }
 
 /**

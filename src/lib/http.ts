@@ -123,7 +123,11 @@ export async function discardBody(request: Request, maxBytes = DRAIN_MAX_BYTES):
 
 export type JsonBodyResult = { ok: true; body: unknown } | { ok: false; response: Response };
 
-/** Content-Type(application/json 必須)・サイズ(8 KiB)・JSON を確認して読む */
+/**
+ * Content-Type(application/json 必須)・サイズ(8 KiB)・JSON を確認して読む。
+ * POST / PUT / DELETE で共通(docs/API.md 1 章)。本文が空なら JSON として読めないので 400 BAD_REQUEST
+ * (本文の無い DELETE は受け付けない)
+ */
 export async function readJsonBody(request: Request, maxBytes: number = MAX_REQUEST_BYTES): Promise<JsonBodyResult> {
   const ct = request.headers.get('Content-Type') ?? '';
   if (!/^application\/json\s*(;|$)/i.test(ct)) {

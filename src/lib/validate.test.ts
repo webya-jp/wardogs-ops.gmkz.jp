@@ -58,10 +58,13 @@ describe('validate', () => {
     expect(validateActionRequest({ action: 'map', params: { map: 'a'.repeat(129) } })).toEqual({ ok: false, fields: { map: 'invalid_format' } });
   });
 
-  it('/api/audit の limit / before', () => {
+  it('/api/audit の kind / server / limit / before', () => {
     const q = (s: string) => parseAuditQuery(new URL(`https://x.test/api/audit${s}`), 100);
-    expect(q('')).toEqual({ ok: true, limit: 50, before: null });
-    expect(q('?limit=100&before=42')).toEqual({ ok: true, limit: 100, before: 42 });
+    expect(q('')).toEqual({ ok: true, kind: 'operations', server: 'all', limit: 50, before: null });
+    expect(q('?limit=100&before=42')).toEqual({ ok: true, kind: 'operations', server: 'all', limit: 100, before: 42 });
+    expect(q('?kind=settings&server=3')).toMatchObject({ ok: true, kind: 'settings', server: '3' });
+    expect(q('?server=default')).toMatchObject({ ok: true, server: 'default' });
+    expect(q('?kind=x&server=03')).toEqual({ ok: false, fields: { kind: 'invalid_format', server: 'invalid_format' } });
     expect(q('?limit=0')).toEqual({ ok: false, fields: { limit: 'invalid_format' } });
     expect(q('?limit=101')).toEqual({ ok: false, fields: { limit: 'invalid_format' } });
     expect(q('?before=-1')).toEqual({ ok: false, fields: { before: 'invalid_format' } });

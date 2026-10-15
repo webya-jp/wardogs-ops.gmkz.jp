@@ -52,6 +52,58 @@ export function getKeys(env: OpsEnv): Promise<DerivedKeys> {
 }
 
 // ------------------------------------------------------------
+// 登録サーバーの RCON パスワードの暗号鍵(AES-256-GCM)。docs/ARCHITECTURE.md 15.3
+// ikm は上の鍵と分ける: k = "s" は SESSION_SECRET だけ、k = "a" は ADMIN_PASSWORD だけ
+// ------------------------------------------------------------
+
+/** 鍵の出所。s = SESSION_SECRET 由来、a = ADMIN_PASSWORD 由来 */
+export type ServerKeyId = 's' | 'a';
+
+export interface ServerPasswordKeys {
+  /** SESSION_SECRET が設定されているときだけ非 null */
+  s: CryptoKey | null;
+  /** ADMIN_PASSWORD が設定されているときだけ非 null */
+  a: CryptoKey | null;
+  /** 新しく暗号化するときに使う鍵の出所(SESSION_SECRET があれば s)。どちらも無ければ null */
+  preferred: ServerKeyId | null;
+}
+
+export async function deriveServerPasswordKey(secret: string): Promise<CryptoKey> {
+  const base = await crypto.subtle.importKey('raw', enc.encode(secret), 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode(SALT), info: enc.encode('server-password') },
+    base,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+}
+
+export async function deriveServerPasswordKeysFrom(sessionSecret: string, adminPassword: string): Promise<ServerPasswordKeys> {
+  const [s, a] = await Promise.all([
+    sessionSecret === '' ? Promise.resolve(null) : deriveServerPasswordKey(sessionSecret),
+    adminPassword === '' ? Promise.resolve(null) : deriveServerPasswordKey(adminPassword),
+  ]);
+  return { s, a, preferred: s ? 's' : a ? 'a' : null };
+}
+
+let serverKeysCache: { ikm: string; keys: Promise<ServerPasswordKeys> } | null = null;
+
+/** env から暗号鍵を派生する(isolate 内で直近 1 組だけキャッシュ) */
+export function getServerPasswordKeys(env: OpsEnv): Promise<ServerPasswordKeys> {
+  const ss = env.SESSION_SECRET ?? '';
+  const ap = env.ADMIN_PASSWORD ?? '';
+  const ikm = `${ss}\u0000${ap}`;
+  if (serverKeysCache && serverKeysCache.ikm === ikm) return serverKeysCache.keys;
+  const keys = deriveServerPasswordKeysFrom(ss, ap);
+  serverKeysCache = { ikm, keys };
+  keys.catch(() => {
+    if (serverKeysCache?.keys === keys) serverKeysCache = null;
+  });
+  return keys;
+}
+
+// ------------------------------------------------------------
 // エンコード・HMAC
 // ------------------------------------------------------------
 

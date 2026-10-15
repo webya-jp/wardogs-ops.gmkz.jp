@@ -1,4 +1,4 @@
-// POST /api/actions/prepare → PrepareResponse(docs/API.md 4 章)
+// POST /api/actions/prepare → PrepareResponse(docs/API.md 4 章。本文の server は必須)
 import { prepareAction } from '../../../lib/actions';
 import { hashClientIp } from '../../../lib/keys';
 import { clientIp, jsonError, jsonOk, readJsonBody } from '../../../lib/http';
@@ -11,7 +11,7 @@ export const POST = apiHandler(async (api, context) => {
   const r = await prepareAction(
     {
       keys: api.keys,
-      rcon: api.rcon,
+      servers: api.servers,
       session: api.session,
       db: api.state.db,
       writesEnabled: api.state.features.writes,

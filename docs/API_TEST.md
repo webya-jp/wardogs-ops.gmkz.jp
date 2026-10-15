@@ -1,6 +1,6 @@
 # API 動作確認記録
 
-確認日: 2026-10-15(JST)/ 担当: backend(同日、QA レビュー M-2・M-3・M-4・M-6 の修正後に N-18・E-4・E-6b・E-25〜E-27 と 4 章を再確認)
+確認日: 2026-10-15(JST)/ 担当: backend(同日、QA レビュー M-2・M-3・M-4・M-6 の修正後に N-18・E-4・E-6b・E-25〜E-27 と 4 章を再確認)/ 2026-10-16: 複数サーバー対応(5 章)
 対象: `docs/API.md` の各エンドポイント。値(パスワード・Cookie・接続先)は記録しない。
 
 ## 1. 確認環境
@@ -85,3 +85,82 @@
 - 2026-10-15 の初回確認では、Astro 標準の origin 検査(本文を読まずに 403 を返す)の直後に同じ接続(keep-alive)で送ったリクエストが開発サーバーで 500 になっていた。`astro.config.mjs` を `checkOrigin: false` にしたため、今は 403 をすべて本パネルの middleware が返し、拒否の前に本文を読み捨てるので、再確認では 403 の直後のリクエストも正常だった(E-4)。本番の Workers では未確認。
 - 開発サーバー(astro dev)だけの事象: `Sec-Fetch-Site: cross-site` かつ画面遷移でないリクエストは、Vite の開発サーバーが本パネルより先に 403(`Cross-origin request blocked`、text/plain、セキュリティヘッダなし)を返す。本番のビルドには無い仕組みなので、本番では本パネルの middleware が 403 を返す想定(本番での確認は未実施)。
 - RCON の実サーバーでの挙動(ルートの実在、応答形式、エラー形式)は未確認(`docs/ARCHITECTURE.md` 14 章 R-1〜R-17)。
+
+## 5. 複数サーバー(2026-10-16)
+
+`docs/ARCHITECTURE.md` 第 15 章・`docs/API.md` 1.2・7 章。値(パスワード・Cookie・接続先)は記録しない。
+
+### 5.1 確認環境
+
+| 項目 | 内容 |
+|---|---|
+| RCON | `scripts/mock-rcon.mjs` を `MOCK_RCON_PORTS` で 2 ポート同時に起動(サーバー名 `Mock Server <ポート>`、ポートごとに人数・プレイヤー名が違う)。2 台目だけ `MOCK_RCON_PASSWORDS` で別のダミーパスワード。ポートは開発機の空きポート(既定の 7776 / 7777 とは別)を使った |
+| Worker | `pnpm dev`(astro dev。Cookie 名 `wo_session` / `wo_server`) |
+| Secrets | `.dev.vars` から `RCON_URL` / `RCON_PASSWORD` を**外し**、`ADMIN_PASSWORD` だけにした状態(確認後に元へ戻した) |
+| D1 | ローカル D1 に `pnpm db:migrate:local` で `0002_servers.sql` を適用 |
+| 手段 | Node の `fetch` で書いた確認スクリプト(リポジトリ外)。サーバーの追加はホスト名 `localhost` |
+| 単体テスト | `pnpm test`(vitest、11 ファイル・93 件すべて成功)。`pnpm check` エラー 0、`pnpm build` 成功 |
+
+### 5.2 正常系
+
+| # | 操作 | 期待 | 結果 |
+|---|---|---|---|
+| S-N1 | RCON の Secrets なしで `GET /` | `/setup` ではなく `/login` へ 303(ログインを止めない) | OK |
+| S-N2 | `POST /login` → `GET /api/session` | ログイン成功。`features.servers: true`、`warnings` に `RCON_*` が無い | OK |
+| S-N3 | `GET /api/servers`(0 台) | 200、`servers: []`、`manageable: true`、`limit: 20` | OK |
+| S-N4 | `POST /api/servers`(1 台目・2 台目。2 台目はホスト名を大文字で入力) | 201、`test.ok: true`、`test.serverName` がそれぞれのモックの名前、`host` は小文字に正規化。応答にパスワード・暗号文(`v1.a.` 等)を含まない | OK |
+| S-N5 | `GET /api/status?server=<1 台目>` / `?server=<2 台目>` | サーバー名・人数がそれぞれ別の値 | OK |
+| S-N6 | `GET /api/players?server=` / `GET /api/capabilities?server=` | 指定したサーバーの一覧・capabilities | OK |
+| S-N7 | `GET /api/status`(`server` 省略) | 表示順で最初に使えるサーバー | OK |
+| S-N8 | `server` 省略 + 選択 Cookie(2 台目) | 2 台目 | OK |
+| S-N9 | `server` 省略 + 選択 Cookie が削除済みの id | 無視して最初に使えるサーバー | OK |
+| S-N10 | prepare kick(`server` = 1 台目) | 200、`server` が 1 台目、`targetName` が 1 台目のプレイヤー名 | OK |
+| S-N11 | execute kick(同じ `server`) | 200、`server` と `auditId`。1 台目だけ人数が 1 減り、2 台目は変わらない(モックのログでも kick は 1 台目のポートにだけ届いた) | OK |
+| S-N12 | `GET /api/audit?limit=10` | kick の行が `serverId` = 1 台目、`serverName` = 登録した表示名、`operator` 付き。login の行は `serverId: null` / `serverName: null` | OK |
+| S-N13 | `GET /api/audit?server=<1 台目>` | 1 台目の書き込み操作だけ(login / logout を含まない) | OK |
+| S-N14 | `GET /api/audit?kind=settings` | `kind: "settings"`、`server_add` が追加した台数分。パスワードを含まない | OK |
+| S-N15 | `PUT /api/servers/:id`(改名 + 無効化) | 200、`name`・`enabled: false`、`test: null`(接続に関わる項目を変えていないので接続テストしない) | OK |
+| S-N16 | `POST /api/servers/:id/test` | 200、`test.ok: true` | OK |
+| S-N17 | `DELETE /api/servers/:id`(現在の表示名を `confirmName` に) | 200、`deletedId`。以後その id は 404 | OK |
+| S-N18 | `GET /api/servers`(削除後) | 残りの台数。パスワード・暗号文を含まない | OK |
+| S-N19 | `POST /logout` | `wo_session` と `wo_server` の両方を `Max-Age=0` で削除 | OK |
+| S-N20 | dev サーバーのログ | RCON の失敗はルート名・ステータス・所要時間・コードだけ。接続先・パスワード・`Authorization` は出ない | OK |
+
+### 5.3 異常系
+
+| # | 操作 | 期待 | 結果 |
+|---|---|---|---|
+| S-E1 | 0 台で `GET /api/status`(`server` 省略) | 409 `NO_SERVERS` | OK |
+| S-E2 | Secrets なしで `?server=default` | 404 `SERVER_NOT_FOUND` | OK |
+| S-E3 | ホスト名に IP アドレス | 400、`fields.host = ip_address` | OK |
+| S-E4 | 既存と同じ表示名・ホスト名 + ポート | 400、`fields.name = duplicate`、`fields.host = duplicate` | OK |
+| S-E5 | ホスト名に `http://…:ポート` を貼り付け、ポート 70000、パスワードが `ADMIN_PASSWORD` と同じ | 400、`host = invalid_format`、`port = out_of_range`、`password = same_as_admin_password` | OK |
+| S-E6 | モックの無いポートを登録 | 201 で保存され、`test.ok: false`、`test.code = RCON_UNREACHABLE`(接続テストの失敗で保存を取り消さない) | OK |
+| S-E7 | 本文が JSON の文字列(オブジェクトでない) | 400 `BAD_REQUEST` | OK |
+| S-E8 | 別オリジンの POST / `text/plain` の POST | 403 `FORBIDDEN_ORIGIN` / 415 | OK |
+| S-E9 | `?server=999`(存在しない)/ `?server=abc`(形式不正) | 404 `SERVER_NOT_FOUND` / 400 `fields.server = invalid_format` | OK |
+| S-E10 | prepare に `server` が無い | 400、`fields.server = required`(監査ログに残さない) | OK |
+| S-E11 | 1 台目で prepare したトークンを、`server` = 2 台目で execute | 400 `CONFIRM_INVALID`。RCON は呼ばない。監査ログに `status: failed`・`serverId` = 2 台目で 1 行残る | OK |
+| S-E12 | 宛先(ポート)だけを変える PUT(パスワードなし) | 400、`fields.password = reenter_required` | OK |
+| S-E13 | 無効にしたサーバーの `GET /api/status` | 409 `SERVER_DISABLED` | OK |
+| S-E14 | `PUT /api/servers/default` | 409 `SERVER_READ_ONLY` | OK |
+| S-E15 | 同じサーバーの接続テストを 5 秒以内に再実行 | 429 `RATE_LIMITED`、`retryAfterSec` 付き | OK |
+| S-E16 | DELETE の `confirmName` が現在の表示名と違う | 400、`fields.confirmName = mismatch` | OK |
+| S-E17 | 本文の無い DELETE | 400 `BAD_REQUEST` | OK |
+| S-E18 | `GET /api/audit?kind=bad` | 400、`fields.kind = invalid_format` | OK |
+
+### 5.4 単体テストのみで確認した項目
+
+- 暗号化(`src/lib/servers.test.ts`): AES-256-GCM の往復、暗号文に平文を含まないこと、IV が毎回変わること。AAD(宛先・スキーム・鍵の出所 `k`)が違うと復号できないこと。鍵の切り替え(`s` は SESSION_SECRET だけ、`a` は ADMIN_PASSWORD だけに依存)。ADMIN_PASSWORD を変えると `needsPassword: true`・`SERVER_NEEDS_PASSWORD`・`unreadable`(警告 `SERVER_PASSWORDS_UNREADABLE`)、パスワードの入れ直しで解消。SESSION_SECRET 設定後の `a` → `s` の再暗号化(1 回きり、`updated_at`・変更ログを変えない)
+- 上限 20 台(既定サーバーは数えない)で `SERVER_LIMIT_REACHED`、削除した id を再利用しないこと、変更ログの `params`(パスワードを含まない)
+- ホスト名の検証(小文字化・末尾の `.`・10 進 1 語の IPv4・IPv6・`@`・空白・253 文字超・国際化ドメイン名の punycode)、ポート・並び順の範囲
+- 既定サーバー: 両方ありで使える、片方だけで `NOT_CONFIGURED`(一覧に `secretsIssue`)、両方なしで一覧に出ず `SERVER_NOT_FOUND`。接続テストの結果はメモリだけ
+- 確認トークン(`src/lib/confirm.test.ts`): `sv`(別サーバーの id)・`sh`(同じ id で宛先が変わった)のすり替えを `CONFIRM_INVALID`、期限切れより先に判定。`sv` の無い旧形式のトークンは `CONFIRM_INVALID`。トークンに baseUrl そのものを入れないこと
+- execute(`src/lib/actions.test.ts`): prepare 後にポートを変えたら `CONFIRM_INVALID`、無効にしたら `SERVER_DISABLED`(いずれも監査ログに `server_id` 付きで 1 行)、トークンが不正なら サーバーの状態より `CONFIRM_INVALID` を優先
+- D1 の判定(`src/lib/config.test.ts`): 0001 だけ適用した D1 は `not_migrated`(`features` がすべて false)、0002 まで適用で `servers: true`
+- 選択(`selectServer`): クエリ → Cookie → 最初の usable → 先頭。クエリの id が無い・形式不正なら切り替えない(`notFound`)
+
+### 5.5 未確認
+
+- ページの選択 Cookie の発行(`?server=` で決まったとき)は、`getPageContext(request, locals, Astro.response)` のように第 3 引数を渡したページでだけ行う。現状のページ(frontend 担当)はまだ渡していないため、`GET /?server=…` で `Set-Cookie: wo_server` が出ないことを確認した(frontend の対応後に再確認する)
+- `wrangler dev`(本番ビルド、`__Host-wo_server`)と本番 D1 での `db.batch()` の原子性(M-2)は未確認

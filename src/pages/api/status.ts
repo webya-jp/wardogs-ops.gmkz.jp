@@ -1,15 +1,18 @@
-// GET /api/status → StatusResponse(RCON GET /v1/status。成功時は人数スナップショットを応答後に記録。docs/ARCHITECTURE.md 4.2・4.4)
+// GET /api/status?server=<id> → StatusResponse(RCON GET /v1/status。成功時は人数スナップショットを応答後に記録。
+// docs/ARCHITECTURE.md 4.2・4.4・15.6。対象サーバーは docs/API.md 1.2)
 import { getWaitUntil, jsonError, jsonOk } from '../../lib/http';
 import { readFromRcon } from '../../lib/reads';
 import { normalizeStatus } from '../../lib/rcon/normalize';
-import { apiHandler, methodNotAllowedRoute } from '../../lib/runtime';
+import { apiHandler, methodNotAllowedRoute, resolveReadTarget } from '../../lib/runtime';
 import { recordSnapshot } from '../../lib/snapshots';
 
 export const GET = apiHandler(async (api, context) => {
-  const r = await readFromRcon(api.rcon, 'status', normalizeStatus);
+  const target = await resolveReadTarget(api, context.request);
+  if (!target.ok) return jsonError(target.code, target.opts);
+  const r = await readFromRcon(target.data, 'status', normalizeStatus);
   if (!r.ok) return jsonError(r.code, r.opts);
   const db = api.state.features.snapshots ? api.state.db : null;
-  if (db) getWaitUntil(context.locals)(recordSnapshot(db, r.data));
+  if (db) getWaitUntil(context.locals)(recordSnapshot(db, target.data.id, r.data));
   return jsonOk(r.data);
 });
 

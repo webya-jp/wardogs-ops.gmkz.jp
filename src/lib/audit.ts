@@ -2,8 +2,10 @@
 // - 書き込み操作は実行前に pending で INSERT(confirm_nonce の UNIQUE で 1 回限り)→ RCON の結果で succeeded / failed に UPDATE
 // - 表示文言は保存しない(event + params + target_name を保存し、画面がカタログで組み立てる)
 // - 生の IP・パスワード・Cookie・RCON の接続先は保存しない
-import { API_ERROR_CODES } from '../types/api';
-import type { ApiErrorCode, AuditEntry, AuditEventType, AuditStatus, WriteAction } from '../types/api';
+// - 書き込み操作の行には対象サーバー(server_id: 既定は NULL、server_name: その時点の表示名)を残す(ARCHITECTURE 15.6)
+// - サーバー設定の変更は settings_audit_log(別テーブル。listSettingsAudit)
+import { API_ERROR_CODES, DEFAULT_SERVER_ID, SETTINGS_EVENTS } from '../types/api';
+import type { ApiErrorCode, AuditEntry, AuditEventType, AuditStatus, ServerId, WriteAction } from '../types/api';
 
 export const AUDIT_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
 export const SNAPSHOT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -15,7 +17,14 @@ export interface AuditActor {
   ipHash: string | null;
 }
 
-export interface PendingInput extends AuditActor {
+/** 書き込み操作の対象サーバー(audit_log の server_id / server_name) */
+export interface AuditServer {
+  /** servers.id。既定サーバーは null */
+  serverId: number | null;
+  serverName: string | null;
+}
+
+export interface PendingInput extends AuditActor, AuditServer {
   now: number;
   event: AuditEventType;
   targetSteamId: string | null;
@@ -30,8 +39,8 @@ export async function insertPending(db: D1Database, p: PendingInput): Promise<nu
   const row = await db
     .prepare(
       `INSERT INTO audit_log (created_at, event, status, operator, session_tag, ip_hash,
-                              target_steam_id, target_name, params_json, rcon_route, confirm_nonce)
-       VALUES (?1, ?2, 'pending', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                              target_steam_id, target_name, params_json, rcon_route, confirm_nonce, server_id, server_name)
+       VALUES (?1, ?2, 'pending', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
        ON CONFLICT(confirm_nonce) DO NOTHING
        RETURNING id`,
     )
@@ -46,6 +55,8 @@ export async function insertPending(db: D1Database, p: PendingInput): Promise<nu
       JSON.stringify(p.params),
       p.rconRoute,
       p.nonce,
+      p.serverId,
+      p.serverName,
     )
     .first<{ id: number }>();
   return row ? Number(row.id) : 'duplicate';
@@ -69,9 +80,10 @@ export async function finishAudit(
  */
 export async function recordRejected(
   db: D1Database,
-  e: AuditActor & {
-    now: number;
-    event: WriteAction;
+  e: AuditActor &
+    AuditServer & {
+      now: number;
+      event: WriteAction;
     targetSteamId: string | null;
     params: Record<string, unknown>;
     errorCode: ApiErrorCode;
@@ -80,10 +92,21 @@ export async function recordRejected(
   await db
     .prepare(
       `INSERT INTO audit_log (created_at, finished_at, event, status, operator, session_tag, ip_hash,
-                              target_steam_id, params_json, error_code)
-       VALUES (?1, ?1, ?2, 'failed', ?3, ?4, ?5, ?6, ?7, ?8)`,
+                              target_steam_id, params_json, error_code, server_id, server_name)
+       VALUES (?1, ?1, ?2, 'failed', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
     )
-    .bind(e.now, e.event, e.operator, e.sessionTag, e.ipHash, e.targetSteamId, JSON.stringify(e.params), e.errorCode)
+    .bind(
+      e.now,
+      e.event,
+      e.operator,
+      e.sessionTag,
+      e.ipHash,
+      e.targetSteamId,
+      JSON.stringify(e.params),
+      e.errorCode,
+      e.serverId,
+      e.serverName,
+    )
     .run();
 }
 
@@ -114,6 +137,8 @@ export interface AuditRow {
   params_json: string | null;
   rcon_status: number | null;
   error_code: string | null;
+  server_id: number | null;
+  server_name: string | null;
 }
 
 const ERROR_CODES: ReadonlySet<string> = new Set(API_ERROR_CODES);
@@ -123,14 +148,21 @@ export function toApiStatus(status: string, errorCode: string | null): AuditStat
   return status === 'failed' && errorCode === 'RCON_TIMEOUT' ? 'unknown' : (status as AuditStatus);
 }
 
-export function toEntry(r: AuditRow): AuditEntry {
-  let params: Record<string, unknown> = {};
+function parseParams(json: string | null): Record<string, unknown> {
   try {
-    const v: unknown = JSON.parse(r.params_json ?? '{}');
-    if (typeof v === 'object' && v !== null && !Array.isArray(v)) params = v as Record<string, unknown>;
+    const v: unknown = JSON.parse(json ?? '{}');
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) return v as Record<string, unknown>;
   } catch {
-    params = {};
+    // 壊れた行は空として扱う
   }
+  return {};
+}
+
+const SESSION_EVENTS: ReadonlySet<string> = new Set(['login', 'logout']);
+
+export function toEntry(r: AuditRow): AuditEntry {
+  const params = parseParams(r.params_json);
+  const isSession = SESSION_EVENTS.has(r.event);
   return {
     id: Number(r.id),
     createdAt: Number(r.created_at),
@@ -144,24 +176,120 @@ export function toEntry(r: AuditRow): AuditEntry {
     params,
     rconStatus: r.rcon_status === null ? null : Number(r.rcon_status),
     errorCode: r.error_code !== null && ERROR_CODES.has(r.error_code) ? (r.error_code as ApiErrorCode) : null,
+    // login / logout はサーバーに関係しない。書き込み操作で NULL は既定サーバー(0002 以前の行を含む)
+    serverId: isSession ? null : r.server_id === null || r.server_id === undefined ? DEFAULT_SERVER_ID : String(r.server_id),
+    serverName: isSession ? null : (r.server_name ?? null),
   };
 }
 
+/** /api/audit の server(all = 絞り込みなし) */
+export type AuditServerFilter = 'all' | ServerId;
+
+function pageOf(rows: AuditEntry[], limit: number): { entries: AuditEntry[]; nextBefore: number | null } {
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return { entries: page, nextBefore: rows.length > limit && last ? last.id : null };
+}
+
+/**
+ * 操作ログ(audit_log)。server を指定すると、その対象サーバーの書き込み操作だけ(login / logout は除く)。
+ * default は server_id IS NULL の書き込み操作
+ */
 export async function listAudit(
   db: D1Database,
-  q: { limit: number; before: number | null },
+  q: { limit: number; before: number | null; server?: AuditServerFilter },
 ): Promise<{ entries: AuditEntry[]; nextBefore: number | null }> {
   const cols = `id, created_at, finished_at, event, status, operator, session_tag, target_steam_id, target_name,
-                params_json, rcon_status, error_code`;
-  const stmt =
-    q.before === null
-      ? db.prepare(`SELECT ${cols} FROM audit_log ORDER BY id DESC LIMIT ?1`).bind(q.limit + 1)
-      : db.prepare(`SELECT ${cols} FROM audit_log WHERE id < ?2 ORDER BY id DESC LIMIT ?1`).bind(q.limit + 1, q.before);
-  const { results } = await stmt.all<AuditRow>();
+                params_json, rcon_status, error_code, server_id, server_name`;
+  const where: string[] = [];
+  const args: unknown[] = [q.limit + 1];
+  if (q.before !== null) {
+    args.push(q.before);
+    where.push(`id < ?${args.length}`);
+  }
+  const server = q.server ?? 'all';
+  if (server !== 'all') {
+    where.push(`event NOT IN ('login', 'logout')`);
+    if (server === DEFAULT_SERVER_ID) where.push('server_id IS NULL');
+    else {
+      args.push(Number(server));
+      where.push(`server_id = ?${args.length}`);
+    }
+  }
+  const sql = `SELECT ${cols} FROM audit_log${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?1`;
+  const { results } = await db
+    .prepare(sql)
+    .bind(...args)
+    .all<AuditRow>();
+  return pageOf((results ?? []).map(toEntry), q.limit);
+}
+
+interface SettingsRow {
+  id: number;
+  created_at: number;
+  event: string;
+  operator: string | null;
+  session_tag: string | null;
+  server_id: number | null;
+  server_name: string | null;
+  params_json: string | null;
+}
+
+const SETTINGS_EVENT_SET: ReadonlySet<string> = new Set(SETTINGS_EVENTS);
+
+function toSettingsEntry(r: SettingsRow): AuditEntry {
+  return {
+    id: Number(r.id),
+    createdAt: Number(r.created_at),
+    finishedAt: Number(r.created_at),
+    event: r.event as AuditEventType,
+    status: 'succeeded',
+    operator: r.operator,
+    sessionTag: r.session_tag,
+    targetSteamId: null,
+    targetName: null,
+    params: parseParams(r.params_json),
+    rconStatus: null,
+    errorCode: null,
+    serverId: r.server_id === null ? null : String(r.server_id),
+    serverName: r.server_name ?? null,
+  };
+}
+
+/**
+ * 設定変更ログ(settings_audit_log)。status は常に succeeded、target・rcon・error は null。
+ * 既定サーバーの変更は記録しないので server=default は常に 0 件。event はコード側で検証する(未知の値は飛ばす)
+ */
+export async function listSettingsAudit(
+  db: D1Database,
+  q: { limit: number; before: number | null; server?: AuditServerFilter },
+): Promise<{ entries: AuditEntry[]; nextBefore: number | null }> {
+  const server = q.server ?? 'all';
+  if (server === DEFAULT_SERVER_ID) return { entries: [], nextBefore: null };
+  const where: string[] = [];
+  const args: unknown[] = [q.limit + 1];
+  if (q.before !== null) {
+    args.push(q.before);
+    where.push(`id < ?${args.length}`);
+  }
+  if (server !== 'all') {
+    args.push(Number(server));
+    where.push(`server_id = ?${args.length}`);
+  }
+  const sql = `SELECT id, created_at, event, operator, session_tag, server_id, server_name, params_json
+                 FROM settings_audit_log${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?1`;
+  const { results } = await db
+    .prepare(sql)
+    .bind(...args)
+    .all<SettingsRow>();
   const rows = results ?? [];
-  const page = rows.slice(0, q.limit).map(toEntry);
+  const page = rows.slice(0, q.limit);
   const last = page[page.length - 1];
-  return { entries: page, nextBefore: rows.length > q.limit && last ? last.id : null };
+  return {
+    entries: page.filter((r) => SETTINGS_EVENT_SET.has(r.event)).map(toSettingsEntry),
+    // 未知の event を飛ばしても、次のページの位置は行の id で決める
+    nextBefore: rows.length > q.limit && last ? Number(last.id) : null,
+  };
 }
 
 /** BAN 一覧の名前補完: 成功した ban の、同じ Steam ID の最新の target_name */
@@ -200,7 +328,9 @@ export async function lastKnownName(db: D1Database, steamId: string): Promise<st
 export async function cleanupOldRows(db: D1Database, now: number): Promise<void> {
   await db.batch([
     db.prepare('DELETE FROM audit_log WHERE created_at < ?1').bind(now - AUDIT_RETENTION_MS),
+    db.prepare('DELETE FROM settings_audit_log WHERE created_at < ?1').bind(now - AUDIT_RETENTION_MS),
     db.prepare('DELETE FROM status_snapshots WHERE taken_at < ?1').bind(now - SNAPSHOT_RETENTION_MS),
+    db.prepare('DELETE FROM server_snapshots WHERE taken_at < ?1').bind(now - SNAPSHOT_RETENTION_MS),
     db.prepare('DELETE FROM login_throttle WHERE window_start < ?1').bind(now - THROTTLE_RETENTION_MS),
   ]);
 }

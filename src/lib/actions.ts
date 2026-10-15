@@ -1,17 +1,18 @@
-// 書き込み操作の二段階(prepare → execute)。docs/ARCHITECTURE.md 4.3・7 章、docs/API.md 4 章。
+// 書き込み操作の二段階(prepare → execute)。docs/ARCHITECTURE.md 4.3・7 章・15.6、docs/API.md 4 章。
 // env・D1・fetch は引数で受け取る(cloudflare:workers に依存させない)。
+// 対象サーバーは本文の `server`(必須)。prepare・execute のそれぞれで D1 から解決し直す(isolate にキャッシュしない)。
 import type {
   ActionRequest,
   ApiErrorCode,
   CapabilityState,
   ExecuteResponse,
   PrepareResponse,
+  ServerId,
   ValidationIssue,
   WriteAction,
 } from '../types/api';
 import { finishAudit, insertPending, lastKnownName, logWithoutAudit, recordRejected } from './audit';
-import type { RconConfig } from './config';
-import { claimNonceInMemory, issueConfirmToken, verifyConfirmToken } from './confirm';
+import { claimNonceInMemory, confirmTokenBaseValid, issueConfirmToken, verifyConfirmToken } from './confirm';
 import { isPlainObject } from './http';
 import type { ErrorOptions } from './http';
 import type { DerivedKeys } from './keys';
@@ -20,6 +21,8 @@ import type { ClientDeps, RconResult } from './rcon/client';
 import { getCapabilities, invalidateCapabilities } from './rcon/capabilities';
 import { normalizeMaps, normalizePlayers } from './rcon/normalize';
 import { buildWriteRequest, READ_ROUTES, routeKey } from './rcon/routes';
+import { auditServerIdOf, parseServerParam, resolveServer } from './servers';
+import type { ResolvedServer, ServerContext } from './servers';
 import type { SessionData } from './session';
 import { isDestructive, isWriteAction, targetSteamIdOf, validateActionRequest } from './validate';
 
@@ -31,7 +34,8 @@ export type ActionOutcome<T> = { ok: true; data: T } | { ok: false; code: ApiErr
 
 export interface ActionContext {
   keys: DerivedKeys;
-  rcon: RconConfig;
+  /** 対象サーバーの解決に使う(env・D1・暗号鍵) */
+  servers: ServerContext;
   session: SessionData;
   /** D1 が使えるときだけ非 null */
   db: D1Database | null;
@@ -42,12 +46,24 @@ export interface ActionContext {
   now?: number;
 }
 
-function fromRcon(r: Extract<RconResult, { ok: false }>): ActionOutcome<never> {
+function fromRcon(server: ResolvedServer, r: Extract<RconResult, { ok: false }>): ActionOutcome<never> {
   const opts: ErrorOptions = {};
   if (r.retryAfterSec !== undefined) opts.retryAfterSec = r.retryAfterSec;
   if (r.rconMessage !== undefined) opts.rconMessage = r.rconMessage;
-  if (r.code === 'RCON_ROUTE_NOT_FOUND') invalidateCapabilities();
+  if (r.code === 'RCON_ROUTE_NOT_FOUND') invalidateCapabilities(server.id);
   return { ok: false, code: r.code, opts };
+}
+
+/** 監査ログに残す対象サーバー。解決できなかった場合も、指定された id は残す(名前は不明) */
+interface RejectServer {
+  serverId: number | null;
+  serverName: string | null;
+}
+
+function rejectServerOf(server: ResolvedServer | ServerId | null): RejectServer {
+  if (server === null) return { serverId: null, serverName: null };
+  if (typeof server === 'string') return { serverId: auditServerIdOf(server), serverName: null };
+  return { serverId: server.auditServerId, serverName: server.name };
 }
 
 /**
@@ -59,6 +75,7 @@ async function reject<T>(
   action: WriteAction | null,
   params: Record<string, unknown>,
   code: ApiErrorCode,
+  server: ResolvedServer | ServerId | null = null,
 ): Promise<ActionOutcome<T>> {
   const sessionTag = ctx.session.sid.slice(0, 8);
   if (ctx.db && action) {
@@ -72,6 +89,7 @@ async function reject<T>(
       targetSteamId: steamId,
       params,
       errorCode: code,
+      ...rejectServerOf(server),
     }).catch(() => undefined);
   } else {
     logWithoutAudit(action ?? 'unknown', code, sessionTag);
@@ -83,32 +101,51 @@ function invalid(fields: Record<string, ValidationIssue>): ActionOutcome<never> 
   return { ok: false, code: 'VALIDATION_FAILED', opts: { fields } };
 }
 
+/** action / params と server をまとめて検証する(入力検証の失敗は記録しない) */
+function validateWithServer(body: unknown):
+  | { ok: true; request: ActionRequest; server: ServerId }
+  | { ok: false; fields: Record<string, ValidationIssue> } {
+  const v = validateActionRequest(body);
+  const sv = parseServerParam(isPlainObject(body) ? body.server : undefined);
+  const fields: Record<string, ValidationIssue> = v.ok ? {} : { ...v.fields };
+  if (!sv.ok) fields.server = sv.issue;
+  if (!v.ok || !sv.ok) return { ok: false, fields };
+  return { ok: true, request: v.request, server: sv.id };
+}
+
 export async function prepareAction(ctx: ActionContext, body: unknown): Promise<ActionOutcome<PrepareResponse>> {
   if (!ctx.writesEnabled) return reject(ctx, actionOf(body), {}, 'WRITES_DISABLED');
-  const v = validateActionRequest(body);
+  const v = validateWithServer(body);
   if (!v.ok) return invalid(v.fields);
   const req = v.request;
 
-  const caps = await getCapabilities(ctx.rcon, ctx.deps);
+  const resolved = await resolveServer(ctx.servers, v.server);
+  if (!resolved.ok) return resolved;
+  const server = resolved.data;
+
+  const caps = await getCapabilities({ serverId: server.id, rcon: server.rcon }, ctx.deps);
   const capability: CapabilityState = caps.write[req.action];
-  if (capability === 'missing') return reject(ctx, req.action, req.params as Record<string, unknown>, 'CAPABILITY_MISSING');
+  if (capability === 'missing') {
+    return reject(ctx, req.action, req.params as Record<string, unknown>, 'CAPABILITY_MISSING', server);
+  }
 
   // 対象の名前解決
   let targetName: string | null = null;
   const sid = targetSteamIdOf(req);
   if (req.action === 'kick' || req.action === 'ban' || req.action === 'message') {
-    const r = await rconRequest(ctx.rcon, { route: READ_ROUTES.players, path: READ_ROUTES.players.template, timeoutMs: READ_TIMEOUT_MS }, ctx.deps);
-    if (!r.ok) return fromRcon(r);
+    const r = await rconRequest(server.rcon, { route: READ_ROUTES.players, path: READ_ROUTES.players.template, timeoutMs: READ_TIMEOUT_MS }, ctx.deps);
+    if (!r.ok) return fromRcon(server, r);
     const players = normalizePlayers(r.data, Date.now());
     if (!players) return { ok: false, code: 'RCON_BAD_RESPONSE' };
     const found = players.players.find((p) => p.steamId === sid);
     if (!found) return invalid({ steamId: 'not_online' });
     targetName = found.name || null;
   } else if (req.action === 'unban' && sid && ctx.db) {
+    // Steam ID は全サーバー共通なので、サーバーで絞らずに引く(15.6)
     targetName = await lastKnownName(ctx.db, sid).catch(() => null);
   } else if (req.action === 'map') {
     // catalog が取れた場合だけ、その id に含まれることを確かめる
-    const r = await rconRequest(ctx.rcon, { route: READ_ROUTES.maps, path: READ_ROUTES.maps.template, timeoutMs: READ_TIMEOUT_MS }, ctx.deps);
+    const r = await rconRequest(server.rcon, { route: READ_ROUTES.maps, path: READ_ROUTES.maps.template, timeoutMs: READ_TIMEOUT_MS }, ctx.deps);
     const maps = r.ok ? normalizeMaps(r.data, Date.now()) : null;
     if (maps && maps.maps.length > 0 && !maps.maps.some((m) => m.id === req.params.map)) return invalid({ map: 'unknown_map' });
   }
@@ -118,6 +155,8 @@ export async function prepareAction(ctx: ActionContext, body: unknown): Promise<
     params: req.params,
     sid: ctx.session.sid,
     targetName,
+    server: server.id,
+    baseUrl: server.rcon.baseUrl,
     now: ctx.now,
   });
   return {
@@ -130,6 +169,7 @@ export async function prepareAction(ctx: ActionContext, body: unknown): Promise<
       destructive: isDestructive(req.action),
       capability,
       expiresAt,
+      server: server.id,
     },
   };
 }
@@ -137,22 +177,35 @@ export async function prepareAction(ctx: ActionContext, body: unknown): Promise<
 export async function executeAction(ctx: ActionContext, body: unknown): Promise<ActionOutcome<ExecuteResponse>> {
   // WRITES_DISABLED は D1 が使えないときだけ起きるので、記録は Workers Logs のみになる
   if (!ctx.writesEnabled) return reject(ctx, actionOf(body), {}, 'WRITES_DISABLED');
+  // server は必須(入力検証の失敗として扱い、記録しない)
+  const sv = parseServerParam(isPlainObject(body) ? body.server : undefined);
+  if (!sv.ok) return invalid({ server: sv.issue });
   const v = validateActionRequest(isPlainObject(body) ? { action: body.action, params: body.params } : null);
   // prepare で検証済みの params と一致するはずなので、検証に通らないものはトークン不一致として扱う。
   // action が分からないもの(event に入れられない)は記録しない
   if (!isPlainObject(body) || typeof body.confirmToken !== 'string' || !v.ok) {
-    return reject(ctx, actionOf(body), v.ok ? (v.request.params as Record<string, unknown>) : {}, 'CONFIRM_INVALID');
+    return reject(ctx, actionOf(body), v.ok ? (v.request.params as Record<string, unknown>) : {}, 'CONFIRM_INVALID', sv.id);
   }
   const req: ActionRequest = v.request;
-
+  const params = req.params as Record<string, unknown>;
   const now = ctx.now ?? Date.now();
+  const base = { action: req.action, params: req.params, sid: ctx.session.sid };
+
+  // 3' の前提: 対象サーバーを解決し直す。失敗したら(1〜3 が通っていれば)SERVER_* で拒否して記録する
+  const resolved = await resolveServer(ctx.servers, sv.id);
+  if (!resolved.ok) {
+    const code = (await confirmTokenBaseValid(ctx.keys.confirm, body.confirmToken, base)) ? resolved.code : 'CONFIRM_INVALID';
+    return reject(ctx, req.action, params, code, sv.id);
+  }
+  const server = resolved.data;
+
   const tk = await verifyConfirmToken(ctx.keys.confirm, body.confirmToken, {
-    action: req.action,
-    params: req.params,
-    sid: ctx.session.sid,
+    ...base,
+    server: server.id,
+    baseUrl: server.rcon.baseUrl,
     now,
   });
-  if (!tk.ok) return reject(ctx, req.action, req.params as Record<string, unknown>, tk.code);
+  if (!tk.ok) return reject(ctx, req.action, params, tk.code, server);
 
   const built = buildWriteRequest(req.action, req.params);
   const route = routeKey(built.route);
@@ -171,9 +224,11 @@ export async function executeAction(ctx: ActionContext, body: unknown): Promise<
         ipHash: ctx.ipHash,
         targetSteamId: targetSteamIdOf(req),
         targetName: tk.targetName,
-        params: req.params as Record<string, unknown>,
+        params,
         rconRoute: route,
         nonce: tk.nonce,
+        serverId: server.auditServerId,
+        serverName: server.name,
       });
     } catch {
       // 記録できないなら実行しない(監査ログを必ず通す)
@@ -187,7 +242,7 @@ export async function executeAction(ctx: ActionContext, body: unknown): Promise<
 
   // RCON を 1 回だけ呼ぶ(再試行しない)
   const r = await rconRequest(
-    ctx.rcon,
+    server.rcon,
     { route: built.route, path: built.path, body: built.body, timeoutMs: WRITE_TIMEOUT_MS, allowNonJson: true },
     ctx.deps,
   );
@@ -206,7 +261,6 @@ export async function executeAction(ctx: ActionContext, body: unknown): Promise<
   } else {
     logWithoutAudit(req.action, r.ok ? 'OK' : r.code, sessionTag);
   }
-  if (!r.ok) return fromRcon(r);
-  return { ok: true, data: { auditId, action: req.action, executedAt: finishedAt } };
+  if (!r.ok) return fromRcon(server, r);
+  return { ok: true, data: { auditId, action: req.action, executedAt: finishedAt, server: server.id } };
 }
-

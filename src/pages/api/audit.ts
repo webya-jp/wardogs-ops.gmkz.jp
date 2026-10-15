@@ -1,7 +1,8 @@
-// GET /api/audit?limit=50&before=<id> → AuditResponse(D1 が使えなければ 200 で available: false。RCON は呼ばない)
+// GET /api/audit?kind=operations|settings&server=all|<id>&limit=50&before=<id> → AuditResponse
+// D1 が使えなければ 200 で available: false。RCON は呼ばない。存在しない server でもエラーにせず 0 件(docs/API.md 3 章)
 import { AUDIT_PAGE_MAX } from '../../types/api';
 import type { AuditResponse } from '../../types/api';
-import { listAudit } from '../../lib/audit';
+import { listAudit, listSettingsAudit } from '../../lib/audit';
 import { jsonError, jsonOk } from '../../lib/http';
 import { apiHandler, methodNotAllowedRoute } from '../../lib/runtime';
 import { parseAuditQuery } from '../../lib/validate';
@@ -10,9 +11,10 @@ export const GET = apiHandler(async (api, context) => {
   const q = parseAuditQuery(new URL(context.request.url), AUDIT_PAGE_MAX);
   if (!q.ok) return jsonError('VALIDATION_FAILED', { fields: q.fields });
   const db = api.state.db;
-  if (!db) return jsonOk<AuditResponse>({ available: false, entries: [], nextBefore: null });
-  const page = await listAudit(db, { limit: q.limit, before: q.before });
-  return jsonOk<AuditResponse>({ available: true, ...page });
+  if (!db) return jsonOk<AuditResponse>({ available: false, kind: q.kind, entries: [], nextBefore: null });
+  const query = { limit: q.limit, before: q.before, server: q.server };
+  const page = q.kind === 'settings' ? await listSettingsAudit(db, query) : await listAudit(db, query);
+  return jsonOk<AuditResponse>({ available: true, kind: q.kind, ...page });
 });
 
 export const ALL = methodNotAllowedRoute;

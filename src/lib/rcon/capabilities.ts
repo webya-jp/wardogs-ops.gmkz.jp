@@ -1,8 +1,8 @@
 // GET /v1/capabilities の取得・解釈・キャッシュ。docs/ARCHITECTURE.md 6.4、docs/API.md 3 章。
-// - isolate 内で 10 分キャッシュ(RCON_ROUTE_NOT_FOUND を受けたら破棄)。KV / D1 には保存しない
+// - isolate 内でサーバーごとに 10 分キャッシュ(RCON_ROUTE_NOT_FOUND を受けたらそのサーバーの分を破棄)。KV / D1 には保存しない
 // - routes[] の要素形式は未検証(R-1)。文字列("POST /v1/broadcast")と { method, path } の両方を受け付ける
 // - パスのパラメータ部({steamId}、:steamId、<steamId>)は名前を無視して照合する
-import { READ_KINDS, WRITE_ACTIONS } from '../../types/api';
+import { MAX_SERVERS, READ_KINDS, WRITE_ACTIONS } from '../../types/api';
 import type { CapabilitiesResponse, CapabilityState, ReadKind, WriteAction } from '../../types/api';
 import type { RconConfig } from '../config';
 import { rconRequest, READ_TIMEOUT_MS } from './client';
@@ -103,55 +103,95 @@ export function buildCapabilitiesResponse(parsed: ParsedCapabilities | null, fet
   };
 }
 
+// キャッシュはサーバーごと(キー `${serverId}|${baseUrl}`。ARCHITECTURE 15.6)。最大 MAX_SERVERS + 1 件で、超えたら古いものから捨てる
 interface CacheEntry {
-  baseUrl: string;
   response: CapabilitiesResponse;
   expiresAt: number;
 }
 
-let cache: CacheEntry | null = null;
-let lastRefreshAt = 0;
-let inflight: { baseUrl: string; promise: Promise<CapabilitiesResponse> } | null = null;
+const MAX_CACHE_ENTRIES = MAX_SERVERS + 1;
+const cache = new Map<string, CacheEntry>();
+const lastRefreshAt = new Map<string, number>();
+const inflight = new Map<string, Promise<CapabilitiesResponse>>();
 
-/** テスト用・RCON_ROUTE_NOT_FOUND を受けたとき */
-export function invalidateCapabilities(): void {
-  cache = null;
+/** capabilities を引く対象(サーバーの id と接続設定) */
+export interface CapabilitiesTarget {
+  serverId: string;
+  rcon: RconConfig;
+}
+
+function cacheKey(t: CapabilitiesTarget): string {
+  return `${t.serverId}|${t.rcon.baseUrl}`;
+}
+
+function trim<V>(m: Map<string, V>): void {
+  while (m.size > MAX_CACHE_ENTRIES) {
+    const first = m.keys().next();
+    if (first.done) break;
+    m.delete(first.value);
+  }
+}
+
+/**
+ * そのサーバーの分のキャッシュを破棄する(RCON_ROUTE_NOT_FOUND を受けたとき、サーバーの更新・削除・接続テストのとき)。
+ * serverId を省略すると全サーバー分を破棄する
+ */
+export function invalidateCapabilities(serverId?: string): void {
+  if (serverId === undefined) {
+    cache.clear();
+    return;
+  }
+  const prefix = `${serverId}|`;
+  for (const k of [...cache.keys()]) if (k.startsWith(prefix)) cache.delete(k);
 }
 
 export function resetCapabilitiesForTest(): void {
-  cache = null;
-  lastRefreshAt = 0;
-  inflight = null;
+  cache.clear();
+  lastRefreshAt.clear();
+  inflight.clear();
 }
 
 export interface GetCapabilitiesOptions extends ClientDeps {
-  /** ?refresh=1。1 分に 1 回まで(超過時はキャッシュを返す) */
+  /** ?refresh=1。サーバーごとに 1 分に 1 回まで(超過時はキャッシュを返す) */
   refresh?: boolean;
   now?: number;
 }
 
 /** capabilities を返す。取得できなくても例外にせず source: "unavailable" を返す */
-export async function getCapabilities(cfg: RconConfig, opts: GetCapabilitiesOptions = {}): Promise<CapabilitiesResponse> {
+export async function getCapabilities(target: CapabilitiesTarget, opts: GetCapabilitiesOptions = {}): Promise<CapabilitiesResponse> {
   const now = opts.now ?? Date.now();
+  const key = cacheKey(target);
+  const cached = cache.get(key);
   let refresh = opts.refresh === true;
   if (refresh) {
-    if (now - lastRefreshAt < REFRESH_MIN_INTERVAL_MS && cache && cache.baseUrl === cfg.baseUrl) refresh = false;
-    else lastRefreshAt = now;
+    if (now - (lastRefreshAt.get(key) ?? 0) < REFRESH_MIN_INTERVAL_MS && cached) refresh = false;
+    else {
+      lastRefreshAt.delete(key);
+      lastRefreshAt.set(key, now);
+      trim(lastRefreshAt);
+    }
   }
-  if (!refresh && cache && cache.baseUrl === cfg.baseUrl && now < cache.expiresAt) return cache.response;
-  if (inflight && inflight.baseUrl === cfg.baseUrl) return inflight.promise;
+  if (!refresh && cached && now < cached.expiresAt) return cached.response;
+  const running = inflight.get(key);
+  if (running) return running;
 
   const promise = (async () => {
-    const res = await rconRequest(cfg, { route: CAPABILITIES_ROUTE, path: CAPABILITIES_ROUTE.template, timeoutMs: READ_TIMEOUT_MS }, opts);
+    const res = await rconRequest(
+      target.rcon,
+      { route: CAPABILITIES_ROUTE, path: CAPABILITIES_ROUTE.template, timeoutMs: READ_TIMEOUT_MS },
+      opts,
+    );
     const parsed = res.ok ? parseCapabilities(res.data) : null;
     const response = buildCapabilitiesResponse(parsed, now);
-    cache = { baseUrl: cfg.baseUrl, response, expiresAt: now + (parsed ? CAPABILITIES_TTL_MS : CAPABILITIES_FAIL_TTL_MS) };
+    cache.delete(key);
+    cache.set(key, { response, expiresAt: now + (parsed ? CAPABILITIES_TTL_MS : CAPABILITIES_FAIL_TTL_MS) });
+    trim(cache);
     return response;
   })();
-  inflight = { baseUrl: cfg.baseUrl, promise };
+  inflight.set(key, promise);
   try {
     return await promise;
   } finally {
-    if (inflight?.promise === promise) inflight = null;
+    if (inflight.get(key) === promise) inflight.delete(key);
   }
 }

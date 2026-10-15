@@ -1,7 +1,7 @@
 // 書き込み操作の入力検証と正規化。docs/ARCHITECTURE.md 7.2、docs/API.md 4 章。
 // 接続中かどうか(not_online)・マップ一覧にあるか(unknown_map)は RCON の結果が要るため actions 側で判定する。
-import { MESSAGE_MAX_LENGTH, REASON_MAX_LENGTH, STEAM_ID_PATTERN, WRITE_ACTIONS } from '../types/api';
-import type { ActionParamsMap, ActionRequest, ValidationIssue, WriteAction } from '../types/api';
+import { AUDIT_KINDS, MESSAGE_MAX_LENGTH, REASON_MAX_LENGTH, SERVER_ID_PATTERN, STEAM_ID_PATTERN, WRITE_ACTIONS } from '../types/api';
+import type { ActionParamsMap, ActionRequest, AuditKind, ServerId, ValidationIssue, WriteAction } from '../types/api';
 import { isPlainObject } from './http';
 
 export const MAP_ID_PATTERN = /^[A-Za-z0-9_./-]{1,128}$/;
@@ -130,15 +130,19 @@ export function isDestructive(action: WriteAction): boolean {
   return action === 'ban' || action === 'map' || action === 'match_end';
 }
 
-/** /api/audit の limit / before */
+/** /api/audit の kind / server / limit / before(docs/API.md 3 章) */
 export function parseAuditQuery(url: URL, max: number):
-  | { ok: true; limit: number; before: number | null }
+  | { ok: true; kind: AuditKind; server: 'all' | ServerId; limit: number; before: number | null }
   | { ok: false; fields: Record<string, ValidationIssue> } {
   const fields: Record<string, ValidationIssue> = {};
   const ls = url.searchParams.get('limit');
   const bs = url.searchParams.get('before');
+  const ks = url.searchParams.get('kind');
+  const ss = url.searchParams.get('server');
   let limit = 50;
   let before: number | null = null;
+  let kind: AuditKind = 'operations';
+  let server: 'all' | ServerId = 'all';
   if (ls !== null && ls !== '') {
     if (!/^\d{1,4}$/.test(ls) || Number(ls) < 1 || Number(ls) > max) fields.limit = 'invalid_format';
     else limit = Number(ls);
@@ -147,5 +151,13 @@ export function parseAuditQuery(url: URL, max: number):
     if (!/^\d{1,15}$/.test(bs)) fields.before = 'invalid_format';
     else before = Number(bs);
   }
-  return Object.keys(fields).length > 0 ? { ok: false, fields } : { ok: true, limit, before };
+  if (ks !== null && ks !== '') {
+    if ((AUDIT_KINDS as readonly string[]).includes(ks)) kind = ks as AuditKind;
+    else fields.kind = 'invalid_format';
+  }
+  if (ss !== null && ss !== '') {
+    if (ss === 'all' || SERVER_ID_PATTERN.test(ss)) server = ss;
+    else fields.server = 'invalid_format';
+  }
+  return Object.keys(fields).length > 0 ? { ok: false, fields } : { ok: true, kind, server, limit, before };
 }
