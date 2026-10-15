@@ -1,12 +1,12 @@
 # wardogs-ops 構成(正本)
 
-作成日: 2026-10-15(JST)/ 担当: architect
-上位の正本: `docs/PLAN.md`(2026-10-15 改訂版)。契約: `docs/API.md`、`src/types/api.ts`、`src/types/env.ts`、`db/schema.sql`、`wrangler.jsonc`。
-RCON の仕様は非公式資料ベース(`docs/research/wardogs-rcon.md`)。本書の「未検証」「要確認」は末尾第 14 章の番号(R-n / C-n)で参照する。
+作成日: 2026-10-15(JST)/ 更新: 2026-10-16(複数サーバー対応、第 15 章)/ 担当: architect
+上位の正本: `docs/PLAN.md`(2026-10-15 改訂版)。契約: `docs/API.md`、`src/types/api.ts`、`src/types/env.ts`、`db/schema.sql`、`db/migrations/`、`wrangler.jsonc`。
+RCON の仕様は非公式資料ベース(`docs/research/wardogs-rcon.md`)。本書の「未検証」「要確認」は第 14 章の番号(R-n / C-n / I-n / M-n)で参照する。
 
 ## 1. 目的と設計目標
 
-- 任意の WARDOGS コミュニティサーバー運営者が、**フォーク(またはボタンで複製)→ Deploy to Cloudflare → Secrets を 3 個入力 → サーバー側で RCON を有効化** だけで使える運営パネル。
+- 任意の WARDOGS コミュニティサーバー運営者が、**フォーク(またはボタンで複製)→ Deploy to Cloudflare → Secret `ADMIN_PASSWORD` を入力 → サーバー側で RCON を有効化 → パネルの画面でサーバー(ホスト名・ポート・RCON パスワード)を追加** だけで使える運営パネル。サーバーは何台でも追加できる(上限 20 台。第 15 章)。従来どおり Secrets(`RCON_URL` / `RCON_PASSWORD`)で 1 台を設定することもできる(既定サーバー)。
 - 運営者 1〜数人が 1 つのパスワードを共有して使う規模を想定する。アカウント管理・権限分離はしない。
 - Cloudflare 無料プラン(Workers / D1)の範囲で動かす。KV・R2・Cron・Access・Tunnel は使わない(第 2 段階の選択肢は 12 章)。
 - 公開リポジトリのテンプレートなので、リポジトリには接続先・パスワード等を一切含めない。利用者固有の値はすべて Secrets。
@@ -20,18 +20,18 @@ RCON の仕様は非公式資料ベース(`docs/research/wardogs-rcon.md`)。本
 Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
   ├─ middleware: 設定チェック → セキュリティヘッダ → ログイン Cookie 検証 → CSRF(Origin)検査
   ├─ /login, /logout(フォーム POST。JS 無しで動く)
-  ├─ ページ: / 状態, /players, /bans, /audit, /setup
-  ├─ /api/*: 読み取り(status / players / bans / maps / capabilities / audit / session)
-  │          書き込み(actions/prepare → actions/execute の二段階)
-  ├─ D1「DB」(任意・推奨): audit_log / status_snapshots / login_throttle
-  └─ fetch(Authorization: Bearer <RCON_PASSWORD>、タイムアウト付き、リダイレクト非追従)
+  ├─ ページ: / 状態, /players, /bans, /audit, /servers, /setup(ヘッダーで対象サーバーを選ぶ。15.5)
+  ├─ /api/*: 読み取り(status / players / bans / maps / capabilities / audit / session / servers)
+  │          書き込み(actions/prepare → actions/execute の二段階)、サーバー設定(servers の追加・変更・削除・接続テスト)
+  ├─ D1「DB」(任意・推奨): audit_log / server_snapshots / login_throttle / servers / settings_audit_log
+  └─ fetch(選択中のサーバーへ。Authorization: Bearer <そのサーバーの RCON パスワード>、タイムアウト付き、リダイレクト非追従)
         │  平文 HTTP(C-1 要確認)。送信元 IP は固定されない(C-3)
         ▼
-     RCON HTTP API(Secret RCON_URL = http://<ホスト名>:<ポート>。IP アドレス直指定は不可)
+     RCON HTTP API(http://<ホスト名>:<ポート>。既定サーバーは Secret RCON_URL、登録サーバーは D1 servers。IP アドレス直指定は不可)
      ゲームサーバー側: ServerSettings.ini の [/Script/WDRCON.WDRCONSettings](R-3, R-4 要確認)
 ```
 
-ブラウザが RCON を直接叩くことはない。RCON_URL・RCON_PASSWORD はブラウザに一切渡らない(クライアントバンドル・HTML・API 応答のいずれにも含めない)。
+ブラウザが RCON を直接叩くことはない。RCON パスワード(Secret の `RCON_PASSWORD`、D1 の暗号化済みパスワードとその平文)はブラウザに一切渡らない(クライアントバンドル・HTML・API 応答のいずれにも含めない)。Secret の `RCON_URL` も渡さない。画面から登録したサーバーのホスト名・ポートだけは、編集のためにログイン済みの運営者に表示する(15.2)。
 
 ## 3. 技術構成とディレクトリ
 
@@ -51,7 +51,7 @@ Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
 ├─ .dev.vars.example          # Secrets の宣言(Deploy ボタンの入力欄になる)。値は書かない
 ├─ db/
 │  ├─ schema.sql              # 現行スキーマのまとめ(参照用)
-│  └─ migrations/0001_init.sql
+│  └─ migrations/0001_init.sql, 0002_servers.sql(複数サーバー。追加のみ)
 ├─ docs/                      # PLAN / ARCHITECTURE / API / research
 └─ src/
    ├─ env.d.ts                # Cloudflare.Env と App.Locals の型付け
@@ -78,6 +78,7 @@ Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
    │  ├─ confirm.ts           # 確認トークン
    │  ├─ audit.ts             # 監査ログ
    │  ├─ snapshots.ts         # 人数スナップショット
+   │  ├─ servers.ts           # サーバーの検証・暗号化・CRUD・解決・接続テスト(第 15 章)
    │  └─ rcon/
    │     ├─ client.ts         # fetch、タイムアウト、エラー分類
    │     ├─ routes.ts         # 本パネルが使う RCON ルートの一覧(API.md 6 章)
@@ -85,12 +86,13 @@ Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
    │     └─ normalize.ts      # RCON 応答の正規化
    ├─ pages/                  # frontend-pages(API は backend)
    │  ├─ index.astro          # 状態
-   │  ├─ players.astro / bans.astro / audit.astro
+   │  ├─ players.astro / bans.astro / audit.astro / servers.astro
    │  ├─ login.astro          # GET 表示 / POST 認証
    │  ├─ logout.ts            # POST のみ
    │  ├─ setup.astro          # 設定不足の案内
    │  └─ api/
    │     ├─ session.ts / status.ts / players.ts / bans.ts / maps.ts / capabilities.ts / audit.ts
+   │     ├─ servers/index.ts(GET・POST)/ servers/[id].ts(PUT・DELETE)/ servers/[id]/test.ts(POST)
    │     └─ actions/prepare.ts / actions/execute.ts
    ├─ components/             # React アイランド(frontend-pages)
    └─ layouts/
@@ -136,13 +138,13 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 
 ```
 1. 画面で操作を選ぶ(例: プレイヤー行の kick)
-2. POST /api/actions/prepare { action, params }
+2. POST /api/actions/prepare { server, action, params }(server は対象サーバー。15.5)
    Worker: 入力検証 → capability 確認 → 対象の名前解決(RCON GET /v1/players、unban は監査ログ)
            → 正規化済み params・対象名・確認トークン(署名付き、120 秒、1 回限り)を返す(文言は返さない)
 3. 画面: Worker が返した正規化済み params と対象名を、カタログの `confirm.<action>` で確認ダイアログの文にして表示。destructive なら強調し、ban / match_end は
    表示中の対象名(または「試合終了」)を再入力させる等の追加確認を frontend-pages が設計する
 4. POST /api/actions/execute { action, params, confirmToken }
-   Worker: トークン検証(署名・期限・セッション一致・action と params のハッシュ一致)
+   Worker: トークン検証(署名・期限・セッション一致・action と params のハッシュ一致・対象サーバーと宛先の一致〔15.6〕)
            → audit_log に status=pending で INSERT(confirm_nonce は UNIQUE。重複は ALREADY_EXECUTED)
            → RCON の書き込みルートを 1 回だけ呼ぶ(再試行しない。タイムアウト 8 秒)
            → audit_log を succeeded / failed に UPDATE → 結果を返す
@@ -161,7 +163,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 
 ### 4.4 人数スナップショット
 
-**決定: 読み取り時の間引き(Cron は使わない)**。`/api/status` が RCON から状態を取れたとき、`bucket = floor(unix秒 / 300)` を主キーに `INSERT OR IGNORE` する。5 分に最大 1 行、誰かがパネルを開いている間だけ記録される。
+**決定: 読み取り時の間引き(Cron は使わない)**。`/api/status` が RCON から状態を取れたとき、`(server_id, bucket = floor(unix秒 / 300))` を主キーに `server_snapshots` へ `INSERT OR IGNORE` する。サーバーごとに 5 分に最大 1 行、誰かがパネルでそのサーバーを開いている間だけ記録される(複数サーバー対応で `status_snapshots` から切り替え。15.2)。
 
 許容する副作用: `GET /api/status` は 5 分に最大 1 行を `INSERT OR IGNORE` で書く。冪等で、クロスサイトからは Cookie が付かないため悪用できない(2026-10-15 QA S-9)。
 
@@ -177,8 +179,9 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 | 確認トークン署名 | 同 `info="confirm"` |
 | 接続元 IP のハッシュ | 同 `info="ip-hash"` |
 | パスワード比較用 | 同 `info="password-compare"` |
+| 登録サーバーの RCON パスワードの暗号化(AES-256-GCM) | `HKDF-SHA256(ikm', salt="wardogs-ops/v1", info="server-password")`。**ikm' は下記と別**(SESSION_SECRET があればそれだけ、無ければ ADMIN_PASSWORD だけ)。15.3 |
 
-`ikm = UTF-8(SESSION_SECRET ?? "") || 0x00 || UTF-8(ADMIN_PASSWORD)`。
+`ikm = UTF-8(SESSION_SECRET ?? "") || 0x00 || UTF-8(ADMIN_PASSWORD)`(暗号化用の鍵を除く)。
 
 **決定: SESSION_SECRET は任意**(既定は ADMIN_PASSWORD からの HKDF 派生)。
 
@@ -189,7 +192,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 ### 5.2 パスワード検証とパスワード強度
 
 - 入力は 256 文字で打ち切る。`HMAC(password-compare 鍵, 入力)` と `HMAC(同, ADMIN_PASSWORD)` を `crypto.subtle.timingSafeEqual` で比較する(長さの差も隠れる)。
-- 強度要件(Worker で強制): ADMIN_PASSWORD は **16 文字以上**、かつ RCON_PASSWORD と同一でないこと。満たさなければログインを受け付けず /setup で警告(`ADMIN_PASSWORD_TOO_SHORT` / `ADMIN_PASSWORD_EQUALS_RCON_PASSWORD`)。README ではパスワード生成の手順(ランダム 24 文字以上)を案内する。
+- 強度要件(Worker で強制): ADMIN_PASSWORD は **16 文字以上**、かつ RCON_PASSWORD と同一でないこと。満たさなければログインを受け付けず /setup で警告(`ADMIN_PASSWORD_TOO_SHORT` / `ADMIN_PASSWORD_EQUALS_RCON_PASSWORD`)。画面から登録するサーバーの RCON パスワードも、ADMIN_PASSWORD と同じ値は保存時に拒否する(`same_as_admin_password`。15.2)。README ではパスワード生成の手順(ランダム 24 文字以上)を案内する。
 - RCON_PASSWORD は Worker から強制できないため、24 文字未満なら警告のみ(`RCON_PASSWORD_SHORT`)。README の推奨はランダム 32 文字以上。
 
 ### 5.3 Cookie の形式と有効期限
@@ -236,13 +239,15 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 
 - 全応答: `X-Frame-Options: DENY`、`Content-Security-Policy` に少なくとも `frame-ancestors 'none'; base-uri 'none'; form-action 'self'`、`Referrer-Policy: same-origin`(`no-referrer` だと同一オリジンのフォーム送信で `Origin: null` になり CSRF 検査に落ちる)、`X-Content-Type-Options: nosniff`、`X-Robots-Tag: noindex, nofollow`。HTML と API は `Cache-Control: no-store`。`script-src` を絞るかは Astro のアイランド用インラインスクリプトとの両立を確認してから決める(C-15)。
 - 未ログインのページ要求は `/login` へ 303、API は 401 `UNAUTHENTICATED`。
-- 必須 Secrets が不足・不正(`*_MISSING`、`*_TOO_SHORT`、`RCON_URL_INVALID`、`RCON_URL_IS_IP_ADDRESS`、`ADMIN_PASSWORD_EQUALS_RCON_PASSWORD`)なら `/setup` 以外は `/setup` へ 303、API は 503 `NOT_CONFIGURED`。
+- 必須 Secrets が不足・不正(`ADMIN_PASSWORD_MISSING`、`ADMIN_PASSWORD_TOO_SHORT`、`ADMIN_PASSWORD_EQUALS_RCON_PASSWORD`、`SESSION_SECRET_TOO_SHORT`)なら `/setup` 以外は `/setup` へ 303、API は 503 `NOT_CONFIGURED`。複数サーバー対応で `RCON_URL` / `RCON_PASSWORD` は任意になり、その不足・不正はログインを止めない警告に変わった(15.4)。
 - `/setup` は未ログインでも見られるが、**設定が揃っているときは「設定済み」以外を出さない**。不足時は不足している Secret の名前と警告種別だけを出す(値・長さ・接続先は出さない)。警告の文言は `SetupWarning` のコードからカタログ(`setup.warning.<コード>`)で引く。
 - ログ(`console.*`、Workers Logs)に出してよいのは、ルート名・HTTP ステータス・所要時間・エラーコードのみ。パスワード、Cookie、RCON_URL、`Authorization`、生の IP、プレイヤーのメッセージ本文は出さない。
 
 ## 6. RCON 呼び出し
 
 ### 6.1 接続先の検証(RCON_URL)
+
+既定サーバーの `RCON_URL` と、画面から登録するサーバーの「ホスト名 + ポート」(15.2。`http://<ホスト名>:<ポート>` を組み立てて同じ関数に通す)の両方に、次の規則を使う。
 
 - `new URL()` で解釈できること。`protocol` は `http:` または `https:`(https は R-3 / R-5 次第。現状の非公式資料では平文 HTTP のみ)。
 - ユーザー名・パスワードを含まないこと(`RCON_URL_HAS_CREDENTIALS`)。
@@ -279,7 +284,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 
 ### 6.4 capabilities によるルート判定
 
-- `GET /v1/capabilities` を Worker の isolate 内で 10 分キャッシュ(`RCON_ROUTE_NOT_FOUND` を受けたら即破棄)。KV / D1 には保存しない。
+- `GET /v1/capabilities` を Worker の isolate 内で 10 分キャッシュ(`RCON_ROUTE_NOT_FOUND` を受けたら即破棄)。KV / D1 には保存しない。キャッシュはサーバーごと(キー `${serverId}|${baseUrl}`。15.6)。
 - `routes[]` の要素形式は未検証(R-1)。文字列(`"POST /v1/broadcast"` 等)と `{ method, path }` 形式の両方を受け付け、`"METHOD /path"` に正規化する。パスのパラメータ部(`{steamId}`、`:steamId` 等)は名前を無視して照合する。
 - 判定(`CapabilityState`):
   - `available`: 該当ルートがある
@@ -325,10 +330,11 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 
 - D1 の可否は「`env.DB` があり、`SELECT 1 FROM audit_log LIMIT 1` が成功する」で判定し、isolate 内で 5 分キャッシュする。失敗したら段階 1 として扱い、`D1_MISSING` / `D1_NOT_MIGRATED` を警告に出す。
 - 既定を「D1 が無ければ書き込み不可」にした理由: PLAN と共通ルールの「書き込みは監査ログを必ず通す」を既定で守るため。ログ無しでの書き込みは利用者が明示的に選ぶ(ユーザー確認事項)。
+- 複数サーバーとの関係(画面から登録したサーバーは D1 が無いと使えない、判定は最新のマイグレーション〔0002〕まで含める)は 15.8。
 
 ## 8. D1 スキーマ
 
-正本は `db/migrations/0001_init.sql`(`db/schema.sql` は参照用のまとめ)。時刻はすべて UTC epoch ミリ秒。
+正本は `db/migrations/`(`0001_init.sql`、`0002_servers.sql`)。`db/schema.sql` は全マイグレーション適用後の参照用のまとめ。時刻はすべて UTC epoch ミリ秒。**本番稼働後のマイグレーションは追加のみ**(表・列・インデックスの追加。表の作り直し・列の削除・CHECK の変更はしない。C-5 のとおり新しいコードがマイグレーションより一瞬先に動くため)。
 
 ### 8.1 audit_log
 
@@ -343,12 +349,17 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 | params_json | TEXT | 検証済みパラメータ。表示文言は保存しない(画面が event + params + target_name から言語に応じて組み立てる。13 章) |
 | rcon_route / rcon_status / error_code | TEXT / INTEGER / TEXT | 例 `POST /v1/broadcast`(ホストは含めない)/ HTTP ステータス / API エラーコード |
 | confirm_nonce | TEXT UNIQUE | 確認トークンの nonce(1 回限りの保証) |
+| server_id | INTEGER(0002) | 対象サーバー(`servers.id`)。書き込み操作で NULL = 既定サーバー(0002 以前の行を含む)。login / logout は常に NULL |
+| server_name | TEXT(0002) | 操作時点のサーバーの表示名(既定サーバーは NULL) |
 
-インデックス: `created_at`、`(target_steam_id, created_at)`。
+インデックス: `created_at`、`(target_steam_id, created_at)`、`(server_id, id)`(0002。サーバーでの絞り込み用)。
 
-### 8.2 status_snapshots
+`event` の CHECK に新しい値は足せない(SQLite は CHECK を ALTER できず、作り直しはしない)。サーバー設定の変更は 8.6 の別表に記録する。今後 RCON の書き込み操作を足す場合も同じ制約があるため、そのときに設計する(M-6)。
 
-`bucket`(PK、`floor(unix秒/300)`)、`taken_at`、`players_current`、`players_max`、`map`。`INSERT OR IGNORE` で 5 分に 1 行。
+### 8.2 server_snapshots(0002)/ status_snapshots(0001、以後は書かない)
+
+- `server_snapshots`: `server_id`(既定サーバーは 0)、`bucket`(`floor(unix秒/300)`)、`taken_at`、`players_current`、`players_max`、`map`。主キー `(server_id, bucket)`、インデックス `taken_at`。`INSERT OR IGNORE` でサーバーごとに 5 分に 1 行。
+- `status_snapshots`: 0001 の表(`bucket` が主キー)。複数サーバーでは同じ 5 分枠に 2 台分を入れられないため 0002 以降は書かない。掃除(8.4)で自然に空になる。理由は 15.2。
 
 ### 8.3 login_throttle
 
@@ -359,10 +370,32 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 ログイン成功時に次を実行する(Cron を使わないため):
 
 - audit_log: 365 日より古い行を削除
-- status_snapshots: 90 日より古い行を削除
+- settings_audit_log: 365 日より古い行を削除(0002)
+- status_snapshots / server_snapshots: 90 日より古い行を削除
 - login_throttle: `window_start` が 1 日より古い行を削除
+- servers: 掃除しない(運営者が削除するまで残す)
 
 いずれも定数としてコードに持つ(vars にはしない。利用者の設定項目を増やさない)。
+
+### 8.5 servers(0002)
+
+画面から登録したサーバー。詳細は 15.2・15.3。
+
+| 列 | 型 | 内容 |
+|---|---|---|
+| id | INTEGER PK AUTOINCREMENT | `ServerId` の数値部分。削除した id は再利用しない |
+| name | TEXT NOT NULL(UNIQUE) | 表示名(1〜32 文字) |
+| host / port | TEXT / INTEGER(CHECK 1〜65535) | ホスト名(小文字、IP 不可)/ ポート。`(scheme, host, port)` は UNIQUE |
+| scheme | TEXT(CHECK `http` / `https`、既定 `http`) | 当面 `http` 固定(画面に出さない) |
+| rcon_password_enc | TEXT NOT NULL | `v1.<k>.<iv>.<ct>`(AES-256-GCM)。平文は保存しない |
+| enabled | INTEGER(0 / 1) | 無効にすると選択肢から外れ、API は `SERVER_DISABLED` |
+| sort_order | INTEGER | 並び順(小さい順、同じなら id 順) |
+| last_test_at / last_test_result | INTEGER / TEXT | 直近の接続テスト(`ok` または `RCON_*`) |
+| created_at / updated_at | INTEGER | |
+
+### 8.6 settings_audit_log(0002)
+
+サーバーの追加・変更・削除の記録(`server_add` / `server_update` / `server_delete`)。`id`、`created_at`、`event`(CHECK なし。コードで検証)、`operator` / `session_tag` / `ip_hash`(audit_log と同じ)、`server_id`、`server_name`(その時点の表示名)、`params_json`(変更内容: name / host / port / enabled と `passwordChanged` の真偽。**パスワード・暗号文は入れない**)。インデックス `created_at`。D1 の変更と同じ `db.batch()` で書く。
 
 ## 9. 画面一覧
 
@@ -372,10 +405,11 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 | `/` 状態 | サーバー名、マップ、人数(現在/最大)、陣営スコア、ローテーション位置。broadcast、マップ変更、試合終了 | あり | 30 秒 |
 | `/players` | 接続中一覧(名前、陣営、K/D、ping、Steam ID)。行ごとに kick / message / ban | あり | 30 秒 |
 | `/bans` | BAN 一覧(Steam ID、日時、理由、実行者、監査ログからの名前)。解除 | あり | 手動更新 |
-| `/audit` | 操作ログ(日時〔vars `TIMEZONE` で表示。既定は日本時間〕、操作者、操作、対象、内容、結果)。50 件ずつ | あり | 手動更新 |
+| `/audit` | 操作ログ(日時〔vars `TIMEZONE` で表示。既定は日本時間〕、操作者、サーバー、操作、対象、内容、結果)。50 件ずつ。「操作」「設定変更」のタブ、サーバーでの絞り込み(15.7) | あり | 手動更新 |
+| `/servers` | サーバーの一覧・追加・編集・有効/無効・接続テスト・削除(15.7) | あり | 手動更新 |
 | `/setup` | 不足している Secrets、警告、README への案内 | なし | − |
 
-共通: 画面上部に `warnings`(`/api/session`)と段階(7.4)を表示する。capabilities が `missing` のボタンは無効化し理由を示す、`unknown` は「未確認」表示。モバイル幅で操作できること。自動更新は `document.visibilityState === 'hidden'` の間止め、`POLL_MIN_INTERVAL_SEC`(30 秒)より短くしない。
+共通: ヘッダーに対象サーバーのセレクト(15.5)。`/`、`/players`、`/bans` は選択中のサーバーを表示し、0 台なら「サーバーを追加してください」と `/servers` への案内を出す。画面上部に `warnings`(`/api/session`)と段階(7.4)を表示する。capabilities が `missing` のボタンは無効化し理由を示す、`unknown` は「未確認」表示。モバイル幅で操作できること。自動更新は `document.visibilityState === 'hidden'` の間止め、`POLL_MIN_INTERVAL_SEC`(30 秒)より短くしない。
 
 ## 10. Secrets / vars
 
@@ -384,13 +418,15 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 | 名前 | 種別 | 必須 | 内容 |
 |---|---|---|---|
 | `ADMIN_PASSWORD` | Secret | 必須 | ログインパスワード。16 文字以上 |
-| `RCON_URL` | Secret | 必須 | `http://<ホスト名>:<ポート>`。接続先は非公開情報なので vars にしない |
-| `RCON_PASSWORD` | Secret | 必須 | RCON の Bearer トークン(読み書き全権) |
-| `SESSION_SECRET` | Secret | 任意 | 32 文字以上。鍵の派生に加える(5.1) |
+| `RCON_URL` | Secret | 任意(2026-10-16 から) | 既定サーバーの `http://<ホスト名>:<ポート>`。接続先は非公開情報なので vars にしない。`RCON_PASSWORD` と両方あるときだけ既定サーバーになる(15.4) |
+| `RCON_PASSWORD` | Secret | 任意(2026-10-16 から) | 既定サーバーの RCON の Bearer トークン(読み書き全権) |
+| `SESSION_SECRET` | Secret | 任意(推奨) | 32 文字以上。鍵の派生に加える(5.1)。設定すると、登録サーバーの RCON パスワードの暗号鍵が ADMIN_PASSWORD に依存しなくなる(15.3) |
 | `AUDIT_REQUIRED` | vars(`wrangler.jsonc`) | 任意 | 既定 `"true"`。`"false"` で D1 無しでも書き込み可(7.4) |
 | `LANGUAGE` | vars(`wrangler.jsonc`) | 任意 | 表示言語の言語コード。既定 `"ja"`。`"auto"` で Accept-Language から選ぶ(13.2) |
 | `TIMEZONE` | vars(`wrangler.jsonc`) | 任意 | 既定 `"Asia/Tokyo"`(IANA 名。13.4) |
 | `DB` | D1 バインディング | 推奨 | 自動プロビジョニング(`wardogs-ops-db`) |
+
+画面から登録するサーバー(第 15 章)の接続先とパスワードは Secrets ではなく D1 に置く(パスワードは暗号化)。利用者は Secrets を `ADMIN_PASSWORD` 1 つだけ入れればよい。
 
 `secrets.required`(wrangler 設定)は**使わない**。未設定だと `wrangler deploy` が失敗する仕様で、ボタンのフォームとの順序が未確認(C-6)なため、初回デプロイが失敗する危険を避ける。不足は実行時に `/setup` で案内する。
 
@@ -398,17 +434,18 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 
 | 方法 | 使う場面 |
 |---|---|
-| Deploy to Cloudflare ボタンのフォーム | 初回。`.dev.vars.example` に書いた `ADMIN_PASSWORD` `RCON_URL` `RCON_PASSWORD` が入力欄になり、`package.json` の `cloudflare.bindings.<名前>.description` が説明文になる |
+| Deploy to Cloudflare ボタンのフォーム | 初回。`.dev.vars.example` に書いた `ADMIN_PASSWORD` `RCON_URL` `RCON_PASSWORD` が入力欄になり、`package.json` の `cloudflare.bindings.<名前>.description` が説明文になる。複数サーバーの画面が完成した時点で `RCON_URL` / `RCON_PASSWORD` をフォームから外し、`ADMIN_PASSWORD` だけにする(15.12、U-7) |
 | ダッシュボード: Workers & Pages > wardogs-ops > Settings > Variables and Secrets > Add(種類 Secret) | 後からの変更・追加(SESSION_SECRET など)。Settings > Build のビルド変数は実行時に見えないので使わない |
 | `wrangler secret put <名前>` | コマンドを使える人向け |
 | `.dev.vars`(`.dev.vars.example` をコピー) | ローカル開発のみ。`.gitignore` 済み |
 
 ### 10.3 ローテーション手順
 
-- ADMIN_PASSWORD: ダッシュボードで値を更新 → 保存(新しいバージョンが反映)→ 全セッションが失効するので再ログイン。
-- SESSION_SECRET: 同上(全セッション失効)。
+- ADMIN_PASSWORD: ダッシュボードで値を更新 → 保存(新しいバージョンが反映)→ 全セッションが失効するので再ログイン。**SESSION_SECRET が無い場合、画面から登録したサーバーの RCON パスワードがすべて「再入力が必要」になる**(15.3)。
+- SESSION_SECRET: 同上(全セッション失効)。変更・削除すると、SESSION_SECRET 由来の鍵で暗号化した登録サーバーのパスワードが「再入力が必要」になる。新しく設定するだけなら影響しない(15.3)。
+- 登録サーバーの RCON パスワード: ゲームサーバー側を変えた後、`/servers` の編集で入れ直す。
 - RCON_PASSWORD: (1) ゲームサーバーの `ServerSettings.ini` の Password / PasswordHash を変更しサーバーを再起動 (2) 直後にダッシュボードで RCON_PASSWORD を更新。(1)〜(2) の間は `RCON_AUTH_FAILED` になる。漏洩が疑われるときは最優先で行う(RCON パスワードは読み書き全権)。
-- RCON_URL: 接続先の変更時に更新。DNS の A レコードを変えるだけで済む構成(README 4.3)なら更新不要。
+- RCON_URL: 接続先の変更時に更新。DNS の A レコードを変えるだけで済む構成(README 4.3)なら更新不要。登録サーバーのホスト名・ポートは `/servers` で変える(パスワードの再入力が必要。15.6)。
 
 ## 11. 無料枠の見積り
 
@@ -435,7 +472,7 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 | `/api/actions/execute` | 1 | 2(INSERT + UPDATE) | 3 |
 | `POST /login` 成功 | 0 | 約 6(throttle 読み・消去、audit、掃除 3) | 約 6 |
 
-いずれも 50 / 同時 6 に収まる。
+いずれも 50 / 同時 6 に収まる。複数サーバー対応での増分(サーバーの解決で D1 読み取り +1)は 15.9。
 
 ### 11.3 D1
 
@@ -444,7 +481,7 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 | status_snapshots | 5 分に 1 行 × 24 時間 = 288 行(インデックス更新を含めても 2 倍以内と見込む。C-17) | 最大 約 600 |
 | audit_log | 1 操作 = INSERT + UPDATE + インデックス 2 本 ≒ 6 行相当 × 100 操作 | 約 600 |
 | login_throttle | 失敗 1 回 = 2 行(ip + global)。ロック中は書かないので 1 接続元あたり 15 分に最大 5 回 | 接続元ごとの上限だけだと 100 接続元が 24 時間続けて 100 × 96 × 5 × 2 = 96,000 で上限に近い。global の上限(下記、1 時間 200 回)で頭打ちにし、最悪 200 × 2 × 24 = 9,600 行(インデックス更新が数えられても約 2 万行、上限の 2 割以内) |
-| 合計(通常) | | 約 1,500(上限の 1.5%) |
+| 合計(通常) | | 約 1,500(上限の 1.5%)。複数サーバーでの増分は 15.9(最悪でも上限の約 12% 増) |
 
 login_throttle の最悪値が上限に近いため、**global の失敗が 1 時間に 200 回を超えたら以後その時間は throttle を書かない**(`GLOBAL_D1_WRITE_LIMIT`。2026-10-15 QA S-11 で 1,000 から引き下げ)(ロック判定はメモリ近似に切り替える)実装とする。読み取りは監査ログ 50 件 × 閲覧回数程度で 500 万行/日に遠い。ストレージは 1 年で数十 MB 以内(5 GB に遠い)。
 
@@ -481,7 +518,7 @@ login_throttle の最悪値が上限に近いため、**global の失敗が 1 �
 - `src/i18n/ja.ts` がキーの正本。キーはドット区切りのフラットな文字列(例 `login.title`、`error.RCON_TIMEOUT`)。`MessageKey = keyof typeof ja`、他の言語は `Catalog = Record<MessageKey, string>` で作るので **キーの過不足は型エラーになる**。
 - `error.<ApiErrorCode>` と `validation.<ValidationIssue>` は `satisfies` で全コード分を必須にしてある(コードを `src/types/api.ts` に足すとカタログが型エラーになり、訳し漏れを防ぐ。キーを 1 つ消すと tsc がエラーになることを確認済み)。`SetupWarning` の `setup.warning.<コード>`、確認ダイアログの `confirm.<action>`、操作ログの `audit.event.<event>` も、実装時に同じ方法で全コード必須にする。
 - 補間: `{name}` を params の値で置換する。値は文字列化するだけで HTML エスケープはしない(Astro / React の通常の出力でエスケープされる。`set:html` / `dangerouslySetInnerHTML` にカタログの文字列を渡さない)。
-- **翻訳しないもの**: RCON から返る生データ(サーバー名、マップ名・displayName、陣営名、プレイヤー名、BAN の理由・実行者、`rconMessage`)と、運営者が入力した文字列(broadcast の本文、kick の理由、操作者名)。そのまま表示する。
+- **翻訳しないもの**: RCON から返る生データ(サーバー名、マップ名・displayName、陣営名、プレイヤー名、BAN の理由・実行者、`rconMessage`)と、運営者が入力した文字列(broadcast の本文、kick の理由、操作者名、登録サーバーの表示名・ホスト名)。そのまま表示する。
 
 ### 13.2 言語の決め方
 
@@ -589,6 +626,16 @@ login_throttle の最悪値が上限に近いため、**global の失敗が 1 �
 - **I-4** vars `LANGUAGE` / `TIMEZONE` をダッシュボードで変えた値が、次のデプロイで `wrangler.jsonc` の値に戻るか(C-8 と同じ問題。戻る場合はフォーク側の `wrangler.jsonc` を書き換える手順を README に書く)。
 - **I-5** `Accept-Language` の照合は言語コード単位(`ja-JP` → `ja`)の簡易実装。地域で文言を分けたい言語(例 `pt-BR` と `pt-PT`)を足す場合は、`LANGUAGE` の値の形式と照合規則を見直す。
 
+### 複数サーバー(第 15 章)
+
+- **M-1** D1 の本番で `ALTER TABLE ... ADD COLUMN` が稼働中のデータベースに問題なく適用できるか(ローカルの SQLite では 0001 → 0002 の適用と既存行の保持を確認済み。本番の適用は次のデプロイで確認する)。
+- **M-2** D1 の `db.batch()` が 1 トランザクション(途中で失敗したら全体が取り消される)であること。Cloudflare の資料に記載があるとされるが、本設計の範囲では未確認。サーバーの変更と `settings_audit_log` の INSERT の原子性はこれに依存する。
+- **M-3** 同じ Worker から多数の異なるホストへ fetch したときの制限の有無(1 リクエストは 1 台にしか接続しないため、問題にならない見込み)。
+- **M-4** RCON 側のレート制限・ロックアウト(R-13 / R-15)がサーバー(提供元)ごとに違うか。台数が増えても 1 台あたりの呼び出し回数は変わらない。
+- **M-5** Deploy ボタンのフォームから `RCON_URL` / `RCON_PASSWORD` を外したとき(`.dev.vars.example` の行をコメントにする)に、フォームが `ADMIN_PASSWORD` だけになるか(C-6 と同じ問題)。
+- **M-6** `audit_log.event` の CHECK により、第 2 段階で RCON の書き込み操作(kill・陣営変更など)を足すと audit_log に記録できない。そのときは CHECK の無い新しい操作ログ表への移行(旧表は読み取り専用で残す)を設計する。
+- **M-7** AES-256-GCM の復号コスト(1 行あたり)の実測。15.3 の見込み(十数マイクロ秒)を本番の Workers で確認する。
+
 ### 設計上の判断(ユーザー確認事項)
 
 以下は 2026-10-15 にユーザーが「推奨どおり」で確定した(以後は決定事項として扱う)。
@@ -598,3 +645,181 @@ login_throttle の最悪値が上限に近いため、**global の失敗が 1 �
 - **U-3(確定)** Steam ID はログイン後の画面で全桁表示する。監査ログは 365 日保持する。
 - **U-4(確定)** 利用手順は「ボタンで複製(方法 A)」と「フォーク + ダッシュボードで取り込み(方法 B)」の 2 通りを README に残す。ボタンがリポジトリを複製する仕様のため、先にフォークしてからボタンを押すと 2 つできる可能性がある点は要確認のまま(C-5 系)。
 - **U-5(確定)** IP アドレスしか無い運営者には「自前ドメイン推奨、第三者のワイルドカード DNS サービスは自己判断」と案内する(README 4.3 のまま)。
+
+以下は 2026-10-16 の複数サーバー対応で architect が決めた点(ユーザー確認待ち。推奨どおりなら決定事項として扱う)。
+
+- **U-6** 接続テストに失敗してもサーバーを保存する(結果は一覧に出す)。登録できる台数は 20 台まで。
+- **U-7** 複数サーバーの画面が完成したら、Deploy ボタンのフォームを `ADMIN_PASSWORD` だけにし、サーバーは画面から追加する手順を README の標準にする(Secrets の `RCON_URL` / `RCON_PASSWORD` は任意の「既定サーバー」として残す)。
+- **U-8** 画面から登録したサーバーのホスト名・ポートは、ログイン済みの運営者には一覧に表示する(編集に必要なため。パスワードは表示しない)。
+- **U-9** サーバー設定の変更ログは、操作ログ画面の別タブ「設定変更」に出す(D1 の制約で別テーブルのため、操作と同じ一覧には混ぜない)。操作ログの既定は全サーバー表示。
+- **U-10** SESSION_SECRET を README で「推奨」に上げる(ADMIN_PASSWORD の変更で登録サーバーのパスワードを入れ直さずに済むため。QA S-1 の論点とも一致)。
+
+## 15. 複数サーバー
+
+2026-10-16 ユーザー要望: 「自分が持っているサーバーの数だけ追加できるようにしてほしい。DB にホスト名とポート番号を置き、環境変数がわからない人でも触れるように」。本章が正本で、8・10 章などの該当箇所は本章を参照する。
+
+### 15.1 方針
+
+- サーバーは 2 種類。**既定サーバー**(Secrets の `RCON_URL` / `RCON_PASSWORD`。従来どおり。任意)と、**登録サーバー**(画面 `/servers` から追加し D1 `servers` に保存)。
+- 画面から入力するのは「表示名 / ホスト名 / ポート / RCON パスワード」の 4 項目だけ。Cloudflare のダッシュボードで環境変数(Secrets)を触らずにサーバーを足せる。
+- 一度に扱うのは**選択中の 1 台**だけ。全サーバーへの一括操作(全台に broadcast など)や一覧画面での全台同時表示はしない(第 2 段階。サブリクエスト・RCON 呼び出しが台数倍になるため)。
+- 既存の利用者(Secrets で 1 台運用中)は何もしなくてよい。Secrets のサーバーがそのまま「既定サーバー」として一覧の先頭に出る。
+
+### 15.2 データモデル
+
+テーブル定義は `db/migrations/0002_servers.sql`(8 章に要約)。サーバーの識別子は API・URL・Cookie では文字列の `ServerId` に統一し、D1 では次のように対応させる。
+
+| 場面 | 既定サーバー | 登録サーバー(例 id 3) |
+|---|---|---|
+| API・URL のクエリ・Cookie・セレクトの値(`ServerId`) | `"default"` | `"3"` |
+| `audit_log.server_id`(書き込み操作の行) | `NULL`(0002 以前の行もすべてこれ) | `3` |
+| `audit_log.server_id`(login / logout の行) | 常に `NULL`(サーバーに関係しない。API では `serverId: null`) | − |
+| `server_snapshots.server_id` | `0` | `3` |
+| `settings_audit_log.server_id` | 記録しない(既定サーバーは画面から変更できない) | `3` |
+
+決定と根拠:
+
+1. **`status_snapshots` は ALTER せず、複合主キーの新テーブル `server_snapshots`(`PRIMARY KEY (server_id, bucket)`)に切り替える**。旧表は `bucket` 単独が主キーのため、列を足しても同じ 5 分枠に 2 台目の行が入らない(`INSERT OR IGNORE` で捨てられる)。作り直しは本番稼働中のため不可。旧表は以後書かず、既存の掃除(90 日)で自然に空になる。旧表の行は新表へコピーしない(履歴グラフは未実装で読む画面が無く、コピーは最大約 2.6 万行の書き込みになるため)。履歴を画面化するときに必要なら旧表を既定サーバーの分として併せて読む。
+2. **`server_snapshots.server_id` は既定サーバーを `NULL` ではなく `0` にする**。SQLite の主キー(rowid 表)は `NULL` 同士を別物として扱い、`INSERT OR IGNORE` の重複判定が効かないため。`audit_log` は指示どおり既存行と同じ `NULL` を既定サーバーとする(既存行の UPDATE を避けるため)。読み替えは backend の 1 か所(`ServerId` ↔ 列の値)にまとめる。
+3. **サーバー設定の変更ログは別テーブル `settings_audit_log`**。`audit_log.event` の CHECK 制約は SQLite では ALTER できず、表の作り直しは禁止。代替案の検討: (a) `PRAGMA writable_schema` で CHECK を書き換える → D1 では使えない前提で、破損の危険もあるため不採用、(b) 既存の event 値(`login` 等)に相乗りして params で区別する → ログの意味が壊れ、CHECK の保護も無意味になるため不採用、(c) CHECK 無しの新しい汎用監査表に全面移行 → 既存行の移行が必要で範囲が大きいため不採用。`settings_audit_log.event` には CHECK を付けず、コード側の `SETTINGS_EVENTS` で検証する(今後の設定イベントをマイグレーション無しで足せるようにするため)。D1 への変更と変更ログの INSERT は `db.batch()` で 1 トランザクションにする(片方だけ残らない。M-2)。
+4. **`servers.id` は AUTOINCREMENT**(削除した id を再利用しない)。`audit_log.server_id` / `server_snapshots` / `settings_audit_log` が削除後も古い id を指すため、別のサーバーが同じ id を引き継ぐと履歴が混ざる。
+5. **外部キーは張らない**。既定サーバーは `servers` に行が無く(0 / NULL)、削除後もログは残すため。
+6. **削除は行の物理削除**(暗号化済みパスワードも消える)。ログ・スナップショットは残し、各ログに残した `server_name` で後から読める。スナップショットは 90 日の掃除に任せる(削除時に消すと最大 2.6 万行の書き込みになるため)。
+7. **`audit_log` に `server_name` 列も足す**(指示の `server_id` に加えた項目)。サーバーを改名・削除した後も、操作ログの「どのサーバーか」が読めるようにする(`target_name` と同じ考え方)。既定サーバーは `NULL` で、画面がカタログ(`server.defaultName`)で表示する。
+8. 一意性: 表示名(`idx_servers_name`)と、`(scheme, host, port)`(`idx_servers_endpoint`)。重複は 400 `VALIDATION_FAILED`(`fields.name` / `fields.host` = `duplicate`)。既定サーバーの `RCON_URL` との重複は検査しない(Secret の中身を比較のために読むだけで実害が無く、利用者が移行のために一時的に二重登録することもあるため)。
+
+#### 入力の検証(ホスト名・ポート)
+
+`parseRconUrl` と同じ規則を使う(6.1)。手順:
+
+1. ホスト名: 前後の空白を除き小文字にする。末尾の `.` は除く。1〜253 文字。空白・`/` `?` `#` `@` `:` `[` `]` `\` を含めば `invalid_format`(`http://` やポートまで貼り付けた入力もここで弾く。画面は「ホスト名だけを入力」と案内する)。
+2. ポート: 1〜65535 の整数。数値でなければ `invalid_format`、範囲外・小数は `out_of_range`。
+3. `parseRconUrl()` に `"http://" + ホスト名 + ":" + ポート` を渡す。`RCON_URL_IS_IP_ADDRESS` → `ip_address`、`RCON_URL_INVALID` / `RCON_URL_HAS_CREDENTIALS` → `invalid_format`。成功したら `new URL()` が正規化した `hostname`(国際化ドメイン名は punycode)を保存する。
+4. 表示名: 前後の空白を除いて 1〜32 文字(コードポイント)、改行・制御文字不可(`invalid_characters`)。
+5. パスワード: 1〜256 文字。`ADMIN_PASSWORD` と同じなら `same_as_admin_password`(5.2 と同じ考え方)。24 文字未満は保存できるが一覧で `passwordShort`。
+
+### 15.3 RCON パスワードの暗号化
+
+| 項目 | 決定 |
+|---|---|
+| 方式 | AES-256-GCM(Web Crypto)。IV は 12 バイトの乱数を毎回生成 |
+| 鍵 | `HKDF-SHA256(ikm, salt="wardogs-ops/v1", info="server-password")` で AES-GCM 256 bit 鍵を派生(`extractable: false`) |
+| ikm | 鍵の出所 `k` で決める。`k = "s"`: `UTF-8(SESSION_SECRET)`(SESSION_SECRET を設定しているとき)。`k = "a"`: `UTF-8(ADMIN_PASSWORD)`(未設定のとき)。5.1 のほかの鍵(ikm = SESSION_SECRET と ADMIN_PASSWORD の連結)とは ikm を分ける |
+| 保存形式 | `v1.<k>.<iv>.<ct>`。`k` は `s` / `a`、`iv` は 12 バイト、`ct` は Web Crypto の出力(暗号文 + 認証タグ 16 バイト)。`iv` と `ct` は base64url(パディング無し)。最大約 400 文字 |
+| 追加認証データ(AAD) | `UTF-8("wardogs-ops/server-password/v1|" + k + "|" + scheme + "://" + host + ":" + port)`。暗号文を別の行(別の宛先)にコピーしても復号できない |
+| 復号に使う鍵 | 行の `k` に従う(`a` の行は SESSION_SECRET の有無に関係なく ADMIN_PASSWORD 由来の鍵で復号する) |
+| 復号の失敗 | 形式不正・`k = "s"` なのに SESSION_SECRET が無い・GCM の認証失敗(鍵が変わった)。その行は `needsPassword: true` として一覧に出し、そのサーバーへの読み取り・操作は 409 `SERVER_NEEDS_PASSWORD`。1 台でもあれば警告 `SERVER_PASSWORDS_UNREADABLE`(ログインは止めない)。パスワードを入れ直せば解消する |
+| 自動移行 | SESSION_SECRET が設定されている状態で `k = "a"` の行を復号できたら、`GET /api/servers` の応答後(`waitUntil`)にその行を `k = "s"` で暗号化し直して `rcon_password_enc` だけを UPDATE する(1 行 1 回きり。内容は変わらないので `updated_at` と変更ログは触らない) |
+| 平文の扱い | 平文は RCON への fetch の直前にメモリ上でだけ復号する。API 応答・ログ・エラーに出さない。保存後に画面へ返さない(編集時は「変更しない場合は空欄」) |
+
+Secrets の変更と、登録サーバーのパスワードへの影響:
+
+| 変更 | ログイン中のセッション | 登録サーバーのパスワード |
+|---|---|---|
+| ADMIN_PASSWORD を変更(SESSION_SECRET 無し) | 全員ログアウト | **すべて再入力が必要**(`needsPassword`) |
+| ADMIN_PASSWORD を変更(SESSION_SECRET あり、`k = "s"` に移行済み) | 全員ログアウト | 影響なし |
+| SESSION_SECRET を新しく設定(ADMIN_PASSWORD はそのまま) | 全員ログアウト | 影響なし(`a` の行はそのまま読め、次に一覧を開いたときに `s` へ移行) |
+| SESSION_SECRET の設定と ADMIN_PASSWORD の変更を同時に行う | 全員ログアウト | `a` の行は再入力が必要 |
+| SESSION_SECRET を変更・削除 | 全員ログアウト | `s` の行は再入力が必要 |
+
+根拠:
+
+1. 指示どおり AES-256-GCM + HKDF。追加の Secret(暗号鍵専用)を増やさないことで、「環境変数を触らなくてよい」という要望に合わせる。
+2. SESSION_SECRET があるときは SESSION_SECRET **だけ**から鍵を作る。5.1 と同じ ikm(連結)にすると、SESSION_SECRET を設定していても ADMIN_PASSWORD の変更で全台が読めなくなり、README で「SESSION_SECRET を設定すれば影響を受けない」と書けないため。
+3. 復号できない場合に自動で消したり止めたりせず「再入力が必要」と表示するのは、パスワード変更のたびにサーバー設定を作り直させないため(表示名・ホスト名・ポートは残る)。
+4. 脅威の整理: D1 の中身だけが漏れた場合(エクスポート等)、鍵は Secrets から作るため平文は得られない。ただし SESSION_SECRET 未設定のときは、暗号文から ADMIN_PASSWORD をオフラインで総当たりされ得る(HKDF は低速化しない。Cookie と同じ弱点で QA S-1 の論点)。README で SESSION_SECRET の設定を勧める。Cloudflare アカウント自体を乗っ取られた場合は Secrets ごと漏れるため防げない(12 章と同じ)。
+5. CPU: AES-GCM の復号は 1 行あたり十数マイクロ秒程度の見込みで、一覧(最大 21 行)でも無料プランの 10 ms/リクエストに影響しない。鍵の派生は isolate 内でキャッシュする(`getKeys` と同じ方式)。
+
+### 15.4 既定サーバー(Secrets)と設定の判定
+
+- `RCON_URL` と `RCON_PASSWORD` の**両方が設定され、`RCON_URL` が正しい**とき、既定サーバー(`id: "default"`、`source: "secrets"`、`name: null`)を一覧の先頭に出す。画面からは編集・削除できない(409 `SERVER_READ_ONLY`)。消すときは Secrets を削除する。常に有効(`enabled: true`)。
+- **片方だけ設定**されているときは `RCON_URL_MISSING` / `RCON_PASSWORD_MISSING`、**`RCON_URL` が不正**なときは `RCON_URL_INVALID` / `RCON_URL_IS_IP_ADDRESS` / `RCON_URL_HAS_CREDENTIALS` を警告に出す。いずれも**ログインは止めない**。既定サーバーは `secretsIssue` 付き・`usable: false` で一覧に出し、選んで使おうとすると 503 `NOT_CONFIGURED`。
+- **両方とも未設定**なら既定サーバーは無い(警告も出さない。登録サーバーだけで使う正常な状態)。
+- ログインを止める警告(`/setup` へ誘導)は次の 4 つだけになる: `ADMIN_PASSWORD_MISSING`、`ADMIN_PASSWORD_TOO_SHORT`、`ADMIN_PASSWORD_EQUALS_RCON_PASSWORD`、`SESSION_SECRET_TOO_SHORT`。`ADMIN_PASSWORD_EQUALS_RCON_PASSWORD` を残すのは、これが ADMIN_PASSWORD の強度要件(5.2)の一部だから(登録サーバーでは保存時に `same_as_admin_password` で拒否するので、同じ規則になる)。
+- `/setup` の「未設定の Secrets」に出すのは `ADMIN_PASSWORD` だけ(`LOGIN_REQUIRED_SECRETS`)。RCON 系は「確認が必要な項目」に出る。
+- **サーバーが 0 台**(既定サーバーも登録サーバーも無い)でもログインできる。状態・プレイヤー・BAN の画面は「サーバーを追加してください」の案内と `/servers` へのリンクを出し、RCON を呼ぶ API は 409 `NO_SERVERS`。
+- 既定サーバーの `lastTest` は isolate 内メモリの値だけ(D1 に行が無いため。無ければ `null`)。
+
+### 15.5 サーバーの選択と切り替え
+
+ページでの決め方(上から順に、見つかった時点で決定):
+
+1. クエリ `?server=<ServerId>`。形式が `SERVER_ID_PATTERN` に合い、そのサーバーがあればそれ。**指定されたのに無い(削除済み等)・形式不正なら、ほかのサーバーに切り替えずに「見つかりません」(`SERVER_NOT_FOUND`)を表示する**(別のサーバーを操作してしまう取り違えを防ぐため)。
+2. Cookie `__Host-wo_server`(開発時は `wo_server`)。指す先が無ければ無視して Cookie を消す。
+3. 表示順で最初の `usable` なサーバー。
+4. それも無ければ表示順の先頭(使えない理由を表示)。0 台なら 15.4 の案内。
+
+- 1 で決まったときは、ページの応答で Cookie を発行する(`HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000`〔30 日〕。開発時は `Secure` なし)。**署名しない**: 値はサーバーの id だけで、毎回 D1 と照合する。書き換えられてもログイン済みの人が元々使えるサーバーに切り替わるだけで、署名しても守るものが無い。ログアウト時に消す。
+- ヘッダーにサーバーのセレクト(有効なサーバー。`needsPassword` は印を付けて表示)。JS 無しでも動くよう、`?server=` を送る GET フォーム + 送信ボタンにする(JS があれば選択で即送信)。現在のパスを保つ。
+- ナビゲーションのリンクには `?server=<現在の id>` を付ける(複数タブで別々のサーバーを開いていても、Cookie の書き換えで他のタブが別サーバーに変わらないように)。
+- React アイランドは選択中の `serverId` を props で受け取り、**すべての API 呼び出しに明示して送る**。切り替えはページ遷移(全体の再読み込み)で行い、アイランド内の状態を持ち越さない。
+
+API での決め方:
+
+- GET はクエリ `server`、POST は本文の `server`。
+- 読み取り API(`status` / `players` / `bans` / `maps` / `capabilities`)で `server` が無い場合は、Cookie → 最初の `usable` の順で決める(更新前から開いていたタブとの互換のため)。
+- **書き込み(`actions/prepare` / `actions/execute`)は `server` 必須**(無ければ 400 `VALIDATION_FAILED`、`fields.server = required`)。
+- 形式不正は 400(`fields.server = invalid_format`)、無い → 404 `SERVER_NOT_FOUND`、無効 → 409 `SERVER_DISABLED`、復号不可 → 409 `SERVER_NEEDS_PASSWORD`、既定サーバーの Secrets 不備 → 503 `NOT_CONFIGURED`、0 台 → 409 `NO_SERVERS`。
+
+### 15.6 RCON 呼び出し・確認トークン・キャッシュ(サーバーごと)
+
+- **サーバーの解決**: RCON を呼ぶ API は毎回 D1 から対象の 1 行を主キーで読み、復号して `RconConfig`(`baseUrl`、`password`)を作る。**isolate 内にサーバー設定をキャッシュしない**(削除・無効化・パスワード変更を、別の isolate でも即時に効かせるため。D1 の読み取り 1 行/リクエストは無料枠に十分収まる)。
+- **確認トークン**(4.3、`src/lib/confirm.ts`): payload に `sv`(ServerId)と `sh`(`SHA-256(baseUrl)` の先頭 128 bit の base64url)を追加して署名する。execute の検証は「1 署名・形式 → 2 セッション一致 → 3 action と params のハッシュ → **3' `sv` が本文の `server` と一致し、`sh` が現在の baseUrl と一致** → 4 期限」。3' の不一致は 400 `CONFIRM_INVALID`(4.3 の規則どおり監査ログに 1 行残す)。`sh` を含めるのは、prepare から execute までの 120 秒の間にサーバーのホスト名・ポートが変更された場合に、確認画面で見た宛先と違う宛先へ実行しないため。デプロイ前に発行された `sv` 無しのトークンは `CONFIRM_INVALID`(有効期間 120 秒のため実害は小さい)。
+- execute の時点でもサーバーを解決し直し、無い・無効・復号不可なら `SERVER_*` で拒否する(監査ログに `status=failed`・`error_code` 付きで 1 行残す。`CAPABILITY_MISSING` と同じ扱い)。
+- **監査ログ**: 書き込み操作の行に `server_id`(既定は NULL)と `server_name`(その時点の表示名。既定は NULL)を残す。`recordRejected` も同じ。
+- **capabilities のキャッシュ**(6.4): 単一のキャッシュを、キー `${serverId}|${baseUrl}` の Map に変える(最大 `MAX_SERVERS + 1` 件。超えたら古いものから捨てる)。`?refresh=1` の 1 分 1 回の制限もサーバーごと。`RCON_ROUTE_NOT_FOUND` を受けたとき・そのサーバーの更新・削除・接続テストのときは、そのサーバーの分だけ破棄する。
+- **人数スナップショット**(4.4): `server_snapshots` に `(server_id, bucket)` で `INSERT OR IGNORE`。isolate 内の「記録済み bucket」もサーバーごと(Map)。記録されるのは誰かが画面で開いているサーバーだけ。
+- **BAN 一覧の名前補完・unban の対象名**(`knownBanNames` / `lastKnownName`): サーバーで絞らず全サーバーの監査ログから引く(Steam ID は全サーバー共通で、名前の手掛かりとして有用なため)。
+- **接続テスト**: RCON `GET /v1/status`(タイムアウト 5 秒、6.2 の fetch 方針どおり)。成功なら RCON のサーバー名と人数を返す。結果は `servers.last_test_at` / `last_test_result` に保存する(既定サーバーはメモリ)。同じサーバーへのテストは isolate 内で 5 秒に 1 回まで(超えたら 429 `RATE_LIMITED`)。
+- **保存は接続テストに失敗しても行う**。根拠: ゲームサーバーが停止中・再起動中だったり、ポート開放を後から行ったりすることがあり、テスト成功を保存の条件にすると設定の順序を強制してしまう。結果は応答と一覧に出し、失敗の理由(`RCON_*` のコード)ごとに対処を案内する。
+- **ホスト名・ポートを変えるときはパスワードの再入力を必須にする**(`fields.password = reenter_required`)。根拠: ログイン Cookie を盗んだ者が宛先だけを自分のサーバーに書き換え、保存済みのパスワードを `Authorization: Bearer` で受け取る(パスワードの持ち出し)ことを防ぐ。AAD に宛先を含めているため、再暗号化の点でも新しいパスワードが必要になる。
+- 接続先の安全性: 登録できるのはログイン済みの運営者だけ。宛先の規則は `RCON_URL` と同じ(IP 直指定不可、認証情報不可)。リダイレクトは追わない(6.2)ので、Bearer が登録した宛先以外に送られることは無い。
+
+### 15.7 画面 `/servers`
+
+- ログイン後のナビゲーションに「サーバー設定」を追加する。
+- 一覧: 表示名(既定サーバーは「既定サーバー(Secrets)」)、ホスト名:ポート(既定サーバーは表示しない)、有効 / 無効、直近の接続テストの結果と時刻、「パスワードの再入力が必要」「パスワードが短め」の表示、操作(編集・接続テスト・有効化/無効化・削除。既定サーバーは接続テストのみ)。
+- 追加・編集フォーム: 表示名 / ホスト名 / ポート / RCON パスワード の 4 項目だけ。編集時のパスワード欄は空(「変更しない場合は空欄」。ホスト名かポートを変えたときは必須)。保存すると接続テストの結果を表示する。
+- 削除: 確認ダイアログで表示名を入力させ、`confirmName` として送る(Worker で現在の表示名と照合)。削除と変更ログは同じトランザクション。
+- `features.servers` が false(D1 が無い・0002 未適用)のときは、一覧(既定サーバーのみ)と「データベースが使えないため追加できません」(`SERVERS_UNAVAILABLE`)を表示し、フォームを出さない。
+- 操作ログ(`/audit`)は「操作」(audit_log)と「設定変更」(settings_audit_log)を切り替えるタブにする(`kind`)。「操作」はサーバーで絞り込める(既定は全サーバー。`server=all`)。各行にサーバー名を出す。
+
+### 15.8 段階的有効化(7.4)との関係
+
+| 段階 | 既定サーバー(Secrets) | 登録サーバー(D1) |
+|---|---|---|
+| 0. 未設定(ADMIN_PASSWORD の不足・不正) | − | − |
+| 1. D1 が無い | 読み取り可。書き込みは `AUDIT_REQUIRED` 次第(従来どおり) | 使えない。一覧は既定サーバーだけで、追加は 503 `SERVERS_UNAVAILABLE` |
+| 1. D1 はあるが 0002 未適用 | 段階 1 と同じ(`D1_NOT_MIGRATED`) | 同上 |
+| 2. 通常 | 全機能 | 全機能 |
+
+- D1 の判定(`probeD1`)は、0002 で作った表・列を参照する 1 文(例 `SELECT server_id, server_name FROM audit_log LIMIT 1` に `servers`・`server_snapshots`・`settings_audit_log` の参照を合わせたもの)で行い、失敗したら `not_migrated`。根拠: `deploy` は「`wrangler deploy` → マイグレーション」の順(C-5)で、新しいコードが 0002 より一瞬先に動く。その間に `server_id` 列付きの INSERT が失敗して `INTERNAL_ERROR` になるより、読み取り専用で止める方が安全(fail closed)。
+- `features.servers` は `features.audit` と同じ判定(D1 が使えて最新のマイグレーションまで適用済み)。
+- `AUDIT_REQUIRED="false"` でも登録サーバーは使えない(登録サーバー自体が D1 にあるため)。
+
+### 15.9 無料枠への影響(11 章への追加)
+
+- Worker リクエスト: 変わらない(画面が叩くのは選択中の 1 台分だけ)。`/servers` は一覧 1 回 + 必要なときの接続テスト。
+- サブリクエスト: RCON を呼ぶ API はサーバーの解決で D1 読み取りが 1 回増える。`/api/status` は最大 5(RCON 2 + D1 判定 1 + サーバー 1 + スナップショット 1)、`/api/actions/execute` は 4〜5。いずれも 50 / 同時 6 に収まる。
+- D1 書き込み: スナップショットは「開いているサーバー 1 台につき 5 分に 1 行」。全 21 台を 24 時間開き続けた最悪でも `21 × 288 = 6,048` 行/日(インデックス更新を含めて約 1.2 万行、上限の 12%)。設定変更・接続テストは 1 回 1〜2 行。自動移行(15.3)は 1 行 1 回きり。
+- D1 読み取り: サーバーの解決 1 行/リクエスト、一覧は最大 20 行。500 万行/日に遠い。
+- ストレージ: `servers` は 1 行 1 KB 未満。
+
+### 15.10 モック RCON(仕様。実装は backend)
+
+- 環境変数 `MOCK_RCON_PORTS`(カンマ区切り。例 `7776,7777`)で、1 つのプロセスが複数のポートで待ち受ける。ポートごとに状態(プレイヤー・BAN)を独立に持ち、サーバー名は `Mock Server <ポート>` にする(画面でどちらに繋がっているか見分けるため)。
+- 従来の `MOCK_RCON_PORT`(1 つ)はそのまま使える(`MOCK_RCON_PORTS` が優先)。パスワードは全ポート共通で `MOCK_RCON_PASSWORD`(既定は公開のダミー値)。ポートごとに変えたい場合は `MOCK_RCON_PASSWORDS`(カンマ区切り、`MOCK_RCON_PORTS` と同じ順)。
+- 別の方法として `MOCK_RCON_PORT` を変えて `pnpm mock:rcon` を 2 回起動してもよい(現状のままで可能)。
+- ローカルでは `/servers` から ホスト名 `localhost`・ポート `7777` などで追加する(`127.0.0.1` は IP 直指定のため不可)。README・テストに書く値はダミーのみ。
+
+### 15.11 多言語化(13 章との関係)
+
+- architect がカタログに足したもの(型で必須のため): `error.SERVER_*` / `error.SERVERS_UNAVAILABLE` / `error.NO_SERVERS`、`validation.out_of_range` など 6 つ、`setup.warning.SERVER_PASSWORDS_UNREADABLE`、`audit.event.server_add` / `server_update` / `server_delete`。
+- frontend-pages が足すもの: `nav.servers`、`servers.*`(一覧・フォーム・削除確認)、`server.defaultName`(既定サーバーの表示名)、`header.server*`(セレクト)、`field.name` / `field.host` / `field.port` / `field.password` / `field.server` / `field.confirmName`、`audit.kind.*`・`audit.serverFilter.*`、`audit.param.*`(設定変更の内容)、確認ダイアログのサーバー名表示。
+- 運営者が入力した表示名・ホスト名は翻訳しない(13.1 の「翻訳しないもの」に含める)。
+
+### 15.12 実装の分担
+
+- backend: `src/lib/config.ts`(`LOGIN_REQUIRED_SECRETS` への切り替え、ログインを止める警告の縮小、`probeD1` の更新、`features.servers`)、`src/lib/keys.ts`(`server-password` 鍵 2 種)、新規 `src/lib/servers.ts`(検証・暗号化・CRUD・解決・接続テスト)、`src/lib/confirm.ts`(`sv` / `sh`)、`src/lib/actions.ts` / `reads.ts` / `rcon/capabilities.ts` / `snapshots.ts` / `audit.ts`(サーバーごと、`settings_audit_log`、絞り込み、掃除)、`src/lib/runtime.ts`(対象サーバーの解決)、`src/lib/http.ts`(PUT / DELETE の JSON 本文)、`src/pages/api/servers/*`、`src/pages/logout.ts`(選択 Cookie の削除)、`src/layouts/page-context.ts`(サーバー一覧と選択中のサーバー、Cookie の発行)、`scripts/mock-rcon.mjs`、`src/lib/testing/sqlite-d1.ts`(0002 も適用)とテスト。`REQUIRED_SECRETS` の利用をやめたら architect に報告する(型から削除する)。
+- frontend-pages: ヘッダーのセレクト、ナビゲーション、`/servers` 画面、各アイランドの `serverId` props と API 呼び出し、確認ダイアログのサーバー名、操作ログのタブと絞り込み、0 台の案内。
+- architect: 実装が揃った時点で、`src/types/api.ts` の「実装後に必須化」の `?` を外す。README 2・3 章と `.dev.vars.example` / `package.json` の `cloudflare.bindings` から `RCON_URL` / `RCON_PASSWORD` を外す(Deploy ボタンのフォームに出すのを `ADMIN_PASSWORD` だけにする。U-7)。
