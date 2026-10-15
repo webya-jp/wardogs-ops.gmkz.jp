@@ -41,7 +41,7 @@ export const ja = {
   'setup.register.passwordConfirm': '管理パスワード(確認のためもう一度)',
   'setup.register.help': '{min} 文字以上、{max} 文字以内。',
   'setup.register.notesTitle': 'パスワードの決め方',
-  'setup.register.noteRandom': 'ランダムな 24 文字以上を推奨します。パスワード管理ソフトの生成機能を使うと簡単です(作り方は README の「パスワードを 2 つ作る」)。',
+  'setup.register.noteRandom': 'ランダムな 24 文字以上を推奨します。パスワード管理ソフトの生成機能を使うと簡単です(作り方は README の「1. パスワードを 2 つ作る」)。',
   'setup.register.noteSeparate': 'ゲームサーバーの RCON パスワードや、ほかのサービスのパスワードとは別の値にしてください。',
   'setup.register.noteNoRecover': '登録したパスワードはあとから画面で確認できません。パスワード管理ソフトなど安全な場所に保管してください。',
   'setup.register.submit': '登録する',
