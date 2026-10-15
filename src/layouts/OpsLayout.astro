@@ -2,13 +2,18 @@
 // 運営パネル共通のレイアウト。lang は解決済みの言語、noindex、OG なし。
 // ctx(ログイン後のページの共通値)があるときだけ、ヘッダーの操作者名・ログアウト・ナビ・お知らせを出す。
 // 文言はすべてカタログ経由(docs/ARCHITECTURE.md 13 章)。
+// サーバーの切り替え(docs/ARCHITECTURE.md 15.5): ヘッダーのセレクトは ?server= を送る GET フォーム(JS 無しでも動く。
+// JS があれば選択で即送信)。現在のパスを保つ。ナビのリンクには ?server=<選択中の id> を付け、
+// 複数タブで別々のサーバーを開いていても Cookie の書き換えで他のタブが別サーバーに変わらないようにする。
 import '../styles/ops.css';
 import SessionNotices from '../components/SessionNotices';
 import { formatDateTime, getTranslator, toLocale } from '../i18n';
 import type { Language, MessageKey } from '../i18n';
 import type { PageContext } from './page-context';
+import type { ServerSummary } from '../types/api';
+import { serverLabel } from '../components/lib/servers';
 
-export type NavId = 'status' | 'players' | 'bans' | 'audit';
+export type NavId = 'status' | 'players' | 'bans' | 'audit' | 'servers';
 
 interface Props {
   title: string;
@@ -29,7 +34,22 @@ const NAV: { id: NavId; href: string; label: MessageKey }[] = [
   { id: 'players', href: '/players', label: 'nav.players' },
   { id: 'bans', href: '/bans', label: 'nav.bans' },
   { id: 'audit', href: '/audit', label: 'nav.audit' },
+  { id: 'servers', href: '/servers', label: 'nav.servers' },
 ];
+
+const currentServerId = ctx?.serverId ?? null;
+const withServer = (href: string) => (currentServerId ? `${href}?server=${encodeURIComponent(currentServerId)}` : href);
+
+// セレクトに出すのは有効なサーバー(選択中のものは無効でも出す。今どれを見ているか分かるように)
+const switchable: ServerSummary[] = ctx ? ctx.servers.filter((s) => s.enabled || s.id === currentServerId) : [];
+const optionLabel = (s: ServerSummary): string => {
+  const name = serverLabel(s, t);
+  if (!s.enabled) return t('header.serverDisabled', { name });
+  if (s.needsPassword) return t('header.serverNeedsPassword', { name });
+  if (!s.usable) return t('header.serverUnusable', { name });
+  return name;
+};
+const currentPath = Astro.url.pathname;
 
 const session = ctx?.session ?? null;
 const operatorText = session
@@ -58,7 +78,21 @@ const expiresText =
     <a class="skip-link" href="#main">{t('layout.skipToMain')}</a>
     <header class="site-header">
       <div class="container">
-        <a class="brand" href={session ? '/' : '/login'}>{appName}</a>
+        <a class="brand" href={session ? withServer('/') : '/login'}>{appName}</a>
+        {session && ctx && switchable.length > 0 && (
+          <form class="server-switch" method="get" action={currentPath} data-server-switch>
+            <label for="server-select">{t('header.server')}</label>
+            <select id="server-select" name="server">
+              {ctx.serverNotFound && (
+                <option value="" selected disabled>{t('server.notFound.title')}</option>
+              )}
+              {switchable.map((s) => (
+                <option value={s.id} selected={s.id === currentServerId && !ctx.serverNotFound}>{optionLabel(s)}</option>
+              ))}
+            </select>
+            <button type="submit" class="button-small">{t('header.serverSwitch')}</button>
+          </form>
+        )}
         {session && (
           <div class="header-session">
             <span>{operatorText}</span>
@@ -76,7 +110,7 @@ const expiresText =
           <ul>
             {NAV.map((item) => (
               <li>
-                <a href={item.href} aria-current={item.id === active ? 'page' : undefined}>{t(item.label)}</a>
+                <a href={withServer(item.href)} aria-current={item.id === active ? 'page' : undefined}>{t(item.label)}</a>
               </li>
             ))}
           </ul>
@@ -93,5 +127,14 @@ const expiresText =
         <slot />
       </div>
     </main>
+    <script>
+      // 選択したらすぐに切り替える(JS が無い場合は「切り替え」ボタンで送る)
+      for (const form of document.querySelectorAll<HTMLFormElement>('form[data-server-switch]')) {
+        const select = form.querySelector('select');
+        select?.addEventListener('change', () => {
+          if (select.value !== '') form.requestSubmit();
+        });
+      }
+    </script>
   </body>
 </html>

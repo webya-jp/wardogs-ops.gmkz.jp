@@ -3,10 +3,11 @@
 // - 確認内容は prepare が返した正規化済み params と targetName から、カタログの confirm.<action> で組み立てる
 // - destructive(ban / map / match_end)は強調し、確認チェックを入れるまで実行ボタンを押せない
 // - 実行中は閉じられず、二重送信しない。RCON_TIMEOUT は「結果不明」として自動で再実行しない
+// - 対象サーバー(server)を prepare・execute の両方に明示して送り、ダイアログにサーバー名を出す(docs/ARCHITECTURE.md 15.5・15.6)
 import { useEffect, useRef, useState } from 'react';
 import type { SubmitEvent } from 'react';
 import { MESSAGE_MAX_LENGTH, REASON_MAX_LENGTH } from '../types/api';
-import type { ExecuteResponse, PrepareRequest, PrepareResponse, WriteAction } from '../types/api';
+import type { ExecuteRequest, ExecuteResponse, PrepareRequest, PrepareResponse, ServerId, WriteAction } from '../types/api';
 import { apiPost } from './lib/api';
 import type { ClientError } from './lib/api';
 import type { I18n } from './lib/hooks';
@@ -24,8 +25,16 @@ export interface ActionRequestSpec {
   subject?: { name: string; steamId: string };
 }
 
+export interface TargetServer {
+  id: ServerId;
+  /** 画面に出す名前(運営者が付けた表示名、または既定サーバーのカタログ文言) */
+  label: string;
+}
+
 interface Props {
   i18n: I18n;
+  /** 操作の対象サーバー(ページで選択中のもの) */
+  server: TargetServer;
   request: ActionRequestSpec | null;
   /** map の id → displayName(RCON の生データ。表示用) */
   mapNames?: Record<string, string | null>;
@@ -43,7 +52,7 @@ const UNKNOWN_RESULT: ReadonlySet<string> = new Set(['NETWORK', 'INTERNAL_ERROR'
 /** execute 後にやり直しを出さないコード(UNKNOWN_RESULT に加えて) */
 const NO_RETRY: ReadonlySet<string> = new Set([...UNKNOWN_RESULT, 'ALREADY_EXECUTED']);
 
-export default function ConfirmDialog({ i18n, request, mapNames = {}, onClose, onDone }: Props) {
+export default function ConfirmDialog({ i18n, server, request, mapNames = {}, onClose, onDone }: Props) {
   const { t, time } = i18n;
   const dialogRef = useRef<HTMLDialogElement>(null);
   const busy = useRef(false);
@@ -70,7 +79,7 @@ export default function ConfirmDialog({ i18n, request, mapNames = {}, onClose, o
     setError(null);
     setAck(false);
     setPrepared(null);
-    const body = { action: spec.action, params: buildParams(spec, value) } as PrepareRequest;
+    const body = { server: server.id, action: spec.action, params: buildParams(spec, value) } as PrepareRequest;
     const r = await apiPost<PrepareResponse>('/api/actions/prepare', body, ctrl.signal);
     if (ctrl.signal.aborted) return;
     if (r.ok) {
@@ -123,9 +132,13 @@ export default function ConfirmDialog({ i18n, request, mapNames = {}, onClose, o
     busy.current = true;
     setStep('executing');
     setError(null);
-    const body = { action: prepared.action, params: prepared.params, confirmToken: prepared.confirmToken } as unknown as PrepareRequest & {
-      confirmToken: string;
-    };
+    // server は prepare 応答の値(確認トークンに署名済み)を優先し、無ければページで選択中のもの
+    const body = {
+      server: prepared.server ?? server.id,
+      action: prepared.action,
+      params: prepared.params,
+      confirmToken: prepared.confirmToken,
+    } as ExecuteRequest;
     const r = await apiPost<ExecuteResponse>('/api/actions/execute', body);
     busy.current = false;
     if (r.ok) {
@@ -166,6 +179,8 @@ export default function ConfirmDialog({ i18n, request, mapNames = {}, onClose, o
           {t(`confirm.${prepared.action}`, { target: targetName, map: mapDisplay ?? mapId })}
         </p>
         <dl className="kv">
+          <dt>{t('confirm.server')}</dt>
+          <dd>{server.label}</dd>
           <dt>{t('confirm.operation')}</dt>
           <dd>{t(`action.${prepared.action}`)}</dd>
           {p.steamId !== undefined && (
@@ -218,12 +233,16 @@ export default function ConfirmDialog({ i18n, request, mapNames = {}, onClose, o
 
       {step === 'input' && request.input && (
         <form onSubmit={onSubmitInput} noValidate>
-          {request.subject && (
-            <dl className="kv">
-              <dt>{t('confirm.target')}</dt>
-              <dd>{t('confirm.targetValue', { name: request.subject.name, steamId: request.subject.steamId })}</dd>
-            </dl>
-          )}
+          <dl className="kv">
+            <dt>{t('confirm.server')}</dt>
+            <dd>{server.label}</dd>
+            {request.subject && (
+              <>
+                <dt>{t('confirm.target')}</dt>
+                <dd>{t('confirm.targetValue', { name: request.subject.name, steamId: request.subject.steamId })}</dd>
+              </>
+            )}
+          </dl>
           {error && <ErrorView error={error} t={t} inlineFields={[request.input]} />}
           <div className="field">
             <label htmlFor={inputId}>
@@ -337,7 +356,7 @@ export default function ConfirmDialog({ i18n, request, mapNames = {}, onClose, o
             <button type="button" onClick={close} autoFocus>
               {t('common.close')}
             </button>
-            <a className="button push-end" href="/audit">
+            <a className="button push-end" href={`/audit?server=${encodeURIComponent(server.id)}`}>
               {t('confirm.toAudit')}
             </a>
           </div>

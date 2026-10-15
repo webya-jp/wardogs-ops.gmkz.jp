@@ -4,10 +4,10 @@
 // - useI18n: サーバーで決めた言語・タイムゾーンから t と日時・数値の整形関数を作る
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { POLL_MIN_INTERVAL_SEC } from '../../types/api';
-import type { CapabilitiesResponse } from '../../types/api';
+import type { CapabilitiesResponse, ServerId } from '../../types/api';
 import { formatDateTime, formatNumber, getTranslator, toLocale } from '../../i18n';
 import type { Language, Translator } from '../../i18n';
-import { apiGet } from './api';
+import { apiGet, withServer } from './api';
 import type { ClientError, Result } from './api';
 
 export interface I18nProps {
@@ -123,15 +123,15 @@ export function useResource<T>(path: string, pollSec: number | null): ResourceSt
   return { data, error, loading, updatedAt, refresh };
 }
 
-/** capabilities は画面表示時に 1 回だけ取る(Worker 側で 10 分キャッシュ)。取れなければ null のまま */
-export function useCapabilities(): CapabilitiesResponse | null {
+/** capabilities は画面表示時に 1 回だけ取る(Worker 側でサーバーごとに 10 分キャッシュ)。取れなければ null のまま */
+export function useCapabilities(serverId: ServerId): CapabilitiesResponse | null {
   const [caps, setCaps] = useState<CapabilitiesResponse | null>(null);
   useEffect(() => {
     const ctrl = new AbortController();
-    void apiGet<CapabilitiesResponse>('/api/capabilities', ctrl.signal).then((r) => {
+    void apiGet<CapabilitiesResponse>(withServer('/api/capabilities', serverId), ctrl.signal).then((r) => {
       if (!ctrl.signal.aborted && r.ok) setCaps(r.data);
     });
     return () => ctrl.abort();
-  }, []);
+  }, [serverId]);
   return caps;
 }

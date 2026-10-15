@@ -699,3 +699,114 @@ dialog.confirm-dialog::backdrop {
 .button-row.tight {
   margin-top: 0;
 }
+
+/* ---------- サーバーの切り替え(ヘッダー。docs/ARCHITECTURE.md 15.5) ---------- */
+
+.server-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0;
+  min-width: 0;
+}
+
+.server-switch label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.server-switch select {
+  width: auto;
+  min-width: 12em;
+  max-width: 100%;
+  flex: 1 1 12em;
+  /* iOS で入力時に拡大されないよう 16px 以上 */
+  font-size: 16px;
+}
+
+@media (max-width: 639px) {
+  .brand {
+    flex: 1 1 auto;
+  }
+
+  .server-switch {
+    order: 3;
+    flex: 1 1 100%;
+  }
+
+  .server-switch label {
+    flex: 1 1 100%;
+  }
+
+  .server-switch select {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}
+
+/* ---------- 切り替えボタン(操作ログの種類) ---------- */
+
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0;
+  margin: 0 0 12px;
+  max-width: 100%;
+}
+
+.segmented button {
+  border-radius: 0;
+  margin-left: -1px;
+}
+
+.segmented button:first-child {
+  border-radius: var(--radius) 0 0 var(--radius);
+  margin-left: 0;
+}
+
+.segmented button:last-child {
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.segmented button.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.filter-field select {
+  max-width: 28em;
+}
+
+/* ---------- サーバー設定(/servers) ---------- */
+
+.badge-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+}
+
+.badge-list .muted {
+  flex: 1 1 100%;
+}
+
+.field .field-error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.input-port {
+  max-width: 10em;
+}
+
+.add-row {
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.outcome .alert:last-of-type {
+  margin-bottom: 12px;
+}

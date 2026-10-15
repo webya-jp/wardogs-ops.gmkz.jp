@@ -9,22 +9,25 @@ import type { PlayersResponse } from '../types/api';
 import { useCapabilities, useI18n, useResource } from './lib/hooks';
 import type { I18nProps } from './lib/hooks';
 import { gateFor } from './lib/gate';
+import { withServer } from './lib/api';
 import ConfirmDialog from './ConfirmDialog';
-import type { ActionRequestSpec } from './ConfirmDialog';
+import type { ActionRequestSpec, TargetServer } from './ConfirmDialog';
 import ErrorView from './ErrorView';
 import GateNotes from './GateNotes';
 
 interface Props extends I18nProps {
   writesEnabled: boolean;
+  /** 選択中のサーバー。すべての API 呼び出しに明示して送る(docs/ARCHITECTURE.md 15.5) */
+  server: TargetServer;
 }
 
 const ACTIONS = ['message', 'kick', 'ban'] as const;
 
-export default function PlayersTable({ language, timeZone, writesEnabled }: Props) {
+export default function PlayersTable({ language, timeZone, writesEnabled, server }: Props) {
   const i18n = useI18n({ language, timeZone });
   const { t, time, num } = i18n;
-  const players = useResource<PlayersResponse>('/api/players', POLL_MIN_INTERVAL_SEC);
-  const caps = useCapabilities();
+  const players = useResource<PlayersResponse>(withServer('/api/players', server.id), POLL_MIN_INTERVAL_SEC);
+  const caps = useCapabilities(server.id);
   const [request, setRequest] = useState<ActionRequestSpec | null>(null);
 
   const messageGate = gateFor('message', caps, writesEnabled);
@@ -129,6 +132,7 @@ export default function PlayersTable({ language, timeZone, writesEnabled }: Prop
       )}
       <ConfirmDialog
         i18n={i18n}
+        server={server}
         request={request}
         onClose={() => setRequest(null)}
         onDone={(action) => {

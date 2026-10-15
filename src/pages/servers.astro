@@ -1,0 +1,13 @@
+---
+// サーバー設定(/servers)。docs/ARCHITECTURE.md 15.7。サーバーの一覧・追加・編集・有効/無効・接続テスト・削除。手動更新。
+// features.servers が false(D1 が使えない・0002 未適用)のときは一覧(既定サーバーのみ)と案内だけでフォームを出さない。
+export const prerender = false;
+import OpsLayout from '../layouts/OpsLayout.astro';
+import { getPageContext } from '../layouts/page-context';
+import ServersPanel from '../components/ServersPanel';
+
+const ctx = await getPageContext(Astro.request, Astro.locals, Astro.response);
+---
+<OpsLayout title={ctx.t('servers.title')} language={ctx.language} ctx={ctx} active="servers">
+  <ServersPanel client:load language={ctx.language} timeZone={ctx.timeZone} initialManageable={ctx.features.servers === true} />
+</OpsLayout>

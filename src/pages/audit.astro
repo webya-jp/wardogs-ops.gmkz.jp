@@ -1,12 +1,15 @@
 ---
-// 操作ログ(/audit)。docs/ARCHITECTURE.md 9 章。50 件ずつ。日時は vars TIMEZONE で表示。手動更新。
+// 操作ログ(/audit)。docs/ARCHITECTURE.md 9 章・15.7。50 件ずつ。日時は vars TIMEZONE で表示。手動更新。
+// 「操作」「設定変更」のタブと、サーバーでの絞り込み(既定は全サーバー)はアイランド内の状態で持つ。
 export const prerender = false;
 import OpsLayout from '../layouts/OpsLayout.astro';
 import { getPageContext } from '../layouts/page-context';
 import AuditLog from '../components/AuditLog';
+import { serverLabel } from '../components/lib/servers';
 
-const ctx = await getPageContext(Astro.request, Astro.locals);
+const ctx = await getPageContext(Astro.request, Astro.locals, Astro.response);
+const servers = ctx.servers.map((s) => ({ id: s.id, label: serverLabel(s, ctx.t) }));
 ---
 <OpsLayout title={ctx.t('nav.audit')} language={ctx.language} ctx={ctx} active="audit">
-  <AuditLog client:load language={ctx.language} timeZone={ctx.timeZone} />
+  <AuditLog client:load language={ctx.language} timeZone={ctx.timeZone} servers={servers} />
 </OpsLayout>

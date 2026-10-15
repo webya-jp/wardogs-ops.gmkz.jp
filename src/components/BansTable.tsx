@@ -6,22 +6,25 @@ import type { BansResponse } from '../types/api';
 import { useCapabilities, useI18n, useResource } from './lib/hooks';
 import type { I18nProps } from './lib/hooks';
 import { gateFor } from './lib/gate';
+import { withServer } from './lib/api';
 import ConfirmDialog from './ConfirmDialog';
-import type { ActionRequestSpec } from './ConfirmDialog';
+import type { ActionRequestSpec, TargetServer } from './ConfirmDialog';
 import ErrorView from './ErrorView';
 import GateNotes from './GateNotes';
 
 interface Props extends I18nProps {
   writesEnabled: boolean;
+  /** 選択中のサーバー。すべての API 呼び出しに明示して送る(docs/ARCHITECTURE.md 15.5) */
+  server: TargetServer;
 }
 
 const ACTIONS = ['unban'] as const;
 
-export default function BansTable({ language, timeZone, writesEnabled }: Props) {
+export default function BansTable({ language, timeZone, writesEnabled, server }: Props) {
   const i18n = useI18n({ language, timeZone });
   const { t, time, dateTime, num } = i18n;
-  const bans = useResource<BansResponse>('/api/bans', null);
-  const caps = useCapabilities();
+  const bans = useResource<BansResponse>(withServer('/api/bans', server.id), null);
+  const caps = useCapabilities(server.id);
   const [request, setRequest] = useState<ActionRequestSpec | null>(null);
   const unbanGate = gateFor('unban', caps, writesEnabled);
   const list = bans.data?.bans ?? [];
@@ -92,7 +95,7 @@ export default function BansTable({ language, timeZone, writesEnabled }: Props) 
           </table>
         </div>
       )}
-      <ConfirmDialog i18n={i18n} request={request} onClose={() => setRequest(null)} onDone={() => bans.refresh()} />
+      <ConfirmDialog i18n={i18n} server={server} request={request} onClose={() => setRequest(null)} onDone={() => bans.refresh()} />
     </section>
   );
 }

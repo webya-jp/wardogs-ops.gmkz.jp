@@ -1,6 +1,13 @@
 // API の失敗を表示する。文言は code でカタログ(error.<code>・validation.<issue>)から引く。
 // rconMessage は RCON の生データなので翻訳せず、補足としてそのまま出す(docs/ARCHITECTURE.md 3.1・13.5)。
-import { MESSAGE_MAX_LENGTH, POLL_MIN_INTERVAL_SEC, REASON_MAX_LENGTH } from '../types/api';
+import {
+  MESSAGE_MAX_LENGTH,
+  POLL_MIN_INTERVAL_SEC,
+  REASON_MAX_LENGTH,
+  SERVER_HOST_MAX_LENGTH,
+  SERVER_NAME_MAX_LENGTH,
+  SERVER_PASSWORD_MAX_LENGTH,
+} from '../types/api';
 import type { MessageKey, Translator } from '../i18n';
 import type { ClientError } from './lib/api';
 import { isMessageKey } from './lib/keys';
@@ -10,11 +17,23 @@ const FIELD_LABELS: Record<string, MessageKey> = {
   reason: 'field.reason',
   message: 'field.message',
   map: 'field.map',
+  name: 'field.name',
+  host: 'field.host',
+  port: 'field.port',
+  password: 'field.password',
+  server: 'field.server',
+  confirmName: 'field.confirmName',
+  kind: 'field.kind',
+  enabled: 'field.enabled',
+  sortOrder: 'field.sortOrder',
 };
 
 const FIELD_MAX: Record<string, number> = {
   reason: REASON_MAX_LENGTH,
   message: MESSAGE_MAX_LENGTH,
+  name: SERVER_NAME_MAX_LENGTH,
+  host: SERVER_HOST_MAX_LENGTH,
+  password: SERVER_PASSWORD_MAX_LENGTH,
 };
 
 export function errorText(error: ClientError, t: Translator): string {

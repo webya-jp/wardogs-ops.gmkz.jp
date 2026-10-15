@@ -1,0 +1,35 @@
+---
+// 選択中のサーバーが使えないときの案内(docs/ARCHITECTURE.md 15.4・15.5)。状態・プレイヤー・BAN の各ページで使う。
+// - ?server= で指定したサーバーが無い: 「見つかりません」(ほかのサーバーに切り替えない)
+// - 0 台: 「サーバーを追加してください」と /servers への導線
+// - 選択中のサーバーが使えない(無効・パスワード再入力が必要・既定サーバーの Secrets 不備): 理由と /servers への導線
+// 何も出さない(= アイランドを描画してよい)ときは、ページ側で `ready` を同じ条件で判定する。
+import type { PageContext } from '../layouts/page-context';
+import { unusableReason } from './lib/servers';
+
+interface Props {
+  ctx: PageContext;
+}
+
+const { ctx } = Astro.props;
+const { t } = ctx;
+const reason = ctx.server && !ctx.serverNotFound ? unusableReason(ctx.server) : null;
+---
+{ctx.serverNotFound ? (
+  <section class="card" role="alert">
+    <h1>{t('server.notFound.title')}</h1>
+    <p>{t('server.notFound.help')}</p>
+    <p><a class="button" href="/servers">{t('server.toSettings')}</a></p>
+  </section>
+) : ctx.servers.length === 0 ? (
+  <section class="card">
+    <h1>{t('server.none.title')}</h1>
+    <p>{t('server.none.help')}</p>
+    <p><a class="button button-primary" href="/servers">{t('server.toSettings')}</a></p>
+  </section>
+) : reason ? (
+  <div class="alert alert-warn" role="alert">
+    <p>{t(reason)}</p>
+    <p><a href={`/servers?server=${encodeURIComponent(ctx.serverId ?? '')}`}>{t('server.toSettings')}</a></p>
+  </div>
+) : null}

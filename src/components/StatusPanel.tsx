@@ -6,23 +6,26 @@ import type { MapsResponse, StatusResponse } from '../types/api';
 import { useCapabilities, useI18n, useResource } from './lib/hooks';
 import type { I18nProps } from './lib/hooks';
 import { gateFor } from './lib/gate';
+import { withServer } from './lib/api';
 import ConfirmDialog from './ConfirmDialog';
-import type { ActionRequestSpec } from './ConfirmDialog';
+import type { ActionRequestSpec, TargetServer } from './ConfirmDialog';
 import ErrorView from './ErrorView';
 import GateNotes from './GateNotes';
 
 interface Props extends I18nProps {
   writesEnabled: boolean;
+  /** 選択中のサーバー。すべての API 呼び出しに明示して送る(docs/ARCHITECTURE.md 15.5) */
+  server: TargetServer;
 }
 
 const ACTIONS = ['broadcast', 'map', 'match_end'] as const;
 
-export default function StatusPanel({ language, timeZone, writesEnabled }: Props) {
+export default function StatusPanel({ language, timeZone, writesEnabled, server }: Props) {
   const i18n = useI18n({ language, timeZone });
   const { t, time, num } = i18n;
-  const status = useResource<StatusResponse>('/api/status', POLL_MIN_INTERVAL_SEC);
-  const maps = useResource<MapsResponse>('/api/maps', null);
-  const caps = useCapabilities();
+  const status = useResource<StatusResponse>(withServer('/api/status', server.id), POLL_MIN_INTERVAL_SEC);
+  const maps = useResource<MapsResponse>(withServer('/api/maps', server.id), null);
+  const caps = useCapabilities(server.id);
   const [request, setRequest] = useState<ActionRequestSpec | null>(null);
   const [message, setMessage] = useState('');
   const [mapId, setMapId] = useState('');
@@ -189,6 +192,7 @@ export default function StatusPanel({ language, timeZone, writesEnabled }: Props
 
       <ConfirmDialog
         i18n={i18n}
+        server={server}
         request={request}
         mapNames={mapNames}
         onClose={() => setRequest(null)}
