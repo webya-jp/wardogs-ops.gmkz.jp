@@ -227,5 +227,25 @@ Cloudflare Workers は IP アドレスを直接指定して接続できません
 
 - 設計: `docs/ARCHITECTURE.md`(構成・認証・要確認一覧)、`docs/API.md`(内部 API と RCON の対応)、`docs/PLAN.md`(企画)
 - ローカル開発: `pnpm install` → `.dev.vars.example` を `.dev.vars` にコピーして値を入れる → `pnpm db:migrate:local` → `pnpm dev`
-- ビルド: `pnpm build`。型チェック: `pnpm check`
+- ビルド: `pnpm build`。型チェック: `pnpm check`。単体テスト: `pnpm test`
 - 手動デプロイ: `pnpm build` → `pnpm run deploy`(`wrangler deploy` の後に D1 のマイグレーションを適用)
+- API の確認記録: `docs/API_TEST.md`
+
+### ローカルで動かす(モック RCON を使う)
+
+本物のゲームサーバーが無くても、付属のモック RCON(`scripts/mock-rcon.mjs`。架空のプレイヤーと BAN が入っている)で画面と API を試せます。
+
+1. `pnpm install`
+2. `.dev.vars.example` を `.dev.vars` にコピーし、次のように値を入れる(`.dev.vars` は `.gitignore` 済みでコミットされません)
+   - `ADMIN_PASSWORD`: 16 文字以上の任意の文字列(ローカル用。本番と同じ値にしない)
+   - `RCON_URL`: `http://localhost:7776`(`127.0.0.1` のような IP アドレスは使えない設計のため、`localhost` と書く)
+   - `RCON_PASSWORD`: モックの既定値 `mock-rcon-password-for-local-dev-only`(または、モックを起動するときに環境変数 `MOCK_RCON_PASSWORD` で指定した値)。`ADMIN_PASSWORD` とは別の値にする
+3. `pnpm db:migrate:local`(ローカルの D1 に表を作る。初回だけ)
+4. 端末を 2 つ開き、先に `pnpm mock:rcon`、次に `pnpm dev` を起動する(モックのポートは環境変数 `MOCK_RCON_PORT` で変えられる。既定 7776)
+5. ブラウザで `pnpm dev` が表示した URL を開き、`ADMIN_PASSWORD` でログインする
+
+補足:
+
+- モックは自分の PC の中(ループバック)だけで待ち受けます。kick するとプレイヤー一覧から消え、ban すると BAN 一覧に増えます。モックを再起動すると元に戻ります
+- 開発時のログイン Cookie は `wo_session`(`Secure` なし)、本番は `__Host-wo_session` です
+- ローカルの D1 を以前の版の表で作ってしまった場合は、`.wrangler/state/v3/d1` を別名に移してから `pnpm db:migrate:local` をやり直してください

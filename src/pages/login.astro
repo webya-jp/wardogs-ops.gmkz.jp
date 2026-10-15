@@ -1,0 +1,81 @@
+---
+// ログイン。GET: フォーム(ログイン済みなら / へ 303)、POST: 認証(docs/API.md 2 章、docs/ARCHITECTURE.md 4.1)。
+// Origin 検査・設定チェックは middleware が先に行う。見た目は frontend-pages が整える(文言はカタログ経由)。
+import { handleLogin } from '../lib/auth';
+import { getFeatures } from '../lib/config';
+import { clientIp, getWaitUntil, readFormBody, redirect } from '../lib/http';
+import { getKeys } from '../lib/keys';
+import { getEnv, IS_DEV } from '../lib/runtime';
+import { getTranslator, resolveLanguage } from '../i18n';
+import type { MessageKey } from '../i18n';
+
+const env = getEnv();
+const language = resolveLanguage(env.LANGUAGE, Astro.request.headers.get('Accept-Language'));
+const t = getTranslator(language);
+
+let errorKey: MessageKey | null = null;
+let errorParams: Record<string, number> | undefined;
+
+if (Astro.request.method === 'POST') {
+  const [keys, state] = await Promise.all([getKeys(env), getFeatures(env)]);
+  const result = await handleLogin({
+    env,
+    keys,
+    form: await readFormBody(Astro.request),
+    ip: clientIp(Astro.request),
+    db: state.db,
+    dev: IS_DEV,
+    waitUntil: getWaitUntil(Astro.locals),
+  });
+  switch (result.kind) {
+    case 'success':
+      return redirect('/', 303, { 'Set-Cookie': result.setCookie });
+    case 'not_configured':
+      return redirect('/setup', 303);
+    case 'locked':
+      Astro.response.status = 429;
+      errorKey = 'login.locked';
+      errorParams = { minutes: result.minutes };
+      break;
+    case 'bad_request':
+      Astro.response.status = 400;
+      errorKey = 'login.badRequest';
+      break;
+    case 'failed':
+      Astro.response.status = 401;
+      errorKey = 'login.failed';
+      break;
+  }
+} else if (Astro.request.method === 'GET' || Astro.request.method === 'HEAD') {
+  if (Astro.locals.session) return redirect('/', 303);
+} else {
+  return new Response(null, { status: 405, headers: { Allow: 'GET, POST' } });
+}
+---
+<!doctype html>
+<html lang={language}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>{t('login.title')} | {t('app.name')}</title>
+  </head>
+  <body>
+    <main>
+      <h1>{t('login.title')}</h1>
+      {errorKey && <p role="alert">{t(errorKey, errorParams)}</p>}
+      <form method="post" action="/login">
+        <p>
+          <label for="password">{t('login.password')}</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" required />
+        </p>
+        <p>
+          <label for="operator">{t('login.operator')}</label>
+          <input id="operator" name="operator" type="text" autocomplete="nickname" maxlength="32" aria-describedby="operator-help" />
+          <small id="operator-help">{t('login.operatorHelp')}</small>
+        </p>
+        <button type="submit">{t('login.submit')}</button>
+      </form>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,54 @@
+---
+// 設定不足の案内(最小版)。docs/ARCHITECTURE.md 5.7。
+// 未ログインでも見られる。設定が揃っているときは「設定済み」以外を出さない。
+// 不足時は Secret の名前と警告の種類だけを出す(値・長さ・接続先は出さない)。見た目は frontend-pages が整える。
+import { checkConfig } from '../lib/config';
+import { getEnv } from '../lib/runtime';
+import { getTranslator, resolveLanguage } from '../i18n';
+import type { MessageKey } from '../i18n';
+
+const env = getEnv();
+const language = resolveLanguage(env.LANGUAGE, Astro.request.headers.get('Accept-Language'));
+const t = getTranslator(language);
+const config = checkConfig(env);
+const warningKeys = config.warnings.map((w) => `setup.warning.${w}` as MessageKey);
+---
+<!doctype html>
+<html lang={language}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>{t('setup.title')} | {t('app.name')}</title>
+  </head>
+  <body>
+    <main>
+      <h1>{t('setup.title')}</h1>
+      {config.ok ? (
+        <>
+          <p>{t('setup.configured')}</p>
+          <p><a href="/login">{t('setup.toLogin')}</a></p>
+        </>
+      ) : (
+        <>
+          <p>{t('setup.intro')}</p>
+          {config.missing.length > 0 && (
+            <section>
+              <h2>{t('setup.missingTitle')}</h2>
+              <ul>
+                {config.missing.map((name) => <li><code>{name}</code></li>)}
+              </ul>
+            </section>
+          )}
+          <section>
+            <h2>{t('setup.warningsTitle')}</h2>
+            <ul>
+              {warningKeys.map((key) => <li>{t(key)}</li>)}
+            </ul>
+          </section>
+          <p>{t('setup.readme')}</p>
+        </>
+      )}
+    </main>
+  </body>
+</html>

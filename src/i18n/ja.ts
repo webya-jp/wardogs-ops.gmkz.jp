@@ -6,7 +6,7 @@
  * - RCON から返る生データ(マップ名、陣営名、プレイヤー名など)はカタログに入れない(翻訳しない)
  * - 他の言語を足すときは `src/i18n/<言語コード>.ts` を `Catalog` 型(全キー必須)で作る(手順は docs/ARCHITECTURE.md 13.7)
  */
-import type { ApiErrorCode, ValidationIssue } from '../types/api';
+import type { ApiErrorCode, SetupWarning, ValidationIssue } from '../types/api';
 
 export const ja = {
   // 共通
@@ -22,7 +22,32 @@ export const ja = {
   'login.failed': 'パスワードが違います。',
   'login.locked': 'ログインの失敗が続いたため、約 {minutes} 分間ログインできません。',
   'login.forbidden': 'このリクエストは受け付けられません。ページを開き直してください。',
+  'login.badRequest': '送信内容を読み取れませんでした。もう一度お試しください。',
   'logout.submit': 'ログアウト',
+
+  // 設定の案内(/setup)
+  'setup.title': '設定の確認',
+  'setup.configured': '設定済みです。',
+  'setup.toLogin': 'ログイン画面へ',
+  'setup.intro': '次の設定が足りないか、正しくありません。Cloudflare のダッシュボードで Workers & Pages > wardogs-ops > Settings > Variables and Secrets を開き、値を入れ直してください。',
+  'setup.missingTitle': '未設定の Secrets',
+  'setup.warningsTitle': '確認が必要な項目',
+  'setup.readme': '詳しい手順は README の「Secrets の意味」と「困ったとき」を参照してください。',
+
+  // 設定の警告(SetupWarning ごと。全コード必須)
+  'setup.warning.ADMIN_PASSWORD_MISSING': 'ADMIN_PASSWORD(ログインパスワード)が設定されていません。',
+  'setup.warning.ADMIN_PASSWORD_TOO_SHORT': 'ADMIN_PASSWORD が短すぎます。16 文字以上にしてください。',
+  'setup.warning.ADMIN_PASSWORD_EQUALS_RCON_PASSWORD': 'ADMIN_PASSWORD と RCON_PASSWORD が同じです。別の値にしてください。',
+  'setup.warning.RCON_URL_MISSING': 'RCON_URL(RCON の接続先)が設定されていません。',
+  'setup.warning.RCON_URL_INVALID': 'RCON_URL の形式が正しくありません。http://ホスト名:ポート の形にしてください(末尾の /v1 は付けません)。',
+  'setup.warning.RCON_URL_IS_IP_ADDRESS': 'RCON_URL に IP アドレスは使えません。ホスト名を用意してください(README の「IP アドレスしか無い場合」を参照)。',
+  'setup.warning.RCON_URL_HAS_CREDENTIALS': 'RCON_URL にユーザー名やパスワードを含めないでください。パスワードは RCON_PASSWORD に入れます。',
+  'setup.warning.RCON_PASSWORD_MISSING': 'RCON_PASSWORD(RCON のパスワード)が設定されていません。',
+  'setup.warning.RCON_PASSWORD_SHORT': 'RCON_PASSWORD が短めです。ランダムな 32 文字以上を推奨します。',
+  'setup.warning.SESSION_SECRET_TOO_SHORT': 'SESSION_SECRET が短すぎます。32 文字以上にするか、削除してください。',
+  'setup.warning.D1_MISSING': '操作ログ用のデータベース(D1)が見つかりません。読み取り専用で動いています。',
+  'setup.warning.D1_NOT_MIGRATED': '操作ログ用のデータベース(D1)の準備(マイグレーション)が済んでいません。読み取り専用で動いています。',
+  'setup.warning.AUDIT_DISABLED_WRITES_ALLOWED': '操作ログを残さずに操作できる設定になっています(AUDIT_REQUIRED="false")。',
 
   // API エラー(ApiErrorCode ごと。全コード必須)
   'error.BAD_REQUEST': 'リクエストを読み取れませんでした。',
@@ -60,7 +85,8 @@ export const ja = {
   'validation.unknown_map': 'このマップは一覧にありません。',
 } as const satisfies Record<string, string> &
   Record<`error.${ApiErrorCode}`, string> &
-  Record<`validation.${ValidationIssue}`, string>;
+  Record<`validation.${ValidationIssue}`, string> &
+  Record<`setup.warning.${SetupWarning}`, string>;
 
 /** メッセージのキー(ja が正本) */
 export type MessageKey = keyof typeof ja;

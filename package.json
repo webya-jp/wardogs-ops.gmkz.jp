@@ -14,10 +14,12 @@
     "build": "astro build",
     "preview": "astro build && wrangler dev",
     "check": "astro check",
+    "test": "vitest run",
     "deploy": "wrangler deploy && wrangler d1 migrations apply DB --remote",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
-    "cf-typegen": "wrangler types src/types/worker-configuration.d.ts"
+    "cf-typegen": "wrangler types src/types/worker-configuration.d.ts",
+    "mock:rcon": "node scripts/mock-rcon.mjs"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^14.3.4",
@@ -32,6 +34,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "typescript": "^5.9.3",
+    "vitest": "^5.0.4",
     "wrangler": "^4.149.0"
   },
   "pnpm": {
