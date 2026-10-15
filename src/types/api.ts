@@ -167,7 +167,9 @@ export type SetupWarning =
   | 'SESSION_SECRET_TOO_SHORT'
   | 'D1_MISSING'
   | 'D1_NOT_MIGRATED'
-  | 'AUDIT_DISABLED_WRITES_ALLOWED';
+  | 'AUDIT_DISABLED_WRITES_ALLOWED'
+  /** 全体のログイン失敗が直近 1 時間で 50 回を超えた(ログインは止めない。docs/ARCHITECTURE.md 5.6) */
+  | 'LOGIN_FAILURES_HIGH';
 
 /** GET /api/session */
 export interface SessionResponse {

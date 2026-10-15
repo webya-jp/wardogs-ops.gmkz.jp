@@ -48,6 +48,7 @@ export const ja = {
   'setup.warning.D1_MISSING': '操作ログ用のデータベース(D1)が見つかりません。読み取り専用で動いています。',
   'setup.warning.D1_NOT_MIGRATED': '操作ログ用のデータベース(D1)の準備(マイグレーション)が済んでいません。読み取り専用で動いています。',
   'setup.warning.AUDIT_DISABLED_WRITES_ALLOWED': '操作ログを残さずに操作できる設定になっています(AUDIT_REQUIRED="false")。',
+  'setup.warning.LOGIN_FAILURES_HIGH': '直近 1 時間にログインの失敗が多数あります。パスワードが推測されにくいものか確認し、心当たりが無ければ ADMIN_PASSWORD の変更を検討してください。',
 
   // API エラー(ApiErrorCode ごと。全コード必須)
   'error.BAD_REQUEST': 'リクエストを読み取れませんでした。',

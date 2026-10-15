@@ -44,7 +44,9 @@
 
 ### `GET /api/session` → `SessionResponse`
 
-ログイン中のセッション情報、段階的有効化の状態(`features`)、設定の警告(`warnings`)。RCON は呼ばない。
+ログイン中のセッション情報、段階的有効化の状態(`features`)、設定の警告(`warnings`。`SetupWarning` の配列)。RCON は呼ばない。
+
+`warnings` には設定の警告に加え、全体のログイン失敗が直近 1 時間で 50 回を超えたときに `LOGIN_FAILURES_HIGH` が入る(ログインは止めない。ARCHITECTURE 5.6)。文言は画面がカタログの `setup.warning.<コード>` で引く。
 
 ### `GET /api/capabilities` → `CapabilitiesResponse`
 
@@ -112,7 +114,9 @@ audit_log を新しい順に返す。`limit` は 1〜100(既定 50)、`before` �
 }
 ```
 
-確認トークンの中身: `{ v:1, a:action, h:SHA-256(正規化した params の JSON) の先頭 128 bit, s:セッション ID, e:期限(発行から 120 秒), n:nonce 128 bit }` を base64url にし、確認用鍵の HMAC-SHA256 で署名。中身は秘密ではないが改ざんできない。
+確認トークンの中身: `{ v:1, a:action, h:SHA-256(正規化した params の JSON) の先頭 128 bit, s:セッション ID, e:期限(発行から 120 秒), n:nonce 128 bit, t?:対象名 }` を base64url にし、確認用鍵の HMAC-SHA256 で署名。中身は秘密ではないが改ざんできない。
+
+- `t`(任意): prepare で解決した対象プレイヤーの名前(最大 64 文字)。execute は RCON を呼び直さずにこの値を監査ログの `target_name` に残す。署名で保護されるため差し替えできない。画面はトークンの中身を解釈・表示しない(表示には prepare 応答の `targetName` を使う)。
 
 ### `POST /api/actions/execute`
 
@@ -127,7 +131,7 @@ audit_log を新しい順に返す。`limit` は 1〜100(既定 50)、`before` �
 | 3 | action と params のハッシュが一致 | 400 `CONFIRM_INVALID` |
 | 4 | 期限内 | 409 `CONFIRM_EXPIRED`(画面は prepare からやり直す) |
 | 5 | audit_log に pending で INSERT(`confirm_nonce` UNIQUE) | 重複は 409 `ALREADY_EXECUTED` |
-| 6 | RCON の書き込みルートを 1 回呼ぶ(再試行なし) | 第 5 章の `RCON_*`。audit_log を failed に更新 |
+| 6 | RCON の書き込みルートを 1 回呼ぶ(再試行なし)。**2xx なら本文が JSON でなくても・空でも成功**(本文は解釈しない。R-18) | 第 5 章の `RCON_*`。audit_log を failed に更新 |
 | 7 | audit_log を succeeded に更新 | − |
 
 応答 `ExecuteResponse`: `{ auditId, action, executedAt }`。
@@ -161,7 +165,7 @@ audit_log を新しい順に返す。`limit` は 1〜100(既定 50)、`before` �
 | `RCON_RATE_LIMITED` | 503 | RCON が 429。`retryAfterSec` 付き |
 | `RCON_ROUTE_NOT_FOUND` | 502 | RCON が 404 |
 | `RCON_REJECTED` | 422 | RCON がその他の 4xx。`rconMessage` 付き |
-| `RCON_BAD_RESPONSE` | 502 | 応答が JSON でない・大きすぎる・リダイレクト |
+| `RCON_BAD_RESPONSE` | 502 | 読み取りの応答が JSON でない・大きすぎる、またはリダイレクト(書き込みの 2xx は本文に関係なく成功) |
 | `RCON_ERROR` | 502 | RCON が 5xx |
 | `INTERNAL_ERROR` | 500 | Worker 内部の想定外のエラー |
 

@@ -70,6 +70,10 @@ Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
    │  ├─ throttle.ts          # ログイン失敗のレート制限(D1 / メモリ)
    │  ├─ csrf.ts              # Origin / Sec-Fetch-Site 検査
    │  ├─ http.ts              # JSON 応答・エラー整形・本文の読み取り
+   │  ├─ runtime.ts           # env・waitUntil など Worker ランタイムの取得
+   │  ├─ auth.ts              # ログイン・ログアウトの処理(password / throttle / session / audit をまとめる)
+   │  ├─ reads.ts             # 読み取り API の共通処理(RCON 呼び出し → 正規化 → 応答)
+   │  ├─ actions.ts           # 書き込み操作の prepare / execute(検証、確認トークン、監査ログ、RCON 呼び出し)
    │  ├─ validate.ts          # 入力検証(Steam ID、文字数)
    │  ├─ confirm.ts           # 確認トークン
    │  ├─ audit.ts             # 監査ログ
@@ -206,6 +210,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
   2. `Origin` が無ければ `Sec-Fetch-Site: same-origin` を要求
   3. どちらも無ければ拒否(403 `FORBIDDEN_ORIGIN`。ページは 403 の簡易 HTML)
 - `/api/*` の POST は `Content-Type: application/json` を必須(他サイトの単純フォームからは送れない)。
+- Astro 標準の origin 検査(`security.checkOrigin`)は**無効化**し、上記の middleware の検査に一本化する。標準検査はフォーム形式の POST だけが対象で JSON 等は見ず、middleware より先に本文を読まずに 403(セキュリティヘッダ無し)を返し、開発サーバーでは直後の同一接続のリクエストが 500 になるため(`docs/API_TEST.md` 4 章。本番は C-19)。middleware の検査は GET / HEAD 以外の全リクエストが対象で、拒否前に本文を読み捨てる。
 - 許可オリジンを設定値で持たない(workers.dev でもカスタムドメインでも、リクエスト自身のオリジンと比較する)。
 
 ### 5.6 ログイン失敗のレート制限
@@ -216,7 +221,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 |---|---|
 | 接続元ごと(`ip:<HMAC 先頭 16 桁>`。IPv6 は /64) | 15 分の窓で失敗 5 回 → その窓の終わりまでロック |
 | ロック中 | パスワードを評価しない。失敗回数も増やさない(書き込みを増やさない) |
-| 全体(`global`) | 失敗回数を数えるだけ。1 時間に 50 回を超えたら画面上部に警告。**全体ロックはしない**(第三者が運営者を締め出せてしまうため。総当たりへの備えは 16 文字以上のパスワードで行う) |
+| 全体(`global`) | 失敗回数を数えるだけ。1 時間に 50 回を超えたら画面上部に警告(`SetupWarning` の `LOGIN_FAILURES_HIGH`、`/api/session` の `warnings`)。**全体ロックはしない**(第三者が運営者を締め出せてしまうため。総当たりへの備えは 16 文字以上のパスワードで行う) |
 | 失敗時の待ち | 約 300 ms(応答を遅らせる。Workers の CPU 時間には数えられない) |
 | D1 が無い場合 | isolate 内のメモリで同じ規則を近似(isolate ごとに独立し、再起動で消える。弱いことを /setup で表示) |
 
@@ -260,9 +265,10 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 | 429 | `RCON_RATE_LIMITED`(`Retry-After` を秒で `retryAfterSec` に) | RCON 側の上限 |
 | 400 / 409 / 422 等その他 4xx | `RCON_REJECTED`(本文の `error`/`message` 文字列を 200 文字に切り詰め、制御文字を除いて `rconMessage` に) | 例: 対象がオフライン |
 | 5xx | `RCON_ERROR` | サーバー内部エラー |
-| JSON として解釈できない 2xx | `RCON_BAD_RESPONSE` | 形式が想定外 |
+| JSON として解釈できない 2xx(読み取り) | `RCON_BAD_RESPONSE` | 形式が想定外 |
+| 2xx(書き込み。本文が JSON でなくても・空でも) | 成功 | 書き込みの成否は HTTP ステータスで判断し、本文は解釈しない(実行済みの kick 等を失敗と記録しないため)。監査ログには `rcon_status` を残す |
 
-エラー本文の形式は未検証(R-14)。`rconMessage` は JSON の文字列フィールドからだけ取り、HTML 等はそのまま返さない。
+エラー本文の形式は未検証(R-14)。書き込みの 2xx の本文形式も未検証のため、成功判定に本文を使わない(R-18)。`rconMessage` は JSON の文字列フィールドからだけ取り、HTML 等はそのまま返さない。
 
 ### 6.4 capabilities によるルート判定
 
@@ -541,6 +547,7 @@ login_throttle の最悪値が上限に近いため、**global の失敗が 1 �
 - **R-15** 認証失敗(パスワード違い)と AllowedHosts による拒否のステータスの違い、失敗が続いたときのロックアウトの有無(送信元を共有する他者の失敗に巻き込まれないか)。
 - **R-16** サーバーの提供元ごとに、RCON ポートをインターネットに公開できるか(運営者ごとの確認事項。README で案内)。
 - **R-17** 開発元による公式ドキュメント・RCON の外部利用に関する規約(未確認)。
+- **R-18** 書き込みルートの成功時の応答(ステータスが 200 / 204 のどちらか、本文の有無と形式)。現在は 2xx なら本文に関係なく成功とする。
 
 ### Cloudflare(一次資料で未確定、または実機確認が必要)
 
@@ -562,6 +569,7 @@ login_throttle の最悪値が上限に近いため、**global の失敗が 1 �
 - **C-16** `@astrojs/cloudflare@14` で `waitUntil` を取る方法(`cloudflare:workers` の `waitUntil` か、locals 経由か)。
 - **C-17** D1 の「書き込み行数」にインデックス更新が数えられるか(11.3 の見積りの余裕)。
 - **C-18** Workers Logs(`observability.enabled`)の無料枠と保持期間。
+- **C-19** 本文を読まずに返した応答の直後、同じ接続の次のリクエストが 500 になる事象(開発サーバーで観測。`docs/API_TEST.md` 4 章)が本番の Workers でも起きるか。Astro 標準の origin 検査は無効化し、middleware と API は拒否前に本文を読み捨てる対策をしたが、他の早期応答(アダプタ・アセット等)で起きないかを含めて確認する。
 
 ### 多言語化(13 章)
 
