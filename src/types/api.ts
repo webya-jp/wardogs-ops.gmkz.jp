@@ -8,9 +8,8 @@
  *   コード(ApiErrorCode / ValidationIssue)で返し、画面は src/i18n のカタログで文言を引く
  * - 複数サーバー(docs/ARCHITECTURE.md 第 15 章、docs/API.md 7 章): RCON を呼ぶ API は対象サーバーを
  *   `server`(ServerId。GET はクエリ、POST は本文)で受け取る。RCON パスワードはどの応答にも含めない
- *
- * 移行中の注記: 複数サーバー対応で既存の型に足した項目のうち、現行の実装がまだ値を入れていないものは
- * optional(`?`)にしてある(「実装後に必須化」と書いたもの)。backend / frontend の実装が揃ったら architect が `?` を外す。
+ * - Worker Secrets は使わない(2026-10-16。docs/ARCHITECTURE.md 第 5 章): 管理パスワードは /setup で登録し
+ *   D1 admins に PBKDF2 のハッシュで保存、鍵は D1 settings の instance_key から HKDF で派生する
  */
 
 // ============================================================
@@ -55,14 +54,15 @@ export const API_ERROR_CODES = [
   // 機能の可否
   'CAPABILITY_MISSING',
   'WRITES_DISABLED',
+  /** D1 が無い・マイグレーション未適用(docs/ARCHITECTURE.md 7.4) */
   'NOT_CONFIGURED',
+  /** 管理者が未登録(/setup で管理パスワードを登録する前) */
+  'SETUP_REQUIRED',
   // サーバー(複数サーバー対応。docs/ARCHITECTURE.md 第 15 章)
   'SERVER_NOT_FOUND',
   'SERVER_DISABLED',
   'SERVER_NEEDS_PASSWORD',
-  'SERVER_READ_ONLY',
   'SERVER_LIMIT_REACHED',
-  'SERVERS_UNAVAILABLE',
   'NO_SERVERS',
   // RCON
   'RCON_UNREACHABLE',
@@ -94,12 +94,11 @@ export const API_ERROR_STATUS: Record<ApiErrorCode, number> = {
   CAPABILITY_MISSING: 409,
   WRITES_DISABLED: 503,
   NOT_CONFIGURED: 503,
+  SETUP_REQUIRED: 503,
   SERVER_NOT_FOUND: 404,
   SERVER_DISABLED: 409,
   SERVER_NEEDS_PASSWORD: 409,
-  SERVER_READ_ONLY: 409,
   SERVER_LIMIT_REACHED: 409,
-  SERVERS_UNAVAILABLE: 503,
   NO_SERVERS: 409,
   RCON_UNREACHABLE: 502,
   RCON_TIMEOUT: 504,
@@ -127,7 +126,7 @@ export const VALIDATION_ISSUES = [
   'ip_address',
   /** 同じ表示名、または同じホスト名とポートのサーバーが既にある */
   'duplicate',
-  /** RCON パスワードが ADMIN_PASSWORD と同じ */
+  /** RCON パスワードが管理パスワード(D1 admins に登録したもの)と同じ */
   'same_as_admin_password',
   /** 削除の確認で入力した表示名が一致しない */
   'mismatch',
@@ -163,6 +162,12 @@ export const POLL_MIN_INTERVAL_SEC = 30;
 /** /api/audit の 1 回の最大件数 */
 export const AUDIT_PAGE_MAX = 100;
 
+// ---- 管理パスワード(docs/ARCHITECTURE.md 5.2。/setup の画面でも使う) ----
+/** 管理パスワードの長さの下限(文字数、コードポイント単位)。README.md と同期 */
+export const ADMIN_PASSWORD_MIN_LENGTH = 16;
+/** 管理パスワードの長さの上限(文字数)。ログインではこれを超えた分を評価しない */
+export const ADMIN_PASSWORD_MAX_LENGTH = 256;
+
 // ---- 複数サーバー(docs/ARCHITECTURE.md 第 15 章) ----
 /** 画面から追加できるサーバーの上限(既定サーバーは数えない) */
 export const MAX_SERVERS = 20;
@@ -174,10 +179,8 @@ export const SERVER_HOST_MAX_LENGTH = 253;
 export const SERVER_PASSWORD_MAX_LENGTH = 256;
 /** 同じサーバーへの接続テスト(POST /api/servers/:id/test)の最短間隔(秒。isolate 内で判定) */
 export const SERVER_TEST_MIN_INTERVAL_SEC = 5;
-/** Secrets(RCON_URL / RCON_PASSWORD)による既定サーバーの id */
-export const DEFAULT_SERVER_ID = 'default';
-/** ServerId の形式: 'default' または servers.id の 10 進(先頭 0 なし) */
-export const SERVER_ID_PATTERN = /^(?:default|[1-9][0-9]{0,9})$/;
+/** ServerId の形式: servers.id の 10 進(先頭 0 なし)。既定サーバー('default')は 2026-10-16 に廃止 */
+export const SERVER_ID_PATTERN = /^[1-9][0-9]{0,9}$/;
 
 // ============================================================
 // セッション・機能の可否
@@ -192,43 +195,68 @@ export interface SessionInfo {
   expiresAt: number;
 }
 
-/** 段階的有効化の状態(docs/ARCHITECTURE.md 7.4) */
+/**
+ * 機能の可否(docs/ARCHITECTURE.md 7.4)。D1 必須化(2026-10-16)により、ログインできている間は通常すべて true。
+ * 将来、機能単位で止める場合のために形を残す
+ */
 export interface Features {
   /** D1 に書けて操作ログが残せる */
   audit: boolean;
   /** 人数スナップショットを記録できる(audit と同じ D1 に依存) */
   snapshots: boolean;
-  /** 書き込み操作を受け付ける(audit が true、または AUDIT_REQUIRED="false") */
+  /** 書き込み操作を受け付ける */
   writes: boolean;
-  /**
-   * 画面からサーバーを追加・変更・削除できる(D1 が使え、マイグレーション 0002 まで適用済み = audit と同じ判定)。
-   * false のときは既定サーバー(Secrets)だけが使える。実装後に必須化
-   */
-  servers?: boolean;
 }
 
-/** /setup・画面上部に出す設定の警告(値は含めない) */
+/**
+ * /setup・画面上部に出す設定の警告(値は含めない)。
+ * D1_MISSING / D1_NOT_MIGRATED はログイン前の /setup だけに出る(この状態ではログインできない)。
+ * Secrets 関連の警告は Worker Secrets の廃止(2026-10-16)で削除した
+ */
 export type SetupWarning =
-  | 'ADMIN_PASSWORD_MISSING'
-  | 'ADMIN_PASSWORD_TOO_SHORT'
-  | 'ADMIN_PASSWORD_EQUALS_RCON_PASSWORD'
-  | 'RCON_URL_MISSING'
-  | 'RCON_URL_INVALID'
-  | 'RCON_URL_IS_IP_ADDRESS'
-  | 'RCON_URL_HAS_CREDENTIALS'
-  | 'RCON_PASSWORD_MISSING'
-  | 'RCON_PASSWORD_SHORT'
-  | 'SESSION_SECRET_TOO_SHORT'
   | 'D1_MISSING'
   | 'D1_NOT_MIGRATED'
-  | 'AUDIT_DISABLED_WRITES_ALLOWED'
   /** 全体のログイン失敗が直近 1 時間で 50 回を超えた(ログインは止めない。docs/ARCHITECTURE.md 5.6) */
   | 'LOGIN_FAILURES_HIGH'
   /**
-   * 画面から追加したサーバーのうち、保存済みの RCON パスワードを復号できないものがある
-   * (ADMIN_PASSWORD または SESSION_SECRET を変えた後に起きる。docs/ARCHITECTURE.md 15.3)。ログインは止めない
+   * 登録サーバーのうち、保存済みの RCON パスワードを復号できないものがある。通常は起きない
+   * (D1 settings の instance_key を手で消した・書き換えた場合や、データの破損。docs/ARCHITECTURE.md 15.3)。ログインは止めない
    */
   | 'SERVER_PASSWORDS_UNREADABLE';
+
+// ============================================================
+// 初期設定(/setup。docs/ARCHITECTURE.md 5.1、docs/API.md 2 章)
+// ============================================================
+
+/**
+ * POST /setup(フォーム)が失敗したときの理由。画面はカタログ `setup.error.<code>` で文言を引く。
+ * /setup はページ(フォーム POST)なので ApiErrorCode とは別の系列にする
+ */
+export const SETUP_FORM_ERRORS = [
+  /** フォームを読み取れない */
+  'BAD_REQUEST',
+  /** ADMIN_PASSWORD_MIN_LENGTH 未満(空を含む) */
+  'PASSWORD_TOO_SHORT',
+  /** ADMIN_PASSWORD_MAX_LENGTH 超 */
+  'PASSWORD_TOO_LONG',
+  /** 確認入力が一致しない */
+  'PASSWORD_MISMATCH',
+  /** 登録済みサーバーの RCON パスワードと同じ(管理者を消して登録し直す場合に起き得る) */
+  'PASSWORD_SAME_AS_RCON',
+  /** 既に管理者が登録されている(先に誰かが登録した・二重送信) */
+  'SETUP_ALREADY_DONE',
+] as const;
+export type SetupFormError = (typeof SETUP_FORM_ERRORS)[number];
+
+/** POST /setup の失敗時の HTTP ステータス(フォームを再表示する) */
+export const SETUP_FORM_ERROR_STATUS: Record<SetupFormError, number> = {
+  BAD_REQUEST: 400,
+  PASSWORD_TOO_SHORT: 400,
+  PASSWORD_TOO_LONG: 400,
+  PASSWORD_MISMATCH: 400,
+  PASSWORD_SAME_AS_RCON: 400,
+  SETUP_ALREADY_DONE: 409,
+};
 
 /** GET /api/session */
 export interface SessionResponse {
@@ -331,23 +359,41 @@ export interface MapsResponse {
 
 /** GET /api/audit?limit=&before= */
 export interface AuditResponse {
-  /** D1 が使えない場合は false(entries は空) */
+  /** D1 が使えない場合は false(entries は空)。D1 必須化により通常は常に true */
   available: boolean;
-  /** 応答に含めた種類(クエリ kind。既定 operations)。実装後に必須化 */
-  kind?: AuditKind;
+  /** 応答に含めた種類(クエリ kind。既定 operations) */
+  kind: AuditKind;
   entries: AuditEntry[];
   /** 次のページを取るときの before に渡す id。無ければ null */
   nextBefore: number | null;
 }
 
-/** パネル設定の変更イベント(D1 settings_audit_log。audit_log の event CHECK には足せないため別テーブル) */
-export const SETTINGS_EVENTS = ['server_add', 'server_update', 'server_delete'] as const;
+/**
+ * パネル設定の変更イベント(D1 settings_audit_log。audit_log の event CHECK には足せないため別テーブル)。docs/ARCHITECTURE.md 8.6・15.2
+ * - server_add / server_update / server_delete: サーバーの変更(常に status = succeeded)
+ * - server_update_rejected: ホスト名・ポートの変更を RCON パスワードの再入力なしで拒否した(params.reason = 'reenter_required')
+ * - server_delete_rejected: 削除の確認の表示名が一致せず拒否した(params.reason = 'mismatch')
+ *   (拒否の 2 つは status = failed、errorCode = VALIDATION_FAILED。QA M-2: 保存済みパスワードの持ち出し・誤削除の試行を残す)
+ * - server_test: 接続テスト(保存済みのパスワードを外へ送る操作のため記録する)。params.result が 'ok' なら succeeded、
+ *   それ以外(RCON_* のコード)なら failed で errorCode = params.result
+ * - admin_register: /setup での管理パスワードの登録(乗っ取りの調査用に接続元ハッシュを残す)
+ * 管理パスワードの変更画面を作るときに 'admin_password_change' を足す
+ */
+export const SETTINGS_EVENTS = [
+  'server_add',
+  'server_update',
+  'server_delete',
+  'server_update_rejected',
+  'server_delete_rejected',
+  'server_test',
+  'admin_register',
+] as const;
 export type SettingsEvent = (typeof SETTINGS_EVENTS)[number];
 
 export type AuditEventType = WriteAction | 'login' | 'logout' | SettingsEvent;
 
 /**
- * GET /api/audit の `kind`。operations = audit_log(RCON 操作・ログイン)、settings = settings_audit_log(サーバーの追加・変更・削除)。
+ * GET /api/audit の `kind`。operations = audit_log(RCON 操作・ログイン)、settings = settings_audit_log(サーバーの追加・変更・削除、管理者の登録)。
  * 2 つは別テーブルで id の系列が違うため、1 回の応答には混ぜない(docs/API.md 3 章)
  */
 export const AUDIT_KINDS = ['operations', 'settings'] as const;
@@ -358,6 +404,11 @@ export type AuditKind = (typeof AUDIT_KINDS)[number];
  */
 export type AuditStatus = 'pending' | 'succeeded' | 'failed' | 'unknown';
 
+/**
+ * 操作ログ・設定変更ログの 1 行(kind = operations / settings で共通の形)。
+ * settings の行: status は succeeded / failed のみ(pending・unknown は出ない)、errorCode は SETTINGS_EVENTS の説明のとおり、
+ * finishedAt は createdAt と同じ、targetSteamId / targetName / rconStatus は null
+ */
 export interface AuditEntry {
   id: number;
   createdAt: number;
@@ -374,12 +425,12 @@ export interface AuditEntry {
   rconStatus: number | null;
   errorCode: ApiErrorCode | null;
   /**
-   * 対象サーバー。書き込み操作で D1 の server_id が NULL の行(0002 以前の行を含む)は 'default'。
-   * login / logout は null。settings の行は対象サーバーの id(削除済みでも残る)。実装後に必須化
+   * 対象サーバー。login / logout と admin_register は null。D1 の server_id が NULL の書き込み操作の行
+   * (複数サーバー対応前の行)も null(画面は「不明」と表示)。settings の行は対象サーバーの id(削除済みでも残る)
    */
-  serverId?: ServerId | null;
-  /** 操作時点のサーバーの表示名。既定サーバー・不明は null(画面はカタログ `server.defaultName` 等で補う)。実装後に必須化 */
-  serverName?: string | null;
+  serverId: ServerId | null;
+  /** 操作時点のサーバーの表示名。不明は null */
+  serverName: string | null;
 }
 
 // ============================================================
@@ -426,9 +477,9 @@ export type ActionRequest = {
 
 /**
  * POST /api/actions/prepare の本文。`server` は対象サーバー(docs/API.md 4 章)。
- * 実装後は必須(未指定は 400 VALIDATION_FAILED、fields.server = required)。型は移行中のため optional
+ * 必須(未指定は 400 VALIDATION_FAILED、fields.server = required)
  */
-export type PrepareRequest = ActionRequest & { server?: ServerId };
+export type PrepareRequest = ActionRequest & { server: ServerId };
 
 /** POST /api/actions/prepare の応答 */
 export interface PrepareResponse {
@@ -444,21 +495,21 @@ export interface PrepareResponse {
   destructive: boolean;
   capability: CapabilityState;
   expiresAt: number;
-  /** 対象サーバー(確認トークンに署名済み。確認ダイアログにサーバー名を出すために使う)。実装後に必須化 */
-  server?: ServerId;
+  /** 対象サーバー(確認トークンに署名済み。確認ダイアログにサーバー名を出すために使う) */
+  server: ServerId;
 }
 
 /** POST /api/actions/execute の本文。action・params・server は prepare と同一であること(server は確認トークンで照合) */
-export type ExecuteRequest = ActionRequest & { confirmToken: string; server?: ServerId };
+export type ExecuteRequest = ActionRequest & { confirmToken: string; server: ServerId };
 
 /** POST /api/actions/execute の応答 */
 export interface ExecuteResponse {
-  /** 監査ログの id(D1 が無く AUDIT_REQUIRED="false" で実行した場合は null) */
-  auditId: number | null;
+  /** 監査ログの id(D1 必須化により常に値がある) */
+  auditId: number;
   action: WriteAction;
   executedAt: number;
-  /** 実行したサーバー。実装後に必須化 */
-  server?: ServerId;
+  /** 実行したサーバー */
+  server: ServerId;
 }
 
 // ============================================================
@@ -466,16 +517,12 @@ export interface ExecuteResponse {
 // ============================================================
 
 /**
- * サーバーの識別子。'default'(Secrets の RCON_URL / RCON_PASSWORD による既定サーバー)または
- * D1 servers.id の 10 進文字列(例 "3")。URL のクエリ・Cookie・セレクトの値にそのまま使えるよう文字列に統一する。
- * 形式は SERVER_ID_PATTERN
+ * サーバーの識別子。D1 servers.id の 10 進文字列(例 "3")。URL のクエリ・Cookie・セレクトの値にそのまま使えるよう文字列に統一する。
+ * 形式は SERVER_ID_PATTERN。Secrets による既定サーバー('default')は 2026-10-16 に廃止
  */
 export type ServerId = string;
 
-/** secrets = 既定サーバー(画面からは編集・削除できない)、db = 画面から追加したサーバー */
-export type ServerSource = 'secrets' | 'db';
-
-/** 直近の接続テストの結果(db は D1 に保存した値。既定サーバーは isolate 内の値のみで、無ければ null) */
+/** 直近の接続テストの結果(D1 servers に保存した値) */
 export interface ServerLastTest {
   at: number;
   /** 'ok' または失敗時の ApiErrorCode(RCON_*) */
@@ -485,39 +532,30 @@ export interface ServerLastTest {
 /** サーバー一覧の 1 行。**RCON パスワード・暗号文は含めない** */
 export interface ServerSummary {
   id: ServerId;
-  source: ServerSource;
-  /** 表示名。既定サーバーは null(画面はカタログ `server.defaultName` で表示) */
-  name: string | null;
-  /**
-   * ホスト名とポート(db のみ。ログイン済みの運営者に編集用に見せる)。
-   * 既定サーバーは null(RCON_URL は Secret のまま画面に出さない。docs/ARCHITECTURE.md 2 章)
-   */
-  host: string | null;
-  port: number | null;
+  /** 表示名(運営者が付けた名前。翻訳しない) */
+  name: string;
+  /** ホスト名とポート(ログイン済みの運営者に編集用に見せる) */
+  host: string;
+  port: number;
   enabled: boolean;
   sortOrder: number;
-  /** 保存済みのパスワードを復号できない(ADMIN_PASSWORD / SESSION_SECRET を変えた後など)。再入力するまで操作できない */
+  /**
+   * 保存済みのパスワードを復号できない。通常は起きない(instance_key を手で消した・データ破損。docs/ARCHITECTURE.md 15.3)。
+   * 再入力するまで操作できない
+   */
   needsPassword: boolean;
   /** RCON パスワードが RCON_PASSWORD_WARN_LENGTH 未満(警告のみ。復号できない場合は false) */
   passwordShort: boolean;
-  /**
-   * 既定サーバーの Secrets の不備(RCON_URL_MISSING / RCON_URL_INVALID / RCON_URL_IS_IP_ADDRESS /
-   * RCON_URL_HAS_CREDENTIALS / RCON_PASSWORD_MISSING)。db のサーバーは常に null
-   */
-  secretsIssue: SetupWarning | null;
-  /** 操作・読み取りに使える(enabled かつ needsPassword でなく secretsIssue が無い) */
+  /** 操作・読み取りに使える(enabled かつ needsPassword でない) */
   usable: boolean;
   lastTest: ServerLastTest | null;
-  /** db のみ。既定サーバーは null */
-  createdAt: number | null;
-  updatedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 /** GET /api/servers */
 export interface ServersResponse {
-  /** 画面からの追加・変更・削除ができる(features.servers と同じ)。false でも既定サーバーは servers に入る */
-  manageable: boolean;
-  /** 既定サーバー(あれば先頭)→ db のサーバーを sort_order, id の順 */
+  /** sort_order, id の順 */
   servers: ServerSummary[];
   /** 追加できる上限(MAX_SERVERS) */
   limit: number;
@@ -531,7 +569,7 @@ export interface CreateServerRequest {
   host: string;
   /** 1〜65535 の整数 */
   port: number;
-  /** 1〜SERVER_PASSWORD_MAX_LENGTH 文字。ADMIN_PASSWORD と同じ値は不可 */
+  /** 1〜SERVER_PASSWORD_MAX_LENGTH 文字。管理パスワードと同じ値は不可(same_as_admin_password) */
   password: string;
 }
 

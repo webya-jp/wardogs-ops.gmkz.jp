@@ -2,7 +2,7 @@
 // 選択中のサーバーが使えないときの案内(docs/ARCHITECTURE.md 15.4・15.5)。状態・プレイヤー・BAN の各ページで使う。
 // - ?server= で指定したサーバーが無い: 「見つかりません」(ほかのサーバーに切り替えない)
 // - 0 台: 「サーバーを追加してください」と /servers への導線
-// - 選択中のサーバーが使えない(無効・パスワード再入力が必要・既定サーバーの Secrets 不備): 理由と /servers への導線
+// - 選択中のサーバーが使えない(無効・パスワードの再入力が必要): 理由と /servers への導線
 // 何も出さない(= アイランドを描画してよい)ときは、ページ側で `ready` を同じ条件で判定する。
 import type { PageContext } from '../layouts/page-context';
 import { unusableReason } from './lib/servers';

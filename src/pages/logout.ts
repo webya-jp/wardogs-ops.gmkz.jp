@@ -11,11 +11,13 @@ import { clearSessionCookie, getAttachedSession } from '../lib/session';
 
 export const POST: APIRoute = async (context) => {
   await discardBody(context.request);
-  const env = getEnv();
-  const [keys, state] = await Promise.all([getKeys(env), getFeatures(env)]);
-  getWaitUntil(context.locals)(
-    recordLogout({ keys, db: state.db, session: getAttachedSession(context.locals), ip: clientIp(context.request) }),
-  );
+  const db = (await getFeatures(getEnv())).db;
+  const session = getAttachedSession(context.locals);
+  // 未ログインでも Cookie は消して /login へ(記録はログイン中だけ)
+  if (db && session) {
+    const keys = await getKeys(db);
+    getWaitUntil(context.locals)(recordLogout({ keys, db, session, ip: clientIp(context.request) }));
+  }
   const headers = new Headers({ Location: '/login', 'Cache-Control': 'no-store' });
   headers.append('Set-Cookie', clearSessionCookie(IS_DEV));
   headers.append('Set-Cookie', clearServerCookie(IS_DEV));

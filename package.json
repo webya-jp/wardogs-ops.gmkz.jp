@@ -47,17 +47,8 @@
   },
   "cloudflare": {
     "bindings": {
-      "ADMIN_PASSWORD": {
-        "description": "パネルにログインするためのパスワード。**16 文字以上**(推奨はランダムな 24 文字以上)。`RCON_PASSWORD` と同じ値は使えません。"
-      },
-      "RCON_URL": {
-        "description": "RCON の接続先。`http://ホスト名:ポート` の形(例 `http://rcon.example.com:7776`)。**IP アドレスは使えません**(README の「IP アドレスしか無い場合」を参照)。末尾の `/v1` は付けません。"
-      },
-      "RCON_PASSWORD": {
-        "description": "ゲームサーバーの `ServerSettings.ini` に設定した RCON のパスワード。ランダムな 32 文字以上を推奨。"
-      },
       "DB": {
-        "description": "操作ログと人数の記録に使う D1 データベース。既定の名前のままで構いません。"
+        "description": "パネルのデータ(管理パスワードのハッシュ、登録したサーバー、操作ログ)を保存する D1 データベース。既定の名前のままで構いません。パスワードなどの入力はここでは不要です(デプロイ後にパネルの画面で登録します)。"
       }
     }
   }

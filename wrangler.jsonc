@@ -1,7 +1,6 @@
 // wardogs-ops の Worker 設定。docs/ARCHITECTURE.md 第 3・10 章を参照。
-// - Secrets(ADMIN_PASSWORD, RCON_URL, RCON_PASSWORD, 任意で SESSION_SECRET)はここに書かない。
-//   Deploy to Cloudflare ボタンのフォーム(.dev.vars.example で宣言)、ダッシュボードの
-//   Settings > Variables and Secrets、または `wrangler secret put` で入れる。
+// - Worker Secrets は使わない(2026-10-16)。管理パスワードはデプロイ後に画面(/setup)で登録し、D1 に保存する。
+//   RCON の接続先とパスワードもログイン後の「サーバー設定」で D1 に保存する(docs/ARCHITECTURE.md 第 5・10・15 章)。
 // - このリポジトリは公開前提。接続先ホスト名・IP、パスワードなどの非公開情報を書かない。
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -26,7 +25,7 @@
   },
   // D1 は自動プロビジョニング(database_id を省略。wrangler 4.45.0 以上、open beta)。
   // 初回の `wrangler deploy` で database_name の名前で作成され、以後のデプロイでも紐づけが維持される。
-  // D1 が無い・テーブルが無い場合はアプリが「操作ログ無し(読み取り専用)」で動く(docs/ARCHITECTURE.md 7.4)
+  // D1 は必須。無い・マイグレーション未適用の場合は /setup で案内だけを出し、ログインできない(docs/ARCHITECTURE.md 7.4)
   "d1_databases": [
     {
       "binding": "DB",
@@ -35,7 +34,7 @@
     }
   ],
   "vars": {
-    // "true"(既定): D1 の操作ログに書けないときは書き込み操作を止める。"false": ログ無しでも操作できる(非推奨)
+    // 現在は効果なし(D1 必須化で「ログ無しで操作」の状態が無くなった。削除予定。docs/ARCHITECTURE.md 14 章 U-12)
     "AUDIT_REQUIRED": "true",
     // 表示言語(言語 / Language)。言語コード。"ja"(既定)で固定。"auto" にするとブラウザの言語設定から選ぶ(現在の対応は ja のみ)
     "LANGUAGE": "ja",

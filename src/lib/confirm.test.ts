@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { CONFIRM_TTL_MS } from '../types/api';
-import { canonicalJson, claimNonceInMemory, confirmTokenBaseValid, issueConfirmToken, verifyConfirmToken } from './confirm';
-import { bytesToB64url, deriveKeysFrom, hmac, utf8ToB64url } from './keys';
+import { canonicalJson, confirmTokenBaseValid, issueConfirmToken, verifyConfirmToken } from './confirm';
+import { bytesToB64url, hmac, utf8ToB64url } from './keys';
+import { testKeys } from './testing/keys';
 
 const SID = 'AAAAAAAAAAAAAAAAAAAAAA';
 const NOW = 1_800_000_000_000;
@@ -18,7 +19,7 @@ describe('confirm', () => {
   });
 
   it('発行したトークンを検証できる(params のキー順が違っても同じ)', async () => {
-    const keys = await deriveKeysFrom('', 'pw-pw-pw-pw-pw-pw-pw');
+    const keys = await testKeys(1);
     const t = await issueConfirmToken(keys.confirm, { action: 'kick', params, sid: SID, targetName: 'Alice', ...target, now: NOW });
     expect(t.expiresAt).toBe(NOW + CONFIRM_TTL_MS);
     // baseUrl そのものはトークンに入れない(ハッシュだけ)
@@ -34,7 +35,7 @@ describe('confirm', () => {
   });
 
   it('改ざん・別セッション・内容不一致・別の鍵は CONFIRM_INVALID、期限切れは CONFIRM_EXPIRED', async () => {
-    const keys = await deriveKeysFrom('', 'pw-pw-pw-pw-pw-pw-pw');
+    const keys = await testKeys(1);
     const t = await issueConfirmToken(keys.confirm, { action: 'kick', params, sid: SID, ...target, now: NOW });
     const base = { action: 'kick' as const, params, sid: SID, ...target, now: NOW + 1 };
     const invalid = { ok: false, code: 'CONFIRM_INVALID' };
@@ -45,7 +46,7 @@ describe('confirm', () => {
     expect(await verifyConfirmToken(keys.confirm, t.token, { ...base, sid: 'BBBBBBBBBBBBBBBBBBBBBB' })).toEqual(invalid);
     expect(await verifyConfirmToken(keys.confirm, t.token, { ...base, action: 'ban' })).toEqual(invalid);
     expect(await verifyConfirmToken(keys.confirm, t.token, { ...base, params: { ...params, reason: 'other' } })).toEqual(invalid);
-    const other = await deriveKeysFrom('', 'another-password-xx');
+    const other = await testKeys(2);
     expect(await verifyConfirmToken(other.confirm, t.token, base)).toEqual(invalid);
     expect(await verifyConfirmToken(keys.confirm, t.token, { ...base, now: NOW + CONFIRM_TTL_MS })).toEqual({
       ok: false,
@@ -54,7 +55,7 @@ describe('confirm', () => {
   });
 
   it('別サーバーへのすり替え(sv)と、prepare 後の宛先の変更(sh)は CONFIRM_INVALID', async () => {
-    const keys = await deriveKeysFrom('', 'pw-pw-pw-pw-pw-pw-pw');
+    const keys = await testKeys(1);
     const t = await issueConfirmToken(keys.confirm, { action: 'kick', params, sid: SID, ...target, now: NOW });
     const base = { action: 'kick' as const, params, sid: SID, now: NOW + 1 };
     const invalid = { ok: false, code: 'CONFIRM_INVALID' };
@@ -72,7 +73,7 @@ describe('confirm', () => {
   });
 
   it('sv の無い旧形式のトークン(署名は正しい)は CONFIRM_INVALID', async () => {
-    const keys = await deriveKeysFrom('', 'pw-pw-pw-pw-pw-pw-pw');
+    const keys = await testKeys(1);
     const t = await issueConfirmToken(keys.confirm, { action: 'kick', params, sid: SID, ...target, now: NOW });
     const payload = JSON.parse(atob(t.token.split('.')[1]!.replace(/-/g, '+').replace(/_/g, '/'))) as Record<string, unknown>;
     delete payload.sv;
@@ -86,15 +87,9 @@ describe('confirm', () => {
   });
 
   it('検証の順序: 署名が正しくても内容が違えば期限切れより先に CONFIRM_INVALID', async () => {
-    const keys = await deriveKeysFrom('', 'pw-pw-pw-pw-pw-pw-pw');
+    const keys = await testKeys(1);
     const t = await issueConfirmToken(keys.confirm, { action: 'kick', params, sid: SID, ...target, now: NOW });
     const r = await verifyConfirmToken(keys.confirm, t.token, { action: 'unban', params, sid: SID, ...target, now: NOW + CONFIRM_TTL_MS * 2 });
     expect(r).toEqual({ ok: false, code: 'CONFIRM_INVALID' });
-  });
-
-  it('メモリの nonce は 1 回限り', () => {
-    expect(claimNonceInMemory('n1', NOW + 1000, NOW)).toBe(true);
-    expect(claimNonceInMemory('n1', NOW + 1000, NOW)).toBe(false);
-    expect(claimNonceInMemory('n2', NOW + 1000, NOW)).toBe(true);
   });
 });

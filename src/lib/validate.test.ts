@@ -63,7 +63,8 @@ describe('validate', () => {
     expect(q('')).toEqual({ ok: true, kind: 'operations', server: 'all', limit: 50, before: null });
     expect(q('?limit=100&before=42')).toEqual({ ok: true, kind: 'operations', server: 'all', limit: 100, before: 42 });
     expect(q('?kind=settings&server=3')).toMatchObject({ ok: true, kind: 'settings', server: '3' });
-    expect(q('?server=default')).toMatchObject({ ok: true, server: 'default' });
+    // 既定サーバー(default)は 2026-10-16 に廃止。形式不正(400)
+    expect(q('?server=default')).toEqual({ ok: false, fields: { server: 'invalid_format' } });
     expect(q('?kind=x&server=03')).toEqual({ ok: false, fields: { kind: 'invalid_format', server: 'invalid_format' } });
     expect(q('?limit=0')).toEqual({ ok: false, fields: { limit: 'invalid_format' } });
     expect(q('?limit=101')).toEqual({ ok: false, fields: { limit: 'invalid_format' } });

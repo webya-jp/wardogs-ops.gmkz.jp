@@ -1,10 +1,13 @@
 // 監査ログ(D1 audit_log)。docs/ARCHITECTURE.md 4.3・8.1・8.4。
 // - 書き込み操作は実行前に pending で INSERT(confirm_nonce の UNIQUE で 1 回限り)→ RCON の結果で succeeded / failed に UPDATE
 // - 表示文言は保存しない(event + params + target_name を保存し、画面がカタログで組み立てる)
-// - 生の IP・パスワード・Cookie・RCON の接続先は保存しない
-// - 書き込み操作の行には対象サーバー(server_id: 既定は NULL、server_name: その時点の表示名)を残す(ARCHITECTURE 15.6)
-// - サーバー設定の変更は settings_audit_log(別テーブル。listSettingsAudit)
-import { API_ERROR_CODES, DEFAULT_SERVER_ID, SETTINGS_EVENTS } from '../types/api';
+// - 生の IP・パスワード(管理・RCON)・ハッシュ・暗号文・鍵・Cookie は保存しない
+// - RCON の接続先(ホスト名・ポート)は audit_log には保存しない(rcon_route はパスだけ)。settings_audit_log と servers には
+//   運営者が登録したホスト名・ポートを保存する(サーバーの追加・変更・削除の内容として。画面に出る運営者自身のデータ。QA M-4)
+// - 書き込み操作の行には対象サーバー(server_id: servers.id、server_name: その時点の表示名)を残す(ARCHITECTURE 15.6)。
+//   server_id が NULL の書き込み行は複数サーバー対応前の行(対象不明。API では serverId: null)
+// - サーバー設定の変更・管理者の登録は settings_audit_log(別テーブル。listSettingsAudit)
+import { API_ERROR_CODES, SETTINGS_EVENTS } from '../types/api';
 import type { ApiErrorCode, AuditEntry, AuditEventType, AuditStatus, ServerId, WriteAction } from '../types/api';
 
 export const AUDIT_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
@@ -19,7 +22,7 @@ export interface AuditActor {
 
 /** 書き込み操作の対象サーバー(audit_log の server_id / server_name) */
 export interface AuditServer {
-  /** servers.id。既定サーバーは null */
+  /** servers.id(解決できなかった場合も指定された id。null は対象不明) */
   serverId: number | null;
   serverName: string | null;
 }
@@ -176,8 +179,8 @@ export function toEntry(r: AuditRow): AuditEntry {
     params,
     rconStatus: r.rcon_status === null ? null : Number(r.rcon_status),
     errorCode: r.error_code !== null && ERROR_CODES.has(r.error_code) ? (r.error_code as ApiErrorCode) : null,
-    // login / logout はサーバーに関係しない。書き込み操作で NULL は既定サーバー(0002 以前の行を含む)
-    serverId: isSession ? null : r.server_id === null || r.server_id === undefined ? DEFAULT_SERVER_ID : String(r.server_id),
+    // login / logout はサーバーに関係しない。書き込み操作で NULL は複数サーバー対応前の行(対象不明)
+    serverId: isSession || r.server_id === null || r.server_id === undefined ? null : String(r.server_id),
     serverName: isSession ? null : (r.server_name ?? null),
   };
 }
@@ -191,10 +194,7 @@ function pageOf(rows: AuditEntry[], limit: number): { entries: AuditEntry[]; nex
   return { entries: page, nextBefore: rows.length > limit && last ? last.id : null };
 }
 
-/**
- * 操作ログ(audit_log)。server を指定すると、その対象サーバーの書き込み操作だけ(login / logout は除く)。
- * default は server_id IS NULL の書き込み操作
- */
+/** 操作ログ(audit_log)。server を指定すると、その対象サーバーの書き込み操作だけ(login / logout は除く) */
 export async function listAudit(
   db: D1Database,
   q: { limit: number; before: number | null; server?: AuditServerFilter },
@@ -210,11 +210,8 @@ export async function listAudit(
   const server = q.server ?? 'all';
   if (server !== 'all') {
     where.push(`event NOT IN ('login', 'logout')`);
-    if (server === DEFAULT_SERVER_ID) where.push('server_id IS NULL');
-    else {
-      args.push(Number(server));
-      where.push(`server_id = ?${args.length}`);
-    }
+    args.push(Number(server));
+    where.push(`server_id = ?${args.length}`);
   }
   const sql = `SELECT ${cols} FROM audit_log${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?1`;
   const { results } = await db
@@ -237,35 +234,53 @@ interface SettingsRow {
 
 const SETTINGS_EVENT_SET: ReadonlySet<string> = new Set(SETTINGS_EVENTS);
 
-function toSettingsEntry(r: SettingsRow): AuditEntry {
+/** 拒否の記録(QA M-2)。status = failed、errorCode = VALIDATION_FAILED(理由は params.reason) */
+const REJECTED_EVENTS: ReadonlySet<string> = new Set(['server_update_rejected', 'server_delete_rejected']);
+
+/**
+ * 行の status / errorCode(docs/API.md 3 章): 拒否の 2 つは failed + VALIDATION_FAILED。
+ * server_test は params.result が 'ok' なら succeeded、それ以外は failed で errorCode = params.result(RCON_*)。その他は succeeded
+ */
+function settingsOutcome(event: string, params: Record<string, unknown>): { status: AuditStatus; errorCode: ApiErrorCode | null } {
+  if (REJECTED_EVENTS.has(event)) return { status: 'failed', errorCode: 'VALIDATION_FAILED' };
+  if (event === 'server_test') {
+    const result = params.result;
+    if (result === 'ok') return { status: 'succeeded', errorCode: null };
+    return { status: 'failed', errorCode: typeof result === 'string' && ERROR_CODES.has(result) ? (result as ApiErrorCode) : null };
+  }
+  return { status: 'succeeded', errorCode: null };
+}
+
+/** 未知の event(SETTINGS_EVENTS に無いもの)は null(一覧から飛ばす) */
+function toSettingsEntry(r: SettingsRow): AuditEntry | null {
+  if (!SETTINGS_EVENT_SET.has(r.event)) return null;
+  const params = parseParams(r.params_json);
   return {
     id: Number(r.id),
     createdAt: Number(r.created_at),
     finishedAt: Number(r.created_at),
     event: r.event as AuditEventType,
-    status: 'succeeded',
+    ...settingsOutcome(r.event, params),
     operator: r.operator,
     sessionTag: r.session_tag,
     targetSteamId: null,
     targetName: null,
-    params: parseParams(r.params_json),
+    params,
     rconStatus: null,
-    errorCode: null,
     serverId: r.server_id === null ? null : String(r.server_id),
     serverName: r.server_name ?? null,
   };
 }
 
 /**
- * 設定変更ログ(settings_audit_log)。status は常に succeeded、target・rcon・error は null。
- * 既定サーバーの変更は記録しないので server=default は常に 0 件。event はコード側で検証する(未知の値は飛ばす)
+ * 設定変更ログ(settings_audit_log)。status / errorCode は settingsOutcome(拒否は failed、接続テストは結果しだい)。target・rcon は null。
+ * event はコード側で検証する(未知の値は飛ばす)
  */
 export async function listSettingsAudit(
   db: D1Database,
   q: { limit: number; before: number | null; server?: AuditServerFilter },
 ): Promise<{ entries: AuditEntry[]; nextBefore: number | null }> {
   const server = q.server ?? 'all';
-  if (server === DEFAULT_SERVER_ID) return { entries: [], nextBefore: null };
   const where: string[] = [];
   const args: unknown[] = [q.limit + 1];
   if (q.before !== null) {
@@ -286,7 +301,7 @@ export async function listSettingsAudit(
   const page = rows.slice(0, q.limit);
   const last = page[page.length - 1];
   return {
-    entries: page.filter((r) => SETTINGS_EVENT_SET.has(r.event)).map(toSettingsEntry),
+    entries: page.map(toSettingsEntry).filter((e): e is AuditEntry => e !== null),
     // 未知の event を飛ばしても、次のページの位置は行の id で決める
     nextBefore: rows.length > q.limit && last ? Number(last.id) : null,
   };
@@ -333,12 +348,4 @@ export async function cleanupOldRows(db: D1Database, now: number): Promise<void>
     db.prepare('DELETE FROM server_snapshots WHERE taken_at < ?1').bind(now - SNAPSHOT_RETENTION_MS),
     db.prepare('DELETE FROM login_throttle WHERE window_start < ?1').bind(now - THROTTLE_RETENTION_MS),
   ]);
-}
-
-/**
- * D1 が無く AUDIT_REQUIRED="false" で書き込みを実行した場合の記録。Workers Logs に操作種別・結果コード・sessionTag だけを出す
- * (対象の Steam ID・本文・名前は出さない。docs/ARCHITECTURE.md 7.4)
- */
-export function logWithoutAudit(action: string, result: ApiErrorCode | 'OK', sessionTag: string | null): void {
-  console.log(JSON.stringify({ kind: 'write-without-audit', action, result, sessionTag }));
 }

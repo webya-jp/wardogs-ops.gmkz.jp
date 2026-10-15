@@ -6,7 +6,7 @@
  * - RCON から返る生データ(マップ名、陣営名、プレイヤー名など)はカタログに入れない(翻訳しない)
  * - 他の言語を足すときは `src/i18n/<言語コード>.ts` を `Catalog` 型(全キー必須)で作る(手順は docs/ARCHITECTURE.md 13.7)
  */
-import type { ApiErrorCode, AuditEventType, AuditStatus, SetupWarning, ValidationIssue, WriteAction } from '../types/api';
+import type { ApiErrorCode, AuditEventType, AuditStatus, SetupFormError, SetupWarning, ValidationIssue, WriteAction } from '../types/api';
 
 export const ja = {
   // 共通
@@ -23,33 +23,42 @@ export const ja = {
   'login.locked': 'ログインの失敗が続いたため、約 {minutes} 分間ログインできません。',
   'login.forbidden': 'このリクエストは受け付けられません。ページを開き直してください。',
   'login.badRequest': '送信内容を読み取れませんでした。もう一度お試しください。',
+  'login.registered': '管理パスワードを登録しました。登録したパスワードでログインしてください。',
   'logout.submit': 'ログアウト',
 
-  // 設定の案内(/setup)
+  // 初期設定(/setup。docs/ARCHITECTURE.md 5.1.1・9.1)
+  // D1 の不備の案内
   'setup.title': '設定の確認',
-  'setup.configured': '設定済みです。',
+  'setup.readme': '対処の手順は README の「データベース(D1)が使えないと表示される」を参照してください。直したらこの画面を再読み込みしてください。',
+  // 登録済み(POST の 409)
+  'setup.done.title': '登録済みです',
   'setup.toLogin': 'ログイン画面へ',
-  'setup.intro': '次の設定が足りないか、正しくありません。Cloudflare のダッシュボードで Workers & Pages > wardogs-ops > Settings > Variables and Secrets を開き、値を入れ直してください。',
-  'setup.missingTitle': '未設定の Secrets',
-  'setup.warningsTitle': '確認が必要な項目',
-  'setup.readme': '詳しい手順は README の「Secrets の意味」と「困ったとき」を参照してください。',
+  // 管理パスワードの登録フォーム
+  'setup.register.title': '初期設定',
+  'setup.register.heading': '管理パスワードを決める',
+  'setup.register.intro': 'このパネルにログインするための管理パスワードを決めます。登録できるのは最初の 1 人だけです。URL を知っている人なら誰でも先に登録できてしまうため、デプロイしたらすぐに登録してください。',
+  'setup.register.password': '管理パスワード',
+  'setup.register.passwordConfirm': '管理パスワード(確認のためもう一度)',
+  'setup.register.help': '{min} 文字以上、{max} 文字以内。',
+  'setup.register.notesTitle': 'パスワードの決め方',
+  'setup.register.noteRandom': 'ランダムな 24 文字以上を推奨します。パスワード管理ソフトの生成機能を使うと簡単です(作り方は README の「パスワードを 2 つ作る」)。',
+  'setup.register.noteSeparate': 'ゲームサーバーの RCON パスワードや、ほかのサービスのパスワードとは別の値にしてください。',
+  'setup.register.noteNoRecover': '登録したパスワードはあとから画面で確認できません。パスワード管理ソフトなど安全な場所に保管してください。',
+  'setup.register.submit': '登録する',
+  'setup.register.submitting': '登録しています…',
 
   // 設定の警告(SetupWarning ごと。全コード必須)
-  'setup.warning.ADMIN_PASSWORD_MISSING': 'ADMIN_PASSWORD(ログインパスワード)が設定されていません。',
-  'setup.warning.ADMIN_PASSWORD_TOO_SHORT': 'ADMIN_PASSWORD が短すぎます。16 文字以上にしてください。',
-  'setup.warning.ADMIN_PASSWORD_EQUALS_RCON_PASSWORD': 'ADMIN_PASSWORD と RCON_PASSWORD が同じです。別の値にしてください。',
-  'setup.warning.RCON_URL_MISSING': 'RCON_URL(RCON の接続先)が設定されていません。',
-  'setup.warning.RCON_URL_INVALID': 'RCON_URL の形式が正しくありません。http://ホスト名:ポート の形にしてください(末尾の /v1 は付けません)。',
-  'setup.warning.RCON_URL_IS_IP_ADDRESS': 'RCON_URL に IP アドレスは使えません。ホスト名を用意してください(README の「IP アドレスしか無い場合」を参照)。',
-  'setup.warning.RCON_URL_HAS_CREDENTIALS': 'RCON_URL にユーザー名やパスワードを含めないでください。パスワードは RCON_PASSWORD に入れます。',
-  'setup.warning.RCON_PASSWORD_MISSING': 'RCON_PASSWORD(RCON のパスワード)が設定されていません。',
-  'setup.warning.RCON_PASSWORD_SHORT': 'RCON_PASSWORD が短めです。ランダムな 32 文字以上を推奨します。',
-  'setup.warning.SESSION_SECRET_TOO_SHORT': 'SESSION_SECRET が短すぎます。32 文字以上にするか、削除してください。',
-  'setup.warning.D1_MISSING': '操作ログ用のデータベース(D1)が見つかりません。読み取り専用で動いています。',
-  'setup.warning.D1_NOT_MIGRATED': '操作ログ用のデータベース(D1)の準備(マイグレーション)が済んでいません。読み取り専用で動いています。',
-  'setup.warning.AUDIT_DISABLED_WRITES_ALLOWED': '操作ログを残さずに操作できる設定になっています(AUDIT_REQUIRED="false")。',
-  'setup.warning.LOGIN_FAILURES_HIGH': '直近 1 時間にログインの失敗が多数あります。パスワードが推測されにくいものか確認し、心当たりが無ければ ADMIN_PASSWORD の変更を検討してください。',
-  'setup.warning.SERVER_PASSWORDS_UNREADABLE': '保存済みの RCON パスワードを読み出せないサーバーがあります。ADMIN_PASSWORD か SESSION_SECRET を変えた場合に起きます。サーバー設定の画面でパスワードを入れ直してください。',
+  'setup.warning.D1_MISSING': 'データベース(D1)が見つかりません。D1 が無いとパネルは使えません。README の「困ったとき」を参照してください。',
+  'setup.warning.D1_NOT_MIGRATED': 'データベース(D1)の準備(マイグレーション)が済んでいません。準備が済むまでパネルは使えません。README の「困ったとき」を参照してください。',
+  'setup.warning.LOGIN_FAILURES_HIGH': '直近 1 時間にログインの失敗が多数あります。管理パスワードが推測されにくいものか確認し、心当たりが無ければ変更を検討してください(README の「パスワードを忘れた・乗っ取られた」)。',
+  'setup.warning.SERVER_PASSWORDS_UNREADABLE': '保存済みの RCON パスワードを読み出せないサーバーがあります。データベースの設定(settings)が変わった可能性があります。サーバー設定の画面でパスワードを入れ直してください。',
+  // 初期設定フォームのエラー(SetupFormError ごと。全コード必須)
+  'setup.error.BAD_REQUEST': '送信内容を読み取れませんでした。もう一度お試しください。',
+  'setup.error.PASSWORD_TOO_SHORT': '管理パスワードは {min} 文字以上にしてください。',
+  'setup.error.PASSWORD_TOO_LONG': '管理パスワードは {max} 文字以内にしてください。',
+  'setup.error.PASSWORD_MISMATCH': '確認のために入力したパスワードが一致しません。',
+  'setup.error.PASSWORD_SAME_AS_RCON': '登録済みのサーバーの RCON パスワードと同じ値は使えません。',
+  'setup.error.SETUP_ALREADY_DONE': '管理パスワードは既に登録されています。心当たりが無い場合は README の「パスワードを忘れた・乗っ取られた」を参照してください。',
 
   // API エラー(ApiErrorCode ごと。全コード必須)
   'error.BAD_REQUEST': 'リクエストを読み取れませんでした。',
@@ -66,13 +75,12 @@ export const ja = {
   'error.ALREADY_EXECUTED': 'この操作は実行済みです。',
   'error.CAPABILITY_MISSING': 'このサーバーでは使えない操作です。',
   'error.WRITES_DISABLED': '操作ログが使えないため、操作を止めています。',
-  'error.NOT_CONFIGURED': '設定が足りません。設定画面を確認してください。',
+  'error.NOT_CONFIGURED': 'データベース(D1)が使えません。設定画面を確認してください。',
+  'error.SETUP_REQUIRED': '管理パスワードが登録されていません。初期設定の画面で登録してください。',
   'error.SERVER_NOT_FOUND': '指定したサーバーが見つかりません。削除された可能性があります。',
   'error.SERVER_DISABLED': 'このサーバーは無効になっています。サーバー設定の画面で有効にしてください。',
   'error.SERVER_NEEDS_PASSWORD': 'このサーバーの RCON パスワードを読み出せません。サーバー設定の画面でパスワードを入れ直してください。',
-  'error.SERVER_READ_ONLY': 'このサーバーは Secrets(RCON_URL / RCON_PASSWORD)で設定されているため、画面からは変更・削除できません。',
   'error.SERVER_LIMIT_REACHED': '追加できるサーバーの上限に達しました。',
-  'error.SERVERS_UNAVAILABLE': '操作ログ用のデータベース(D1)が使えないため、サーバーを追加・変更できません。',
   'error.NO_SERVERS': 'サーバーが登録されていません。サーバー設定の画面から追加してください。',
   'error.RCON_UNREACHABLE': 'RCON に接続できません。',
   'error.RCON_TIMEOUT': 'RCON の応答がありません。実行されたかどうかは状態を再読み込みして確認してください。',
@@ -95,7 +103,7 @@ export const ja = {
   'validation.out_of_range': '1〜65535 の数字で入力してください。',
   'validation.ip_address': 'IP アドレスは使えません。ホスト名を入力してください。',
   'validation.duplicate': '同じものが既に登録されています。',
-  'validation.same_as_admin_password': 'ログインパスワード(ADMIN_PASSWORD)と同じ値は使えません。',
+  'validation.same_as_admin_password': '管理パスワード(ログイン用)と同じ値は使えません。',
   'validation.mismatch': '入力した内容が一致しません。',
   'validation.reenter_required': 'ホスト名かポートを変えるときは、RCON パスワードも入力し直してください。',
 
@@ -132,7 +140,6 @@ export const ja = {
   'header.serverUnusable': '{name}(設定に不備)',
 
   // サーバー(選択中のサーバーの表示・案内。docs/ARCHITECTURE.md 15.4・15.5)
-  'server.defaultName': '既定サーバー(Secrets)',
   'server.idOnly': 'サーバー #{id}',
   'server.notFound.title': '指定したサーバーが見つかりません',
   'server.notFound.help': '削除されたか、アドレスが正しくありません。別のサーバーを操作してしまわないよう、自動では切り替えません。上のメニューでサーバーを選び直してください。',
@@ -141,7 +148,6 @@ export const ja = {
   'server.toSettings': 'サーバー設定を開く',
   'server.unusable.disabled': 'このサーバーは無効になっています。使うには「サーバー設定」で有効にしてください。',
   'server.unusable.needsPassword': 'このサーバーの RCON パスワードを読み出せません。「サーバー設定」でパスワードを入れ直してください。',
-  'server.unusable.secrets': '既定サーバーの Secrets(RCON_URL / RCON_PASSWORD)に不備があります。画面上部のお知らせを確認してください。',
   'server.unusable.other': 'このサーバーは現在使えません。「サーバー設定」を確認してください。',
   'notice.label': 'お知らせ',
   'stage.readOnly': '読み取り専用で動いています。kick・BAN・メッセージなどの操作はできません。',
@@ -270,21 +276,17 @@ export const ja = {
   'servers.empty': 'まだサーバーがありません。「サーバーを追加」から登録してください。',
   'servers.add': 'サーバーを追加',
   'servers.limitReached': '登録できる上限({limit} 台)に達しています。',
-  'servers.unavailableHelp': 'Secrets で設定した既定サーバーだけが使えます。データベースの準備は README の「操作ログ(D1)が使えないと表示される」を参照してください。',
   'servers.col.name': '表示名',
   'servers.col.endpoint': 'ホスト名:ポート',
   'servers.col.state': '状態',
   'servers.col.lastTest': '直近の接続テスト',
   'servers.col.actions': '操作',
   'servers.endpointValue': '{host}:{port}',
-  'servers.endpointHidden': '(Secrets のため表示しません)',
   'servers.state.enabled': '有効',
   'servers.state.disabled': '無効',
   'servers.state.needsPassword': 'パスワードの再入力が必要',
   'servers.state.passwordShort': 'パスワードが短め',
   'servers.state.passwordShortHelp': 'RCON パスワードはランダムな 24 文字以上を推奨します。',
-  'servers.state.secretsIssue': 'Secrets に不備',
-  'servers.state.readOnly': '画面からは変更できません(Secrets で設定)。',
   'servers.lastTest.none': '未実施',
   'servers.lastTest.ok': '接続できました',
   'servers.lastTest.failed': '接続できませんでした',
@@ -372,6 +374,10 @@ export const ja = {
   'audit.event.server_add': 'サーバー追加',
   'audit.event.server_update': 'サーバー設定変更',
   'audit.event.server_delete': 'サーバー削除',
+  'audit.event.server_update_rejected': 'サーバー設定変更(拒否)',
+  'audit.event.server_delete_rejected': 'サーバー削除(拒否)',
+  'audit.event.server_test': '接続テスト',
+  'audit.event.admin_register': '管理パスワード登録',
   'audit.status.pending': '実行中',
   'audit.status.succeeded': '成功',
   'audit.status.failed': '失敗',
@@ -381,6 +387,7 @@ export const ja = {
   Record<`error.${ApiErrorCode}`, string> &
   Record<`validation.${ValidationIssue}`, string> &
   Record<`setup.warning.${SetupWarning}`, string> &
+  Record<`setup.error.${SetupFormError}`, string> &
   Record<`action.${WriteAction}`, string> &
   Record<`confirm.${WriteAction}`, string> &
   Record<`audit.event.${AuditEventType}`, string> &

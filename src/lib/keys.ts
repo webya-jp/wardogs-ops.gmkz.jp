@@ -1,19 +1,24 @@
-// HKDF による鍵の派生と、base64url・HMAC の小道具。docs/ARCHITECTURE.md 5.1。
-// ikm = UTF-8(SESSION_SECRET ?? "") || 0x00 || UTF-8(ADMIN_PASSWORD)
-// 鍵・ikm をログや戻り値に出さない。
-import type { OpsEnv } from '../types/env';
+// instance_key(D1 settings)の取得と HKDF による用途別の鍵の派生、base64url・HMAC の小道具。docs/ARCHITECTURE.md 5.1.2・15.3。
+// - instance_key: 32 バイトの乱数(base64url)。必要になった時点で INSERT OR IGNORE → SELECT(並行しても最初の 1 つだけが使われる)
+// - 鍵: HKDF-SHA256(ikm = instance_key, salt = "wardogs-ops/v1", info = session / confirm / ip-hash / server-password)。extractable: false
+// - isolate 内で 5 分キャッシュする(毎リクエストの D1 読み取りを避ける)
+// instance_key・鍵をログや戻り値(API 応答)に出さない。
+import { INSTANCE_KEY_BYTES } from '../types/env';
 
 export interface DerivedKeys {
+  /** ログイン Cookie の署名(HMAC-SHA256) */
   session: CryptoKey;
+  /** 確認トークンの署名(HMAC-SHA256) */
   confirm: CryptoKey;
+  /** 接続元 IP のハッシュ(HMAC-SHA256) */
   ipHash: CryptoKey;
-  passwordCompare: CryptoKey;
+  /** 登録サーバーの RCON パスワードの暗号化(AES-256-GCM) */
+  serverPassword: CryptoKey;
 }
 
 const SALT = 'wardogs-ops/v1';
+const INSTANCE_KEY_NAME = 'instance_key';
 const enc = new TextEncoder();
-
-let cached: { ikm: string; keys: Promise<DerivedKeys> } | null = null;
 
 async function deriveHmacKey(base: CryptoKey, info: string): Promise<CryptoKey> {
   return crypto.subtle.deriveKey(
@@ -25,53 +30,9 @@ async function deriveHmacKey(base: CryptoKey, info: string): Promise<CryptoKey> 
   );
 }
 
-export async function deriveKeysFrom(sessionSecret: string, adminPassword: string): Promise<DerivedKeys> {
-  const ikm = new Uint8Array([...enc.encode(sessionSecret), 0, ...enc.encode(adminPassword)]);
-  const base = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveKey']);
-  const [session, confirm, ipHash, passwordCompare] = await Promise.all([
-    deriveHmacKey(base, 'session'),
-    deriveHmacKey(base, 'confirm'),
-    deriveHmacKey(base, 'ip-hash'),
-    deriveHmacKey(base, 'password-compare'),
-  ]);
-  return { session, confirm, ipHash, passwordCompare };
-}
-
-/** env から鍵を派生する(isolate 内で直近 1 組だけキャッシュ。Secrets が変われば作り直す) */
-export function getKeys(env: OpsEnv): Promise<DerivedKeys> {
-  const ss = env.SESSION_SECRET ?? '';
-  const ap = env.ADMIN_PASSWORD ?? '';
-  const ikm = `${ss}\u0000${ap}`;
-  if (cached && cached.ikm === ikm) return cached.keys;
-  const keys = deriveKeysFrom(ss, ap);
-  cached = { ikm, keys };
-  keys.catch(() => {
-    if (cached?.keys === keys) cached = null;
-  });
-  return keys;
-}
-
-// ------------------------------------------------------------
-// 登録サーバーの RCON パスワードの暗号鍵(AES-256-GCM)。docs/ARCHITECTURE.md 15.3
-// ikm は上の鍵と分ける: k = "s" は SESSION_SECRET だけ、k = "a" は ADMIN_PASSWORD だけ
-// ------------------------------------------------------------
-
-/** 鍵の出所。s = SESSION_SECRET 由来、a = ADMIN_PASSWORD 由来 */
-export type ServerKeyId = 's' | 'a';
-
-export interface ServerPasswordKeys {
-  /** SESSION_SECRET が設定されているときだけ非 null */
-  s: CryptoKey | null;
-  /** ADMIN_PASSWORD が設定されているときだけ非 null */
-  a: CryptoKey | null;
-  /** 新しく暗号化するときに使う鍵の出所(SESSION_SECRET があれば s)。どちらも無ければ null */
-  preferred: ServerKeyId | null;
-}
-
-export async function deriveServerPasswordKey(secret: string): Promise<CryptoKey> {
-  const base = await crypto.subtle.importKey('raw', enc.encode(secret), 'HKDF', false, ['deriveKey']);
+async function deriveAesKey(base: CryptoKey, info: string): Promise<CryptoKey> {
   return crypto.subtle.deriveKey(
-    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode(SALT), info: enc.encode('server-password') },
+    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode(SALT), info: enc.encode(info) },
     base,
     { name: 'AES-GCM', length: 256 },
     false,
@@ -79,26 +40,54 @@ export async function deriveServerPasswordKey(secret: string): Promise<CryptoKey
   );
 }
 
-export async function deriveServerPasswordKeysFrom(sessionSecret: string, adminPassword: string): Promise<ServerPasswordKeys> {
-  const [s, a] = await Promise.all([
-    sessionSecret === '' ? Promise.resolve(null) : deriveServerPasswordKey(sessionSecret),
-    adminPassword === '' ? Promise.resolve(null) : deriveServerPasswordKey(adminPassword),
+/** instance_key のバイト列から用途別の鍵を派生する */
+export async function deriveKeysFrom(instanceKey: Uint8Array): Promise<DerivedKeys> {
+  const base = await crypto.subtle.importKey('raw', new Uint8Array(instanceKey), 'HKDF', false, ['deriveKey']);
+  const [session, confirm, ipHash, serverPassword] = await Promise.all([
+    deriveHmacKey(base, 'session'),
+    deriveHmacKey(base, 'confirm'),
+    deriveHmacKey(base, 'ip-hash'),
+    deriveAesKey(base, 'server-password'),
   ]);
-  return { s, a, preferred: s ? 's' : a ? 'a' : null };
+  return { session, confirm, ipHash, serverPassword };
 }
 
-let serverKeysCache: { ikm: string; keys: Promise<ServerPasswordKeys> } | null = null;
+/** D1 settings の instance_key を読む。無ければ作る(INSERT OR IGNORE → SELECT)。形式が壊れていれば例外 */
+export async function loadInstanceKey(db: D1Database, now = Date.now()): Promise<Uint8Array> {
+  const read = () =>
+    db.prepare('SELECT value FROM settings WHERE key = ?1').bind(INSTANCE_KEY_NAME).first<{ value: string }>();
+  let row = await read();
+  if (!row) {
+    await db
+      .prepare('INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)')
+      .bind(INSTANCE_KEY_NAME, randomB64url(INSTANCE_KEY_BYTES), now)
+      .run();
+    row = await read();
+  }
+  const bytes = row ? b64urlToBytes(row.value) : null;
+  if (!bytes || bytes.byteLength !== INSTANCE_KEY_BYTES) throw new Error('INSTANCE_KEY_INVALID');
+  return bytes;
+}
 
-/** env から暗号鍵を派生する(isolate 内で直近 1 組だけキャッシュ) */
-export function getServerPasswordKeys(env: OpsEnv): Promise<ServerPasswordKeys> {
-  const ss = env.SESSION_SECRET ?? '';
-  const ap = env.ADMIN_PASSWORD ?? '';
-  const ikm = `${ss}\u0000${ap}`;
-  if (serverKeysCache && serverKeysCache.ikm === ikm) return serverKeysCache.keys;
-  const keys = deriveServerPasswordKeysFrom(ss, ap);
-  serverKeysCache = { ikm, keys };
+const KEYS_CACHE_MS = 5 * 60 * 1000;
+let cached: { db: D1Database; at: number; keys: Promise<DerivedKeys> } | null = null;
+
+/** テスト用 */
+export function resetKeysCacheForTest(): void {
+  cached = null;
+}
+
+/**
+ * D1 から鍵を用意する(isolate 内で 5 分キャッシュ)。D1 の失敗はキャッシュせず例外のまま返す。
+ * instance_key を手で消した直後の最大 5 分は isolate ごとに新旧の鍵が混在し得る(docs/ARCHITECTURE.md 5.1.2 で受け入れ済み)
+ */
+export function getKeys(db: D1Database, now = Date.now()): Promise<DerivedKeys> {
+  if (cached && cached.db === db && now - cached.at < KEYS_CACHE_MS) return cached.keys;
+  const keys = loadInstanceKey(db, now).then(deriveKeysFrom);
+  const entry = { db, at: now, keys };
+  cached = entry;
   keys.catch(() => {
-    if (serverKeysCache?.keys === keys) serverKeysCache = null;
+    if (cached === entry) cached = null;
   });
   return keys;
 }

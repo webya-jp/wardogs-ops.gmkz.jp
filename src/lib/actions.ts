@@ -1,6 +1,7 @@
 // 書き込み操作の二段階(prepare → execute)。docs/ARCHITECTURE.md 4.3・7 章・15.6、docs/API.md 4 章。
-// env・D1・fetch は引数で受け取る(cloudflare:workers に依存させない)。
+// D1・鍵・fetch は引数で受け取る(cloudflare:workers に依存させない)。D1 は必須(監査ログを必ず通す。7.4)。
 // 対象サーバーは本文の `server`(必須)。prepare・execute のそれぞれで D1 から解決し直す(isolate にキャッシュしない)。
+// 書き込みを止めている(features.writes が false。D1 必須化で通常は起きない)場合の WRITES_DISABLED は API ページ側で返す。
 import type {
   ActionRequest,
   ApiErrorCode,
@@ -11,8 +12,8 @@ import type {
   ValidationIssue,
   WriteAction,
 } from '../types/api';
-import { finishAudit, insertPending, lastKnownName, logWithoutAudit, recordRejected } from './audit';
-import { claimNonceInMemory, confirmTokenBaseValid, issueConfirmToken, verifyConfirmToken } from './confirm';
+import { finishAudit, insertPending, lastKnownName, recordRejected } from './audit';
+import { confirmTokenBaseValid, issueConfirmToken, verifyConfirmToken } from './confirm';
 import { isPlainObject } from './http';
 import type { ErrorOptions } from './http';
 import type { DerivedKeys } from './keys';
@@ -21,7 +22,7 @@ import type { ClientDeps, RconResult } from './rcon/client';
 import { getCapabilities, invalidateCapabilities } from './rcon/capabilities';
 import { normalizeMaps, normalizePlayers } from './rcon/normalize';
 import { buildWriteRequest, READ_ROUTES, routeKey } from './rcon/routes';
-import { auditServerIdOf, parseServerParam, resolveServer } from './servers';
+import { parseServerParam, resolveServer } from './servers';
 import type { ResolvedServer, ServerContext } from './servers';
 import type { SessionData } from './session';
 import { isDestructive, isWriteAction, targetSteamIdOf, validateActionRequest } from './validate';
@@ -34,13 +35,11 @@ export type ActionOutcome<T> = { ok: true; data: T } | { ok: false; code: ApiErr
 
 export interface ActionContext {
   keys: DerivedKeys;
-  /** 対象サーバーの解決に使う(env・D1・暗号鍵) */
+  /** 対象サーバーの解決に使う(D1・暗号鍵) */
   servers: ServerContext;
   session: SessionData;
-  /** D1 が使えるときだけ非 null */
-  db: D1Database | null;
-  /** features.writes */
-  writesEnabled: boolean;
+  /** D1(監査ログ) */
+  db: D1Database;
   ipHash: string | null;
   deps?: ClientDeps;
   now?: number;
@@ -62,12 +61,12 @@ interface RejectServer {
 
 function rejectServerOf(server: ResolvedServer | ServerId | null): RejectServer {
   if (server === null) return { serverId: null, serverName: null };
-  if (typeof server === 'string') return { serverId: auditServerIdOf(server), serverName: null };
+  if (typeof server === 'string') return { serverId: Number(server), serverName: null };
   return { serverId: server.auditServerId, serverName: server.name };
 }
 
 /**
- * RCON を呼ぶ前の拒否を監査ログに 1 行残して返す(D1 が無ければ Workers Logs に操作種別・コード・sessionTag だけ)。
+ * RCON を呼ぶ前の拒否を監査ログに 1 行残して返す(action が分からないものは event に入れられないので記録しない)。
  * 記録に失敗しても拒否の応答は変えない
  */
 async function reject<T>(
@@ -78,7 +77,7 @@ async function reject<T>(
   server: ResolvedServer | ServerId | null = null,
 ): Promise<ActionOutcome<T>> {
   const sessionTag = ctx.session.sid.slice(0, 8);
-  if (ctx.db && action) {
+  if (action) {
     const steamId = typeof params.steamId === 'string' ? params.steamId : null;
     await recordRejected(ctx.db, {
       now: ctx.now ?? Date.now(),
@@ -91,8 +90,6 @@ async function reject<T>(
       errorCode: code,
       ...rejectServerOf(server),
     }).catch(() => undefined);
-  } else {
-    logWithoutAudit(action ?? 'unknown', code, sessionTag);
   }
   return { ok: false, code };
 }
@@ -114,7 +111,6 @@ function validateWithServer(body: unknown):
 }
 
 export async function prepareAction(ctx: ActionContext, body: unknown): Promise<ActionOutcome<PrepareResponse>> {
-  if (!ctx.writesEnabled) return reject(ctx, actionOf(body), {}, 'WRITES_DISABLED');
   const v = validateWithServer(body);
   if (!v.ok) return invalid(v.fields);
   const req = v.request;
@@ -140,7 +136,7 @@ export async function prepareAction(ctx: ActionContext, body: unknown): Promise<
     const found = players.players.find((p) => p.steamId === sid);
     if (!found) return invalid({ steamId: 'not_online' });
     targetName = found.name || null;
-  } else if (req.action === 'unban' && sid && ctx.db) {
+  } else if (req.action === 'unban' && sid) {
     // Steam ID は全サーバー共通なので、サーバーで絞らずに引く(15.6)
     targetName = await lastKnownName(ctx.db, sid).catch(() => null);
   } else if (req.action === 'map') {
@@ -175,8 +171,6 @@ export async function prepareAction(ctx: ActionContext, body: unknown): Promise<
 }
 
 export async function executeAction(ctx: ActionContext, body: unknown): Promise<ActionOutcome<ExecuteResponse>> {
-  // WRITES_DISABLED は D1 が使えないときだけ起きるので、記録は Workers Logs のみになる
-  if (!ctx.writesEnabled) return reject(ctx, actionOf(body), {}, 'WRITES_DISABLED');
   // server は必須(入力検証の失敗として扱い、記録しない)
   const sv = parseServerParam(isPlainObject(body) ? body.server : undefined);
   if (!sv.ok) return invalid({ server: sv.issue });
@@ -212,32 +206,27 @@ export async function executeAction(ctx: ActionContext, body: unknown): Promise<
   const sessionTag = ctx.session.sid.slice(0, 8);
 
   // 実行前に pending で記録する(nonce の UNIQUE で 1 回限り)
-  let auditId: number | null = null;
-  if (ctx.db) {
-    let inserted: number | 'duplicate';
-    try {
-      inserted = await insertPending(ctx.db, {
-        now,
-        event: req.action,
-        operator: ctx.session.operator,
-        sessionTag,
-        ipHash: ctx.ipHash,
-        targetSteamId: targetSteamIdOf(req),
-        targetName: tk.targetName,
-        params,
-        rconRoute: route,
-        nonce: tk.nonce,
-        serverId: server.auditServerId,
-        serverName: server.name,
-      });
-    } catch {
-      // 記録できないなら実行しない(監査ログを必ず通す)
-      return { ok: false, code: 'INTERNAL_ERROR' };
-    }
+  let auditId: number;
+  try {
+    const inserted = await insertPending(ctx.db, {
+      now,
+      event: req.action,
+      operator: ctx.session.operator,
+      sessionTag,
+      ipHash: ctx.ipHash,
+      targetSteamId: targetSteamIdOf(req),
+      targetName: tk.targetName,
+      params,
+      rconRoute: route,
+      nonce: tk.nonce,
+      serverId: server.auditServerId,
+      serverName: server.name,
+    });
     if (inserted === 'duplicate') return { ok: false, code: 'ALREADY_EXECUTED' };
     auditId = inserted;
-  } else if (!claimNonceInMemory(tk.nonce, tk.expiresAt, now)) {
-    return { ok: false, code: 'ALREADY_EXECUTED' };
+  } catch {
+    // 記録できないなら実行しない(監査ログを必ず通す)
+    return { ok: false, code: 'INTERNAL_ERROR' };
   }
 
   // RCON を 1 回だけ呼ぶ(再試行しない)
@@ -247,19 +236,15 @@ export async function executeAction(ctx: ActionContext, body: unknown): Promise<
     ctx.deps,
   );
   const finishedAt = Date.now();
-  if (ctx.db && auditId !== null) {
-    try {
-      await finishAudit(ctx.db, auditId, {
-        status: r.ok ? 'succeeded' : 'failed',
-        now: finishedAt,
-        rconStatus: r.status,
-        errorCode: r.ok ? null : r.code,
-      });
-    } catch {
-      // UPDATE に失敗しても pending の行は残る(画面は 1 分以上の pending を「結果不明」と表示する)
-    }
-  } else {
-    logWithoutAudit(req.action, r.ok ? 'OK' : r.code, sessionTag);
+  try {
+    await finishAudit(ctx.db, auditId, {
+      status: r.ok ? 'succeeded' : 'failed',
+      now: finishedAt,
+      rconStatus: r.status,
+      errorCode: r.ok ? null : r.code,
+    });
+  } catch {
+    // UPDATE に失敗しても pending の行は残る(画面は 1 分以上の pending を「結果不明」と表示する)
   }
   if (!r.ok) return fromRcon(server, r);
   return { ok: true, data: { auditId, action: req.action, executedAt: finishedAt, server: server.id } };

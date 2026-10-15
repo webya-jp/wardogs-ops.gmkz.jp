@@ -1,12 +1,15 @@
-// 画面上部のお知らせ: 段階的有効化の状態(docs/ARCHITECTURE.md 7.4)と設定の警告(SetupWarning)。
-// 初期値はサーバー(Astro)が設定と D1 の状態から渡し、表示後に /api/session を 1 回取り直して
-// LOGIN_FAILURES_HIGH などを含む最新の warnings に置き換える。
+// 画面上部のお知らせ: 書き込みの可否(features。D1 が使えればすべて true)と設定の警告(SetupWarning)。
+// ログイン後に出し得る警告は LOGIN_FAILURES_HIGH と SERVER_PASSWORDS_UNREADABLE だけ(docs/API.md 2 章)。
+// D1_MISSING / D1_NOT_MIGRATED はログイン前の /setup だけで扱うので、ここでは出さない。
+// 初期値はサーバー(Astro)が D1 の状態から渡し、表示後に /api/session を 1 回取り直して最新の warnings に置き換える。
 import { useEffect, useState } from 'react';
 import type { Features, SessionResponse, SetupWarning } from '../types/api';
 import type { Language } from '../i18n';
 import { getTranslator } from '../i18n';
 import { apiGet } from './lib/api';
-import { isMessageKey } from './lib/keys';
+
+/** ログイン後の画面に出す警告(表示順) */
+const SESSION_WARNINGS = ['SERVER_PASSWORDS_UNREADABLE', 'LOGIN_FAILURES_HIGH'] as const satisfies readonly SetupWarning[];
 
 interface Props {
   language: Language;
@@ -29,9 +32,9 @@ export default function SessionNotices({ language, initialFeatures, initialWarni
     return () => ctrl.abort();
   }, []);
 
-  const keys = warnings.map((w) => `setup.warning.${w}`).filter(isMessageKey);
+  const shown = SESSION_WARNINGS.filter((w) => warnings.includes(w));
   const stage = !features.writes ? 'stage.readOnly' : !features.audit ? 'stage.writesWithoutAudit' : null;
-  if (!stage && keys.length === 0) return null;
+  if (!stage && shown.length === 0) return null;
 
   return (
     <div className="notices" role="region" aria-label={t('notice.label')}>
@@ -40,11 +43,19 @@ export default function SessionNotices({ language, initialFeatures, initialWarni
           <strong>{t(stage)}</strong>
         </p>
       )}
-      {keys.length > 0 && (
+      {shown.length > 0 && (
         <div className="alert alert-warn">
           <ul>
-            {keys.map((k) => (
-              <li key={k}>{t(k)}</li>
+            {shown.map((w) => (
+              <li key={w}>
+                {t(`setup.warning.${w}`)}
+                {w === 'SERVER_PASSWORDS_UNREADABLE' && (
+                  <>
+                    {' '}
+                    <a href="/servers">{t('server.toSettings')}</a>
+                  </>
+                )}
+              </li>
             ))}
           </ul>
         </div>

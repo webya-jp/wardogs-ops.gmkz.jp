@@ -10,8 +10,8 @@ import { LoginThrottle, withLoginAlert } from '../../lib/throttle';
 
 export const GET = apiHandler(async (api) => {
   const base = [...api.warnings];
-  if (api.servers.db && (await listServers(api.servers)).unreadable) base.push('SERVER_PASSWORDS_UNREADABLE');
-  const warnings = await withLoginAlert(base, new LoginThrottle({ db: api.state.db }));
+  if ((await listServers(api.servers)).unreadable && !base.includes('SERVER_PASSWORDS_UNREADABLE')) base.push('SERVER_PASSWORDS_UNREADABLE');
+  const warnings = await withLoginAlert(base, new LoginThrottle({ db: api.db }));
   const data: SessionResponse = { session: toSessionInfo(api.session), features: api.state.features, warnings };
   return jsonOk(data);
 });

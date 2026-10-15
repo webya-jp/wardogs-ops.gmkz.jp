@@ -1,7 +1,7 @@
 ---
 // ログイン。GET: フォーム(ログイン済みなら / へ 303)、POST: 認証(docs/API.md 2 章、docs/ARCHITECTURE.md 4.1)。
 export const prerender = false;
-// Origin 検査・設定チェックは middleware が先に行う。見た目は frontend-pages が整える(文言はカタログ経由)。
+// D1 の判定・Origin 検査・管理者の有無(未登録なら /setup へ)は middleware が先に行う。見た目は frontend-pages が整える(文言はカタログ経由)。
 import { handleLogin } from '../lib/auth';
 import { getFeatures } from '../lib/config';
 import { clientIp, getWaitUntil, readFormBody, redirect } from '../lib/http';
@@ -19,20 +19,20 @@ let errorKey: MessageKey | null = null;
 let errorParams: Record<string, number> | undefined;
 
 if (Astro.request.method === 'POST') {
-  const [keys, state] = await Promise.all([getKeys(env), getFeatures(env)]);
+  const db = (await getFeatures(env)).db;
+  if (!db) return redirect('/setup', 303);
   const result = await handleLogin({
-    env,
-    keys,
+    db,
+    keys: await getKeys(db),
     form: await readFormBody(Astro.request),
     ip: clientIp(Astro.request),
-    db: state.db,
     dev: IS_DEV,
     waitUntil: getWaitUntil(Astro.locals),
   });
   switch (result.kind) {
     case 'success':
       return redirect('/', 303, { 'Set-Cookie': result.setCookie });
-    case 'not_configured':
+    case 'setup_required':
       return redirect('/setup', 303);
     case 'locked':
       Astro.response.status = 429;
@@ -53,10 +53,13 @@ if (Astro.request.method === 'POST') {
 } else {
   return new Response(null, { status: 405, headers: { Allow: 'GET, POST' } });
 }
+// 初期設定の直後(/setup から ?registered=1 で来る)のお知らせ。表示だけで、認証の処理には関係しない
+const registered = Astro.url.searchParams.get('registered') === '1';
 ---
 <OpsLayout title={t('login.title')} language={language} narrow>
   <section class="card">
     <h1>{t('login.title')}</h1>
+    {registered && !errorKey && <p class="alert alert-ok" role="status">{t('login.registered')}</p>}
     {errorKey && <p class="alert alert-error" role="alert">{t(errorKey, errorParams)}</p>}
     <form method="post" action="/login">
       <div class="field">

@@ -1,11 +1,12 @@
-// 複数サーバー: 既定サーバー(Secrets)と登録サーバー(D1 servers)の一覧・解決・追加・変更・削除・接続テスト。
-// docs/ARCHITECTURE.md 第 15 章、docs/API.md 1.2・7 章。env・D1・fetch は引数で受け取る(cloudflare:workers に依存させない)。
-// - RCON パスワードは AES-256-GCM で暗号化して保存する(`v1.<k>.<iv>.<ct>`、AAD = 宛先)。平文・暗号文を応答・ログに出さない
+// 複数サーバー: 登録サーバー(D1 servers)の一覧・解決・追加・変更・削除・接続テスト。
+// docs/ARCHITECTURE.md 第 15 章、docs/API.md 1.2・7 章。D1・鍵・fetch は引数で受け取る(cloudflare:workers に依存させない)。
+// - RCON パスワードは AES-256-GCM で暗号化して保存する(`v2.<iv>.<ct>`、鍵は instance_key から派生、AAD = 宛先)。平文・暗号文を応答・ログに出さない
 // - サーバー設定は isolate 内にキャッシュしない(削除・無効化・パスワード変更を即時に効かせる)
 // - 追加・変更・削除は D1 の変更と settings_audit_log の INSERT を 1 つの db.batch() で行う
+// - 拒否(宛先変更時の再入力なし reenter_required、削除の表示名の不一致)と接続テストも settings_audit_log に 1 行残す
+//   (QA 2026-10-16 M-2。形式不正・重複などの検証エラーは記録しない)
 import {
   API_ERROR_CODES,
-  DEFAULT_SERVER_ID,
   MAX_SERVERS,
   SERVER_HOST_MAX_LENGTH,
   SERVER_ID_PATTERN,
@@ -25,14 +26,13 @@ import type {
   ValidationIssue,
 } from '../types/api';
 import { RCON_PASSWORD_WARN_LENGTH } from '../types/env';
-import type { OpsEnv } from '../types/env';
+import { isSameAsAdminPassword } from './admins';
 import type { AuditActor } from './audit';
-import { codePointLength, getDefaultServerState, parseRconUrl } from './config';
+import { codePointLength, parseRconUrl } from './config';
 import type { RconConfig } from './config';
 import { isPlainObject } from './http';
 import type { ErrorOptions } from './http';
 import { b64urlToBytes, bytesToB64url } from './keys';
-import type { ServerKeyId, ServerPasswordKeys } from './keys';
 import { invalidateCapabilities } from './rcon/capabilities';
 import { rconRequest, READ_TIMEOUT_MS } from './rcon/client';
 import type { ClientDeps } from './rcon/client';
@@ -44,19 +44,19 @@ import { READ_ROUTES } from './rcon/routes';
 // ============================================================
 
 export interface ServerContext {
-  env: OpsEnv;
-  /** D1 が使え 0002 まで適用済みのときだけ非 null(features.servers) */
-  db: D1Database | null;
-  keys: ServerPasswordKeys;
+  /** D1(必須。D1 が使えないときはログインできないので、ここに来ない) */
+  db: D1Database;
+  /** RCON パスワードの暗号鍵(AES-256-GCM。instance_key から派生。keys.ts の serverPassword) */
+  key: CryptoKey;
 }
 
 /** RCON を呼ぶために解決したサーバー(平文のパスワードを含む。外に出さない) */
 export interface ResolvedServer {
   id: ServerId;
-  /** audit_log.server_id の値(既定サーバーは null) */
-  auditServerId: number | null;
-  /** 操作時点の表示名(既定サーバーは null) */
-  name: string | null;
+  /** audit_log.server_id の値(servers.id) */
+  auditServerId: number;
+  /** 操作時点の表示名 */
+  name: string;
   rcon: RconConfig;
 }
 
@@ -64,16 +64,6 @@ export type ServerOutcome<T> = { ok: true; data: T } | { ok: false; code: ApiErr
 
 const fail = (code: ApiErrorCode, opts?: ErrorOptions): ServerOutcome<never> => (opts ? { ok: false, code, opts } : { ok: false, code });
 const invalid = (fields: Record<string, ValidationIssue>): ServerOutcome<never> => fail('VALIDATION_FAILED', { fields });
-
-/** ServerId → audit_log.server_id(既定は NULL) */
-export function auditServerIdOf(id: ServerId): number | null {
-  return id === DEFAULT_SERVER_ID ? null : Number(id);
-}
-
-/** ServerId → server_snapshots.server_id(既定は 0。主キーに NULL を入れないため) */
-export function snapshotServerIdOf(id: ServerId): number {
-  return id === DEFAULT_SERVER_ID ? 0 : Number(id);
-}
 
 export function isServerId(v: unknown): v is ServerId {
   return typeof v === 'string' && SERVER_ID_PATTERN.test(v);
@@ -91,7 +81,7 @@ export function parseServerParam(v: unknown): { ok: true; id: ServerId } | { ok:
 
 const enc = new TextEncoder();
 const IV_BYTES = 12;
-const ENC_RE = /^v1\.([sa])\.([A-Za-z0-9_-]{16})\.([A-Za-z0-9_-]{22,})$/;
+const ENC_RE = /^v2\.([A-Za-z0-9_-]{16})\.([A-Za-z0-9_-]{22,})$/;
 
 export interface Endpoint {
   scheme: string;
@@ -99,49 +89,33 @@ export interface Endpoint {
   port: number;
 }
 
-function aad(k: ServerKeyId, ep: Endpoint): Uint8Array<ArrayBuffer> {
-  return enc.encode(`wardogs-ops/server-password/v1|${k}|${ep.scheme}://${ep.host}:${ep.port}`);
+function aad(ep: Endpoint): Uint8Array<ArrayBuffer> {
+  return enc.encode(`wardogs-ops/server-password/v2|${ep.scheme}://${ep.host}:${ep.port}`);
 }
 
-function keyFor(keys: ServerPasswordKeys, k: ServerKeyId): CryptoKey | null {
-  return k === 's' ? keys.s : keys.a;
-}
-
-/** 平文を暗号化して `v1.<k>.<iv>.<ct>` を返す。鍵が無ければ null */
-export async function encryptPassword(
-  keys: ServerPasswordKeys,
-  ep: Endpoint,
-  plaintext: string,
-  k: ServerKeyId | null = keys.preferred,
-): Promise<string | null> {
-  if (!k) return null;
-  const key = keyFor(keys, k);
-  if (!key) return null;
+/** 平文を暗号化して `v2.<iv>.<ct>` を返す */
+export async function encryptPassword(key: CryptoKey, ep: Endpoint, plaintext: string): Promise<string> {
   const iv = new Uint8Array(IV_BYTES);
   crypto.getRandomValues(iv);
-  const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(k, ep) }, key, enc.encode(plaintext)),
-  );
-  return `v1.${k}.${bytesToB64url(iv)}.${bytesToB64url(ct)}`;
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(ep) }, key, enc.encode(plaintext)));
+  return `v2.${bytesToB64url(iv)}.${bytesToB64url(ct)}`;
 }
 
-export type DecryptResult = { ok: true; plaintext: string; k: ServerKeyId } | { ok: false };
+export type DecryptResult = { ok: true; plaintext: string } | { ok: false };
 
 /**
- * 復号する。形式不正・鍵が無い(k = s なのに SESSION_SECRET が無い等)・認証失敗(鍵や宛先が違う)はすべて { ok: false }。
- * 失敗の理由は区別しない(画面は needsPassword として扱う)
+ * 復号する。形式不正・認証失敗(鍵や宛先が違う。instance_key を手で消した・行を手で編集した場合)はすべて { ok: false }。
+ * 失敗の理由は区別しない(画面は needsPassword として扱い、入れ直しで復旧する)
  */
-export async function decryptPassword(keys: ServerPasswordKeys, stored: string, ep: Endpoint): Promise<DecryptResult> {
+export async function decryptPassword(key: CryptoKey, stored: string, ep: Endpoint): Promise<DecryptResult> {
   const m = ENC_RE.exec(stored);
   if (!m) return { ok: false };
-  const k = m[1] as ServerKeyId;
-  const key = keyFor(keys, k);
-  const iv = b64urlToBytes(m[2] ?? '');
-  const ct = b64urlToBytes(m[3] ?? '');
-  if (!key || !iv || iv.byteLength !== IV_BYTES || !ct || ct.byteLength < 16) return { ok: false };
+  const iv = b64urlToBytes(m[1] ?? '');
+  const ct = b64urlToBytes(m[2] ?? '');
+  if (!iv || iv.byteLength !== IV_BYTES || !ct || ct.byteLength < 16) return { ok: false };
   try {
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(iv), additionalData: aad(k, ep) }, key, new Uint8Array(ct));
-    return { ok: true, plaintext: new TextDecoder('utf-8', { fatal: true }).decode(pt), k };
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(iv), additionalData: aad(ep) }, key, new Uint8Array(ct));
+    return { ok: true, plaintext: new TextDecoder('utf-8', { fatal: true }).decode(pt) };
   } catch {
     return { ok: false };
   }
@@ -190,35 +164,9 @@ function lastTestOf(at: number | null, result: string | null): ServerLastTest | 
   return ERROR_CODES.has(result) ? { at: Number(at), result: result as ApiErrorCode } : null;
 }
 
-/** 既定サーバーの直近の接続テスト(D1 に行が無いため isolate 内メモリだけ) */
-let defaultLastTest: ServerLastTest | null = null;
-
 /** テスト用 */
 export function resetServersForTest(): void {
-  defaultLastTest = null;
   testTimes.clear();
-}
-
-function defaultSummary(env: OpsEnv): ServerSummary | null {
-  const st = getDefaultServerState(env);
-  if (st.kind === 'none') return null;
-  const pw = env.RCON_PASSWORD ?? '';
-  return {
-    id: DEFAULT_SERVER_ID,
-    source: 'secrets',
-    name: null,
-    host: null,
-    port: null,
-    enabled: true,
-    sortOrder: 0,
-    needsPassword: false,
-    passwordShort: pw !== '' && codePointLength(pw) < RCON_PASSWORD_WARN_LENGTH,
-    secretsIssue: st.kind === 'issue' ? st.warning : null,
-    usable: st.kind === 'ok',
-    lastTest: defaultLastTest,
-    createdAt: null,
-    updatedAt: null,
-  };
 }
 
 interface RowView {
@@ -226,15 +174,14 @@ interface RowView {
   decrypted: DecryptResult;
 }
 
-async function viewRow(keys: ServerPasswordKeys, row: ServerRow): Promise<RowView> {
-  const decrypted = await decryptPassword(keys, row.rcon_password_enc, endpointOf(row));
+async function viewRow(key: CryptoKey, row: ServerRow): Promise<RowView> {
+  const decrypted = await decryptPassword(key, row.rcon_password_enc, endpointOf(row));
   const enabled = Number(row.enabled) === 1;
   const needsPassword = !decrypted.ok;
   return {
     decrypted,
     summary: {
       id: String(row.id),
-      source: 'db',
       name: row.name,
       host: row.host,
       port: Number(row.port),
@@ -242,7 +189,6 @@ async function viewRow(keys: ServerPasswordKeys, row: ServerRow): Promise<RowVie
       sortOrder: Number(row.sort_order),
       needsPassword,
       passwordShort: decrypted.ok && codePointLength(decrypted.plaintext) < RCON_PASSWORD_WARN_LENGTH,
-      secretsIssue: null,
       usable: enabled && !needsPassword,
       lastTest: lastTestOf(row.last_test_at, row.last_test_result),
       createdAt: Number(row.created_at),
@@ -251,58 +197,37 @@ async function viewRow(keys: ServerPasswordKeys, row: ServerRow): Promise<RowVie
   };
 }
 
-/** a → s の自動再暗号化の対象(平文はメモリ上だけ。15.3) */
-export interface PendingMigration {
-  id: number;
-  oldEnc: string;
-  endpoint: Endpoint;
-  plaintext: string;
-}
-
 export interface ServerList {
   servers: ServerSummary[];
   /** 復号できない登録サーバーがある(SERVER_PASSWORDS_UNREADABLE) */
   unreadable: boolean;
-  migrations: PendingMigration[];
 }
 
-/** 一覧: 既定サーバー(あれば先頭)→ 登録サーバーを sort_order, id の順。D1 が無ければ既定サーバーだけ */
+/** 一覧: sort_order, id の順 */
 export async function listServers(sctx: ServerContext): Promise<ServerList> {
   const out: ServerSummary[] = [];
-  const def = defaultSummary(sctx.env);
-  if (def) out.push(def);
-  const migrations: PendingMigration[] = [];
   let unreadable = false;
-  if (sctx.db) {
-    const { results } = await sctx.db.prepare(`SELECT ${ROW_COLS} FROM servers ORDER BY sort_order, id`).all<ServerRow>();
-    for (const row of results ?? []) {
-      const v = await viewRow(sctx.keys, row);
-      out.push(v.summary);
-      if (!v.decrypted.ok) unreadable = true;
-      else if (v.decrypted.k === 'a' && sctx.keys.s) {
-        migrations.push({ id: Number(row.id), oldEnc: row.rcon_password_enc, endpoint: endpointOf(row), plaintext: v.decrypted.plaintext });
-      }
-    }
+  const { results } = await sctx.db.prepare(`SELECT ${ROW_COLS} FROM servers ORDER BY sort_order, id`).all<ServerRow>();
+  for (const row of results ?? []) {
+    const v = await viewRow(sctx.key, row);
+    out.push(v.summary);
+    if (!v.decrypted.ok) unreadable = true;
   }
-  return { servers: out, unreadable, migrations };
+  return { servers: out, unreadable };
 }
 
 /**
- * SESSION_SECRET 設定後、k = a の行を k = s で暗号化し直す(rcon_password_enc だけを UPDATE。updated_at・変更ログは触らない)。
- * 途中で別の変更があった行は上書きしない(WHERE で旧暗号文を照合)
+ * 登録サーバーの RCON パスワードを順に復号して返す(初期設定の登録し直しで、管理パスワードとの同一判定に使う。5.1.1)。
+ * 復号できない行は飛ばす。平文はメモリ上だけで扱う
  */
-export async function migratePasswords(sctx: ServerContext, items: PendingMigration[]): Promise<void> {
-  if (!sctx.db || !sctx.keys.s || items.length === 0) return;
-  const stmts: D1PreparedStatement[] = [];
-  for (const it of items) {
-    const next = await encryptPassword(sctx.keys, it.endpoint, it.plaintext, 's');
-    if (next) {
-      stmts.push(
-        sctx.db.prepare('UPDATE servers SET rcon_password_enc = ?1 WHERE id = ?2 AND rcon_password_enc = ?3').bind(next, it.id, it.oldEnc),
-      );
-    }
+export async function decryptAllPasswords(sctx: ServerContext): Promise<string[]> {
+  const { results } = await sctx.db.prepare('SELECT scheme, host, port, rcon_password_enc FROM servers').all<ServerRow>();
+  const out: string[] = [];
+  for (const row of results ?? []) {
+    const d = await decryptPassword(sctx.key, row.rcon_password_enc, endpointOf(row));
+    if (d.ok) out.push(d.plaintext);
   }
-  if (stmts.length > 0) await sctx.db.batch(stmts);
+  return out;
 }
 
 // ============================================================
@@ -311,19 +236,13 @@ export async function migratePasswords(sctx: ServerContext, items: PendingMigrat
 
 /** 指定された id のサーバーを解決する(毎回 D1 から 1 行読み、復号する) */
 export async function resolveServer(sctx: ServerContext, id: ServerId): Promise<ServerOutcome<ResolvedServer>> {
-  if (id === DEFAULT_SERVER_ID) {
-    const st = getDefaultServerState(sctx.env);
-    if (st.kind === 'none') return fail('SERVER_NOT_FOUND');
-    if (st.kind === 'issue') return fail('NOT_CONFIGURED');
-    return { ok: true, data: { id, auditServerId: null, name: null, rcon: st.rcon } };
-  }
-  if (!sctx.db) return fail('SERVERS_UNAVAILABLE');
+  if (!isServerId(id)) return invalid({ server: 'invalid_format' });
   const row = await getRow(sctx.db, Number(id));
   if (!row) return fail('SERVER_NOT_FOUND');
   if (Number(row.enabled) !== 1) return fail('SERVER_DISABLED');
   const ep = endpointOf(row);
   const baseUrl = baseUrlOf(ep);
-  const d = await decryptPassword(sctx.keys, row.rcon_password_enc, ep);
+  const d = await decryptPassword(sctx.key, row.rcon_password_enc, ep);
   if (!d.ok || !baseUrl) return fail('SERVER_NEEDS_PASSWORD');
   return { ok: true, data: { id, auditServerId: Number(row.id), name: row.name, rcon: { baseUrl, password: d.plaintext } } };
 }
@@ -432,7 +351,7 @@ export function validateServerHost(v: unknown): FieldResult<string> {
   if (HOST_FORBIDDEN_RE.test(h) || CONTROL_RE.test(h)) return { ok: false, issue: 'invalid_format' };
   // parseRconUrl と同じ規則(ポートは結果に影響しないので固定値で組み立てる)
   const r = parseRconUrl(`http://${h}:1`);
-  if (!r.ok) return { ok: false, issue: r.warning === 'RCON_URL_IS_IP_ADDRESS' ? 'ip_address' : 'invalid_format' };
+  if (!r.ok) return { ok: false, issue: r.issue === 'RCON_URL_IS_IP_ADDRESS' ? 'ip_address' : 'invalid_format' };
   let hostname: string;
   try {
     hostname = new URL(`http://${h}`).hostname;
@@ -450,13 +369,21 @@ export function validateServerPort(v: unknown): FieldResult<number> {
   return { ok: true, value: v };
 }
 
-export function validateServerPassword(v: unknown, adminPassword: string): FieldResult<string> {
+/** RCON パスワードの形式(管理パスワードとの同一判定は D1 が要るので checkNotAdminPassword で別に行う) */
+export function validateServerPassword(v: unknown): FieldResult<string> {
   if (v === undefined || v === null || v === '') return { ok: false, issue: 'required' };
   if (typeof v !== 'string') return { ok: false, issue: 'invalid_format' };
   if (codePointLength(v) > SERVER_PASSWORD_MAX_LENGTH) return { ok: false, issue: 'too_long' };
   if (!PASSWORD_ALLOWED_RE.test(v)) return { ok: false, issue: 'invalid_characters' };
-  if (adminPassword !== '' && v === adminPassword) return { ok: false, issue: 'same_as_admin_password' };
   return { ok: true, value: v };
+}
+
+/**
+ * 管理パスワードと同じなら same_as_admin_password(5.2。管理者のハッシュで検証。PBKDF2 1 回分 × 管理者の行数)。
+ * ほかの項目の検証が通ってから呼ぶ(無駄な PBKDF2 を避ける)
+ */
+async function checkNotAdminPassword(db: D1Database, password: string): Promise<Record<string, ValidationIssue>> {
+  return (await isSameAsAdminPassword(db, password)) ? { password: 'same_as_admin_password' } : {};
 }
 
 const SORT_ORDER_MIN = -1000;
@@ -497,6 +424,7 @@ function isUniqueError(err: unknown): boolean {
 // 変更ログ(settings_audit_log)
 // ============================================================
 
+/** settings_audit_log に 1 行書く文(event は契約の SettingsEvent。拒否・接続テストを含む。docs/API.md 3 章) */
 function settingsLog(
   db: D1Database,
   e: AuditActor & { now: number; event: SettingsEvent; serverId: number; serverName: string; params: Record<string, unknown> },
@@ -535,15 +463,17 @@ export async function runConnectionTest(rcon: RconConfig, deps: ClientDeps = {},
   return { ok: true, code: null, testedAt, serverName: status.serverName, players: status.players };
 }
 
+function lastTestOfResult(t: ServerTestResult): ServerLastTest {
+  return { at: t.testedAt, result: t.ok ? 'ok' : (t.code ?? 'INTERNAL_ERROR') };
+}
+
+function saveTestStmt(db: D1Database, id: ServerId, last: ServerLastTest): D1PreparedStatement {
+  return db.prepare('UPDATE servers SET last_test_at = ?1, last_test_result = ?2 WHERE id = ?3').bind(last.at, last.result, Number(id));
+}
+
 async function saveTestResult(sctx: ServerContext, id: ServerId, t: ServerTestResult): Promise<ServerLastTest> {
-  const last: ServerLastTest = { at: t.testedAt, result: t.ok ? 'ok' : (t.code ?? 'INTERNAL_ERROR') };
-  if (id === DEFAULT_SERVER_ID) defaultLastTest = last;
-  else if (sctx.db) {
-    await sctx.db
-      .prepare('UPDATE servers SET last_test_at = ?1, last_test_result = ?2 WHERE id = ?3')
-      .bind(last.at, last.result, Number(id))
-      .run();
-  }
+  const last = lastTestOfResult(t);
+  await saveTestStmt(sctx.db, id, last).run();
   return last;
 }
 
@@ -579,7 +509,6 @@ export interface MutationContext {
 export async function createServer(mctx: MutationContext, body: unknown): Promise<ServerOutcome<ServerMutationResponse>> {
   const { sctx } = mctx;
   const db = sctx.db;
-  if (!db) return fail('SERVERS_UNAVAILABLE');
   if (!isPlainObject(body)) return fail('BAD_REQUEST');
   const fields: Record<string, ValidationIssue> = {};
   const take = <T>(name: string, r: FieldResult<T>): T | undefined => {
@@ -590,8 +519,10 @@ export async function createServer(mctx: MutationContext, body: unknown): Promis
   const name = take('name', validateServerName(body.name));
   const host = take('host', validateServerHost(body.host));
   const port = take('port', validateServerPort(body.port));
-  const password = take('password', validateServerPassword(body.password, sctx.env.ADMIN_PASSWORD ?? ''));
+  const password = take('password', validateServerPassword(body.password));
   if (name === undefined || host === undefined || port === undefined || password === undefined) return invalid(fields);
+  const same = await checkNotAdminPassword(db, password);
+  if (Object.keys(same).length > 0) return invalid(same);
 
   const dup = await findDuplicates(db, { name, host, port });
   if (Object.keys(dup).length > 0) return invalid(dup);
@@ -599,8 +530,7 @@ export async function createServer(mctx: MutationContext, body: unknown): Promis
   if (Number(count?.n ?? 0) >= MAX_SERVERS) return fail('SERVER_LIMIT_REACHED');
 
   const ep: Endpoint = { scheme: 'http', host, port };
-  const encrypted = await encryptPassword(sctx.keys, ep, password);
-  if (!encrypted) return fail('INTERNAL_ERROR');
+  const encrypted = await encryptPassword(sctx.key, ep, password);
   const now = mctx.now ?? Date.now();
   const params = { name, host, port, enabled: true, passwordChanged: true };
   try {
@@ -640,7 +570,7 @@ export async function createServer(mctx: MutationContext, body: unknown): Promis
   const test = await runConnectionTest({ baseUrl, password }, mctx.deps);
   await saveTestResult(sctx, id, test);
   const fresh = (await getRow(db, Number(row.id))) ?? row;
-  return { ok: true, data: { server: (await viewRow(sctx.keys, fresh)).summary, test } };
+  return { ok: true, data: { server: (await viewRow(sctx.key, fresh)).summary, test } };
 }
 
 /** :id の解釈。形式不正は 400 */
@@ -656,10 +586,8 @@ export async function updateServer(
 ): Promise<ServerOutcome<ServerMutationResponse>> {
   const idr = parseIdParam(idParam);
   if (!idr.ok) return idr;
-  if (idr.data === DEFAULT_SERVER_ID) return fail('SERVER_READ_ONLY');
   const { sctx } = mctx;
   const db = sctx.db;
-  if (!db) return fail('SERVERS_UNAVAILABLE');
   const row = await getRow(db, Number(idr.data));
   if (!row) return fail('SERVER_NOT_FOUND');
   if (!isPlainObject(body)) return fail('BAD_REQUEST');
@@ -674,7 +602,7 @@ export async function updateServer(
   const host = body.host === undefined ? row.host : take('host', validateServerHost(body.host));
   const port = body.port === undefined ? Number(row.port) : take('port', validateServerPort(body.port));
   const pwGiven = body.password !== undefined && body.password !== null && body.password !== '';
-  const password = pwGiven ? take('password', validateServerPassword(body.password, sctx.env.ADMIN_PASSWORD ?? '')) : undefined;
+  const password = pwGiven ? take('password', validateServerPassword(body.password)) : undefined;
   let enabled = Number(row.enabled) === 1;
   if (body.enabled !== undefined) {
     if (typeof body.enabled === 'boolean') enabled = body.enabled;
@@ -686,7 +614,15 @@ export async function updateServer(
   // 宛先を変えるときは保存済みのパスワードを新しい宛先へ送らない(15.6)
   if (endpointChanged && !pwGiven && fields.host === undefined && fields.port === undefined) fields.password = 'reenter_required';
   if (Object.keys(fields).length > 0 || name === undefined || host === undefined || port === undefined || sortOrder === undefined) {
+    // 宛先の書き換えによるパスワードの持ち出しの試行を残す(他の項目が正しく、reenter_required だけで拒否した場合。M-2)
+    if (fields.password === 'reenter_required' && Object.keys(fields).length === 1 && host !== undefined && port !== undefined) {
+      await recordRejection(mctx, row, 'server_update_rejected', { reason: 'reenter_required', host, port });
+    }
     return invalid(fields);
+  }
+  if (password !== undefined) {
+    const same = await checkNotAdminPassword(db, password);
+    if (Object.keys(same).length > 0) return invalid(same);
   }
 
   const nameChanged = name !== row.name;
@@ -707,17 +643,13 @@ export async function updateServer(
   const passwordChanged = password !== undefined;
 
   if (Object.keys(params).length === 0 && !passwordChanged) {
-    return { ok: true, data: { server: (await viewRow(sctx.keys, row)).summary, test: null } };
+    return { ok: true, data: { server: (await viewRow(sctx.key, row)).summary, test: null } };
   }
   params.passwordChanged = passwordChanged;
 
   const ep: Endpoint = { scheme: row.scheme, host, port };
   let encrypted = row.rcon_password_enc;
-  if (password !== undefined) {
-    const e = await encryptPassword(sctx.keys, ep, password);
-    if (!e) return fail('INTERNAL_ERROR');
-    encrypted = e;
-  }
+  if (password !== undefined) encrypted = await encryptPassword(sctx.key, ep, password);
   const now = mctx.now ?? Date.now();
   try {
     await db.batch([
@@ -742,7 +674,7 @@ export async function updateServer(
   const connectionChanged = endpointChanged || passwordChanged || (enabled && !wasEnabled);
   if (connectionChanged) {
     const baseUrl = baseUrlOf(ep);
-    const plain = password ?? (await decryptPassword(sctx.keys, encrypted, ep));
+    const plain = password ?? (await decryptPassword(sctx.key, encrypted, ep));
     const pw = typeof plain === 'string' ? plain : plain.ok ? plain.plaintext : null;
     // 復号できない(needsPassword のまま有効にした)場合はテストしない
     if (baseUrl && pw !== null) {
@@ -751,7 +683,26 @@ export async function updateServer(
     }
   }
   const fresh = (await getRow(db, Number(row.id))) ?? row;
-  return { ok: true, data: { server: (await viewRow(sctx.keys, fresh)).summary, test } };
+  return { ok: true, data: { server: (await viewRow(sctx.key, fresh)).summary, test } };
+}
+
+/** 拒否を settings_audit_log に 1 行残す(記録の失敗で応答は変えない) */
+async function recordRejection(
+  mctx: MutationContext,
+  row: ServerRow,
+  event: 'server_update_rejected' | 'server_delete_rejected',
+  params: Record<string, unknown>,
+): Promise<void> {
+  await settingsLog(mctx.sctx.db, {
+    ...mctx.actor,
+    now: mctx.now ?? Date.now(),
+    event,
+    serverId: Number(row.id),
+    serverName: row.name,
+    params,
+  })
+    .run()
+    .catch(() => undefined);
 }
 
 /** DELETE /api/servers/:id */
@@ -762,15 +713,17 @@ export async function deleteServer(
 ): Promise<ServerOutcome<DeleteServerResponse>> {
   const idr = parseIdParam(idParam);
   if (!idr.ok) return idr;
-  if (idr.data === DEFAULT_SERVER_ID) return fail('SERVER_READ_ONLY');
   const db = mctx.sctx.db;
-  if (!db) return fail('SERVERS_UNAVAILABLE');
   const row = await getRow(db, Number(idr.data));
   if (!row) return fail('SERVER_NOT_FOUND');
   if (!isPlainObject(body)) return fail('BAD_REQUEST');
   const cn = body.confirmName;
   if (cn === undefined || cn === null || cn === '') return invalid({ confirmName: 'required' });
-  if (typeof cn !== 'string' || cn !== row.name) return invalid({ confirmName: 'mismatch' });
+  if (typeof cn !== 'string' || cn !== row.name) {
+    // 他のサーバーの削除の試行を残す(M-2)。入力された名前は残さない
+    await recordRejection(mctx, row, 'server_delete_rejected', { reason: 'mismatch' });
+    return invalid({ confirmName: 'mismatch' });
+  }
   const now = mctx.now ?? Date.now();
   await db.batch([
     db.prepare('DELETE FROM servers WHERE id = ?1').bind(Number(row.id)),
@@ -788,42 +741,38 @@ export async function deleteServer(
   return { ok: true, data: { deletedId: idr.data } };
 }
 
-/** POST /api/servers/:id/test(無効のサーバーもテストできる。同じサーバーは 5 秒に 1 回まで) */
+/**
+ * POST /api/servers/:id/test(無効のサーバーもテストできる。同じサーバーは 5 秒に 1 回まで)。
+ * 保存済みのパスワードを Bearer で外に送る操作なので、結果を settings_audit_log に server_test として残す(M-2)
+ */
 export async function testServer(mctx: MutationContext, idParam: string | undefined): Promise<ServerOutcome<ServerMutationResponse>> {
   const idr = parseIdParam(idParam);
   if (!idr.ok) return idr;
   const id = idr.data;
   const { sctx } = mctx;
-  let rcon: RconConfig;
-  let row: ServerRow | null = null;
-  if (id === DEFAULT_SERVER_ID) {
-    const st = getDefaultServerState(sctx.env);
-    if (st.kind === 'none') return fail('SERVER_NOT_FOUND');
-    if (st.kind === 'issue') return fail('NOT_CONFIGURED');
-    rcon = st.rcon;
-  } else {
-    if (!sctx.db) return fail('SERVERS_UNAVAILABLE');
-    row = await getRow(sctx.db, Number(id));
-    if (!row) return fail('SERVER_NOT_FOUND');
-    const ep = endpointOf(row);
-    const d = await decryptPassword(sctx.keys, row.rcon_password_enc, ep);
-    const baseUrl = baseUrlOf(ep);
-    if (!d.ok || !baseUrl) return fail('SERVER_NEEDS_PASSWORD');
-    rcon = { baseUrl, password: d.plaintext };
-  }
+  const row = await getRow(sctx.db, Number(id));
+  if (!row) return fail('SERVER_NOT_FOUND');
+  const ep = endpointOf(row);
+  const d = await decryptPassword(sctx.key, row.rcon_password_enc, ep);
+  const baseUrl = baseUrlOf(ep);
+  if (!d.ok || !baseUrl) return fail('SERVER_NEEDS_PASSWORD');
   const now = mctx.now ?? Date.now();
   const wait = takeTestSlot(id, now);
   if (wait !== null) return fail('RATE_LIMITED', { retryAfterSec: wait });
   invalidateCapabilities(id);
-  const test = await runConnectionTest(rcon, mctx.deps);
-  await saveTestResult(sctx, id, test);
-  let server: ServerSummary | null;
-  if (row && sctx.db) {
-    const fresh = (await getRow(sctx.db, Number(id))) ?? row;
-    server = (await viewRow(sctx.keys, fresh)).summary;
-  } else {
-    server = defaultSummary(sctx.env);
-  }
-  if (!server) return fail('SERVER_NOT_FOUND');
-  return { ok: true, data: { server, test } };
+  const test = await runConnectionTest({ baseUrl, password: d.plaintext }, mctx.deps);
+  const last = lastTestOfResult(test);
+  await sctx.db.batch([
+    saveTestStmt(sctx.db, id, last),
+    settingsLog(sctx.db, {
+      ...mctx.actor,
+      now: test.testedAt,
+      event: 'server_test',
+      serverId: Number(row.id),
+      serverName: row.name,
+      params: { result: last.result },
+    }),
+  ]);
+  const fresh = (await getRow(sctx.db, Number(id))) ?? row;
+  return { ok: true, data: { server: (await viewRow(sctx.key, fresh)).summary, test } };
 }

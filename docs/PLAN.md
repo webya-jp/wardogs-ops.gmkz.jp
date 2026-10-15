@@ -22,14 +22,14 @@ WARDOGS コミュニティサーバーの運営者が、Web ブラウザから�
 ```
 運営者ブラウザ ─▶ https://<worker>.<account>.workers.dev(カスタムドメインは任意)
                 ─▶ Worker(Astro SSR + React アイランド)
-                     ├─ アプリ内パスワードログイン(Secret ADMIN_PASSWORD)+ HMAC 署名 Cookie
+                     ├─ 初期設定(/setup)で管理パスワードを登録 → D1(PBKDF2)。HMAC 署名 Cookie(鍵は D1 の instance_key から派生)
                      ├─ D1: 監査ログ、人数スナップショット(作れない場合は段階的に無効化できる)
-                     └─ fetch(Authorization: Bearer <Secret RCON_PASSWORD>)
-                           ─▶ RCON HTTP API(Secret RCON_URL。サーバー側で AllowedHosts を設定)
+                     └─ fetch(Authorization: Bearer <D1 に AES-GCM で保存した RCON パスワード>)
+                           ─▶ RCON HTTP API(画面から登録したホスト名:ポート。複数台可。サーバー側で AllowedHosts を設定)
 ```
 
 - デプロイ: 「Deploy to Cloudflare」ボタン(deploy.workers.cloudflare.com)+ Workers Builds の Git 連携を第一候補にする。`wrangler.jsonc` にバインディングを宣言し、自動プロビジョニングに任せる
-- 利用者の手順(README): 1. GitHub でフォーク 2. Deploy to Cloudflare ボタン 3. Secrets を 2〜3 個入力 4. サーバー側で RCON を有効化し AllowedHosts を設定
+- 利用者の手順(README): 1. GitHub でフォーク 2. Deploy to Cloudflare ボタン 3. 開いた URL で管理パスワードを登録 4. 画面からサーバー(ホスト名・ポート・RCON パスワード)を追加 5. サーバー側で RCON を有効化し AllowedHosts を設定
 
 ## 撤回した旧方針(2026-10-15 午前の決定)
 
@@ -37,14 +37,14 @@ Cloudflare Access(メール認証 + Worker 側 JWT 検証)、Cloudflare Tunnel�
 
 ## 制約
 
-- 認証: Worker Secret `ADMIN_PASSWORD` 1 つ。ログイン後は HMAC 署名付き Cookie(`Secure; HttpOnly; SameSite=Strict`)。ログイン失敗のレート制限(KV または D1)、CSRF 対策(Origin 検査)、パスワードの強度要件を設計に入れる
+- 認証(2026-10-16 改訂): **Worker Secrets はゼロ**。初期設定ウィザードで管理パスワードを D1 に PBKDF2 で保存。ログイン後は HMAC 署名付き Cookie(`Secure; HttpOnly; SameSite=Strict`)。ログイン失敗のレート制限(KV または D1)、CSRF 対策(Origin 検査)、パスワードの強度要件を設計に入れる
 - 書き込み系の操作は Worker 側の確認ダイアログ(確認トークン or 二段階)+ 監査ログを通す。当初の許可は kick / ban / unban / broadcast / message / map 変更 / 試合終了まで。設定(`PUT /v1/config`)は第 2 段階
-- Secrets(`ADMIN_PASSWORD`、`RCON_PASSWORD`、`RCON_URL`、`SESSION_SECRET`)はリポジトリに置かない
+- RCON パスワードは D1 に AES-GCM で暗号化して保存(鍵は初期設定時に生成する `instance_key`。同じ D1 にあるため、D1 を読める相手には復号できる。アカウントの 2 要素認証が前提)。複数サーバーを画面から追加・切り替えできる(2026-10-16 ユーザー要望)
 - 無料枠内(Workers / D1 / KV)
 
 ## 要確認(設計時に一次資料で確定する)
 
-- 「Deploy to Cloudflare」ボタンの仕様(D1 の自動作成、Secrets の入力、無料プランでの可否)
+- 「Deploy to Cloudflare」ボタンの仕様(D1 の自動作成、無料プランでの可否)
 - Workers の `fetch` から外部 IP の任意ポートへ平文 `http://` で接続できるか。送信元 IP レンジを AllowedHosts に書けるか
 - RCON の実在ルート(`GET /v1/capabilities`)と、ビルドによる書き込み系ルートの差
 - AllowedHosts の書式と、サーバー提供元が RCON ポートをインターネットから到達可能にできるか(`BindAddress=0.0.0.0` に TLS と `PasswordHash` が要るという非公式記述の真偽)

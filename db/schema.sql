@@ -1,4 +1,4 @@
--- wardogs-ops の現行スキーマ(参照用のまとめ)。docs/ARCHITECTURE.md 第 8 章・第 15 章。
+-- wardogs-ops の現行スキーマ(参照用のまとめ)。docs/ARCHITECTURE.md 第 5 章・第 8 章・第 15 章。
 -- 本番への適用は db/migrations/ を `wrangler d1 migrations apply DB --remote` で行う。
 -- このファイルは migrations をすべて適用した後の状態と一致させること(0001_init.sql + 0002_servers.sql)。
 -- 列の順序は ALTER TABLE ADD COLUMN の結果(末尾に追加)に合わせてある。
@@ -23,9 +23,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
   rcon_status     INTEGER,
   error_code      TEXT,
   confirm_nonce   TEXT    UNIQUE,
-  -- 0002: 書き込み操作で NULL = 既定サーバー。login / logout は常に NULL
+  -- 0002: 書き込み操作で NULL = 対象サーバー不明(複数サーバー対応前の行)。login / logout は常に NULL
   server_id       INTEGER,
-  -- 0002: 操作時点のサーバーの表示名(既定サーバーは NULL)
+  -- 0002: 操作時点のサーバーの表示名
   server_name     TEXT
 );
 
@@ -33,7 +33,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log (created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log (target_steam_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_log_server ON audit_log (server_id, id);
 
--- 0001 の人数スナップショット(既定サーバーのみ)。0002 以降は書かない。90 日の掃除で空になる
+-- 0001 の人数スナップショット(サーバー 1 台時代)。0002 以降は書かない。90 日の掃除で空になる
 CREATE TABLE IF NOT EXISTS status_snapshots (
   bucket          INTEGER PRIMARY KEY,
   taken_at        INTEGER NOT NULL,
@@ -48,7 +48,23 @@ CREATE TABLE IF NOT EXISTS login_throttle (
   failures     INTEGER NOT NULL DEFAULT 0
 );
 
--- 0002: 画面から追加した RCON の接続先
+-- 0002: 管理者(/setup で登録。password_hash は 'pbkdf2-sha256$<反復回数>$<salt>$<導出値>'。平文は保存しない)
+CREATE TABLE IF NOT EXISTS admins (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  password_hash TEXT    NOT NULL,
+  session_stamp TEXT    NOT NULL,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+
+-- 0002: パネルの設定(key / value)。instance_key(全鍵の元。API で返さない・消さない)
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT    PRIMARY KEY,
+  value      TEXT    NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- 0002: 画面から追加した RCON の接続先(rcon_password_enc は 'v2.<iv>.<ct>'。平文は保存しない)
 CREATE TABLE IF NOT EXISTS servers (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   name              TEXT    NOT NULL,
@@ -67,7 +83,7 @@ CREATE TABLE IF NOT EXISTS servers (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_servers_name ON servers (name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_servers_endpoint ON servers (scheme, host, port);
 
--- 0002: 人数スナップショット(サーバーごと。既定サーバーは server_id = 0)
+-- 0002: 人数スナップショット(サーバーごと。server_id = servers.id)
 CREATE TABLE IF NOT EXISTS server_snapshots (
   server_id       INTEGER NOT NULL,
   bucket          INTEGER NOT NULL,
@@ -80,7 +96,7 @@ CREATE TABLE IF NOT EXISTS server_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_server_snapshots_taken_at ON server_snapshots (taken_at);
 
--- 0002: パネル設定の変更ログ(event は CHECK なし。コードで検証)
+-- 0002: パネル設定の変更ログ(server_add / server_update / server_delete / admin_register。event は CHECK なし。コードで検証)
 CREATE TABLE IF NOT EXISTS settings_audit_log (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   created_at  INTEGER NOT NULL,

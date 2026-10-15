@@ -1,11 +1,19 @@
 ---
-// 設定不足の案内(最小版)。docs/ARCHITECTURE.md 5.7。
-// 未ログインでも見られる。設定が揃っているときは「設定済み」以外を出さない。
-// 不足時は Secret の名前と警告の種類だけを出す(値・長さ・接続先は出さない)。見た目は frontend-pages が整える。
-import { checkConfig } from '../lib/config';
+// 初期設定(管理パスワードの登録)/ D1 の不備の案内。docs/ARCHITECTURE.md 5.1.1・9.1、docs/API.md 2 章。
+// 未ログインでも見られる。middleware は D1 の不備・管理者の未登録でもここを通し、Origin 検査(POST)は先に済ませてある。
+// - D1 の不備: 案内だけ(フォームなし。POST は 503)
+// - 管理者が未登録: 登録フォーム(GET)/ 登録(POST。成功で /login?registered=1 へ 303。自動ログインはしない)
+// - 登録済み: GET は /login へ 303(ログイン済みなら /)。POST は 409 SETUP_ALREADY_DONE
+// 入力したパスワードは再表示しない。POST の処理は backend、見た目(GET の画面)は frontend-pages が整える(文言はカタログ経由)。
+import { ADMIN_PASSWORD_MAX_LENGTH, ADMIN_PASSWORD_MIN_LENGTH, SETUP_FORM_ERROR_STATUS } from '../types/api';
+import type { SetupFormError, SetupWarning } from '../types/api';
+import { hasAdmin } from '../lib/admins';
+import { handleSetup } from '../lib/auth';
+import { d1Warning, getFeatures } from '../lib/config';
+import { clientIp, discardBody, getWaitUntil, readFormBody, redirect } from '../lib/http';
+import { getKeys } from '../lib/keys';
 import { getEnv } from '../lib/runtime';
 import { getTranslator, resolveLanguage } from '../i18n';
-import type { MessageKey } from '../i18n';
 import OpsLayout from '../layouts/OpsLayout.astro';
 
 export const prerender = false;
@@ -13,38 +21,139 @@ export const prerender = false;
 const env = getEnv();
 const language = resolveLanguage(env.LANGUAGE, Astro.request.headers.get('Accept-Language'));
 const t = getTranslator(language);
-const config = checkConfig(env);
-const warningKeys = config.warnings.map((w) => `setup.warning.${w}` as MessageKey);
+const method = Astro.request.method;
+
+if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') {
+  await discardBody(Astro.request);
+  return new Response(null, { status: 405, headers: { Allow: 'GET, POST' } });
+}
+
+const state = await getFeatures(env);
+const db = state.db;
+const warning: SetupWarning | null = d1Warning(state.d1);
+let formError: SetupFormError | null = null;
+let showForm = false;
+
+if (!db) {
+  // D1 の不備: フォームを処理しない
+  if (method === 'POST') {
+    await discardBody(Astro.request);
+    Astro.response.status = 503;
+  }
+} else if (method === 'POST') {
+  const result = await handleSetup({
+    db,
+    getKeys: () => getKeys(db),
+    form: await readFormBody(Astro.request),
+    ip: clientIp(Astro.request),
+    waitUntil: getWaitUntil(Astro.locals),
+  });
+  if (result.kind === 'registered') return redirect('/login?registered=1', 303);
+  formError = result.code;
+  Astro.response.status = SETUP_FORM_ERROR_STATUS[result.code];
+  showForm = result.code !== 'SETUP_ALREADY_DONE';
+} else if (await hasAdmin(db)) {
+  return redirect(Astro.locals.session ? '/' : '/login', 303);
+} else {
+  showForm = true;
+}
+const errorParams = { min: ADMIN_PASSWORD_MIN_LENGTH, max: ADMIN_PASSWORD_MAX_LENGTH };
+const done = formError === 'SETUP_ALREADY_DONE';
+const pageTitle = warning ? t('setup.title') : done ? t('setup.done.title') : t('setup.register.title');
 ---
-<OpsLayout title={t('setup.title')} language={language} narrow>
-  <section class="card">
-    <h1>{t('setup.title')}</h1>
-    {config.ok ? (
+<OpsLayout title={pageTitle} language={language} narrow>
+  <section class="card setup-card">
+    {warning ? (
       <>
-        <p class="alert alert-ok">{t('setup.configured')}</p>
+        <h1>{t('setup.title')}</h1>
+        <p class="alert alert-warn" role="alert">{t(`setup.warning.${warning}`)}</p>
+        <p class="muted">{t('setup.readme')}</p>
+      </>
+    ) : done ? (
+      <>
+        <h1>{t('setup.done.title')}</h1>
+        <p class="alert alert-warn" role="alert">{t('setup.error.SETUP_ALREADY_DONE')}</p>
         <p><a class="button button-primary" href="/login">{t('setup.toLogin')}</a></p>
       </>
     ) : (
       <>
-        <p>{t('setup.intro')}</p>
-        {config.missing.length > 0 && (
-          <section>
-            <h2>{t('setup.missingTitle')}</h2>
-            <ul>
-              {config.missing.map((name) => <li><code>{name}</code></li>)}
-            </ul>
-          </section>
+        <p class="setup-step">{t('setup.register.title')}</p>
+        <h1>{t('setup.register.heading')}</h1>
+        <p>{t('setup.register.intro')}</p>
+        {formError && <p class="alert alert-error" role="alert">{t(`setup.error.${formError}`, errorParams)}</p>}
+        {showForm && (
+          <form
+            method="post"
+            action="/setup"
+            data-setup-form
+            data-mismatch={t('setup.error.PASSWORD_MISMATCH')}
+            data-submitting={t('setup.register.submitting')}
+          >
+            <div class="field">
+              <label for="password">{t('setup.register.password')}</label>
+              <input id="password" name="password" type="password" autocomplete="new-password" minlength={ADMIN_PASSWORD_MIN_LENGTH} maxlength={ADMIN_PASSWORD_MAX_LENGTH} required autofocus aria-describedby="password-help setup-notes" />
+              <small id="password-help">{t('setup.register.help', errorParams)}</small>
+            </div>
+            <div class="field">
+              <label for="passwordConfirm">{t('setup.register.passwordConfirm')}</label>
+              <input id="passwordConfirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength={ADMIN_PASSWORD_MIN_LENGTH} maxlength={ADMIN_PASSWORD_MAX_LENGTH} required />
+            </div>
+            <div class="setup-notes" id="setup-notes">
+              <p><strong>{t('setup.register.notesTitle')}</strong></p>
+              <ul>
+                <li>{t('setup.register.noteRandom')}</li>
+                <li>{t('setup.register.noteSeparate')}</li>
+                <li>{t('setup.register.noteNoRecover')}</li>
+              </ul>
+            </div>
+            <button type="submit" class="button-primary setup-submit">{t('setup.register.submit')}</button>
+          </form>
         )}
-        <section>
-          <h2>{t('setup.warningsTitle')}</h2>
-          <div class="alert alert-warn">
-            <ul>
-              {warningKeys.map((key) => <li>{t(key)}</li>)}
-            </ul>
-          </div>
-        </section>
-        <p class="muted">{t('setup.readme')}</p>
       </>
     )}
   </section>
+  <script>
+    // JS がある場合だけの補助(無くても Worker が同じ検証をする。docs/ARCHITECTURE.md 9.1):
+    // - 確認入力の不一致を送信前に知らせる
+    // - 送信中はボタンを押せなくして二重送信を防ぐ
+    for (const form of document.querySelectorAll<HTMLFormElement>('form[data-setup-form]')) {
+      const password = form.querySelector<HTMLInputElement>('#password');
+      const confirm = form.querySelector<HTMLInputElement>('#passwordConfirm');
+      const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+      const label = submit?.textContent ?? '';
+      const sync = () => {
+        if (!password || !confirm) return;
+        confirm.setCustomValidity(confirm.value !== '' && confirm.value !== password.value ? (form.dataset.mismatch ?? '') : '');
+      };
+      password?.addEventListener('input', sync);
+      confirm?.addEventListener('input', sync);
+      form.addEventListener('submit', (e) => {
+        sync();
+        if (!form.checkValidity()) {
+          e.preventDefault();
+          form.reportValidity();
+          return;
+        }
+        if (form.dataset.submitted === '1') {
+          e.preventDefault();
+          return;
+        }
+        form.dataset.submitted = '1';
+        if (submit) {
+          submit.disabled = true;
+          submit.setAttribute('aria-busy', 'true');
+          if (form.dataset.submitting) submit.textContent = form.dataset.submitting;
+        }
+      });
+      // 戻るボタンでページが復元されたとき(bfcache)に押せないままにしない
+      window.addEventListener('pageshow', () => {
+        delete form.dataset.submitted;
+        if (submit) {
+          submit.disabled = false;
+          submit.removeAttribute('aria-busy');
+          submit.textContent = label;
+        }
+      });
+    }
+  </script>
 </OpsLayout>

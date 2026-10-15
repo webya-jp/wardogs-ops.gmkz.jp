@@ -1,9 +1,8 @@
 // サーバー設定画面(/servers)。docs/ARCHITECTURE.md 15.7、docs/API.md 7 章。手動更新。
-// - 一覧: 表示名、ホスト名:ポート(既定サーバーは出さない)、有効/無効、直近の接続テスト、パスワードの再入力が必要・短め
-// - 操作: 編集・接続テスト・有効化/無効化・削除(既定サーバーは接続テストのみ)
+// - 一覧: 表示名、ホスト名:ポート、有効/無効、直近の接続テスト、パスワードの再入力が必要・短め
+// - 操作: 編集・接続テスト・有効化/無効化・削除
 // - 追加・編集フォームは 4 項目(表示名 / ホスト名 / ポート / RCON パスワード)。保存後に接続テストの結果を出す
 // - 削除は確認ダイアログで表示名を入力させ、confirmName として送る
-// - features.servers が false(D1 が使えない)なら一覧(既定サーバーのみ)と SERVERS_UNAVAILABLE の案内だけでフォームは出さない
 // 運営者が入力した表示名・ホスト名と、RCON が返したサーバー名は翻訳しない。RCON パスワードは画面に表示しない(API も返さない)。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SubmitEvent } from 'react';
@@ -25,10 +24,7 @@ import { isMessageKey } from './lib/keys';
 import { serverLabel } from './lib/servers';
 import ErrorView, { errorText, fieldIssueText } from './ErrorView';
 
-interface Props extends I18nProps {
-  /** サーバー側で判定した features.servers(API の manageable が取れるまでの初期値) */
-  initialManageable: boolean;
-}
+type Props = I18nProps;
 
 type FormMode = { type: 'add' } | { type: 'edit'; server: ServerSummary };
 
@@ -62,7 +58,7 @@ function portValue(raw: string): number {
   return (/^[0-9]+$/.test(s) ? Number(s) : s) as number;
 }
 
-export default function ServersPanel({ language, timeZone, initialManageable }: Props) {
+export default function ServersPanel({ language, timeZone }: Props) {
   const i18n = useI18n({ language, timeZone });
   const { t, time, dateTime, num } = i18n;
   const list = useResource<ServersResponse>('/api/servers', null);
@@ -77,11 +73,9 @@ export default function ServersPanel({ language, timeZone, initialManageable }: 
   const outcomeRef = useRef<HTMLDivElement>(null);
 
   const data = list.data;
-  const manageable = data ? data.manageable : initialManageable;
   const servers = data?.servers ?? [];
   const limit = data?.limit ?? 0;
-  const dbCount = servers.filter((s) => s.source === 'db').length;
-  const limitReached = data !== null && dbCount >= limit;
+  const limitReached = data !== null && servers.length >= limit;
 
   useEffect(() => {
     if (mode) formRef.current?.scrollIntoView({ block: 'start' });
@@ -97,7 +91,7 @@ export default function ServersPanel({ language, timeZone, initialManageable }: 
   };
   const openEdit = (server: ServerSummary) => {
     setMode({ type: 'edit', server });
-    setValues({ name: server.name ?? '', host: server.host ?? '', port: server.port === null ? '' : String(server.port), password: '' });
+    setValues({ name: server.name, host: server.host, port: String(server.port), password: '' });
     setFormError(null);
   };
   const closeForm = () => {
@@ -109,7 +103,7 @@ export default function ServersPanel({ language, timeZone, initialManageable }: 
 
   const editing = mode?.type === 'edit' ? mode.server : null;
   const endpointChanged =
-    editing !== null && (values.host.trim().toLowerCase() !== (editing.host ?? '') || values.port.trim() !== String(editing.port ?? ''));
+    editing !== null && (values.host.trim().toLowerCase() !== editing.host || values.port.trim() !== String(editing.port));
   const passwordRequired = mode?.type === 'add' || endpointChanged || editing?.needsPassword === true;
 
   const onSubmit = async (e: SubmitEvent<HTMLFormElement>) => {
@@ -129,9 +123,9 @@ export default function ServersPanel({ language, timeZone, initialManageable }: 
     } else {
       const s = mode.server;
       const body: UpdateServerRequest = {};
-      if (values.name !== (s.name ?? '')) body.name = values.name;
-      if (values.host.trim().toLowerCase() !== (s.host ?? '')) body.host = values.host;
-      if (values.port.trim() !== String(s.port ?? '')) body.port = portValue(values.port);
+      if (values.name !== s.name) body.name = values.name;
+      if (values.host.trim().toLowerCase() !== s.host) body.host = values.host;
+      if (values.port.trim() !== String(s.port)) body.port = portValue(values.port);
       if (values.password !== '') body.password = values.password;
       r = await apiPut<ServerMutationResponse>(`/api/servers/${encodeURIComponent(s.id)}`, body);
     }
@@ -196,15 +190,6 @@ export default function ServersPanel({ language, timeZone, initialManageable }: 
           {t('servers.state.passwordShort')}
         </span>
       )}
-      {s.secretsIssue && (
-        <>
-          <span className="badge badge-error">{t('servers.state.secretsIssue')}</span>
-          {isMessageKey(`setup.warning.${s.secretsIssue}`) && (
-            <div className="muted">{t(`setup.warning.${s.secretsIssue}` as const)}</div>
-          )}
-        </>
-      )}
-      {s.source === 'secrets' && <div className="muted">{t('servers.state.readOnly')}</div>}
     </div>
   );
 
@@ -263,7 +248,7 @@ export default function ServersPanel({ language, timeZone, initialManageable }: 
     <section aria-labelledby="servers-title">
       <div className="toolbar">
         <h1 id="servers-title">{t('servers.title')}</h1>
-        {data && manageable && <span className="badge">{t('servers.count', { count: num(dbCount), limit: num(limit) })}</span>}
+        {data && <span className="badge">{t('servers.count', { count: num(servers.length), limit: num(limit) })}</span>}
         <span className="spacer" />
         <button type="button" className="button-small" onClick={list.refresh} disabled={list.loading}>
           {list.loading ? t('common.loading') : t('common.refresh')}
@@ -274,15 +259,6 @@ export default function ServersPanel({ language, timeZone, initialManageable }: 
         {list.updatedAt !== null && <>{t('common.lastUpdated', { time: time(list.updatedAt) })} </>}
         {t('common.manualRefresh')}
       </p>
-
-      {!manageable && (
-        <div className="alert alert-warn" role="status">
-          <p>
-            <strong>{t('error.SERVERS_UNAVAILABLE')}</strong>
-          </p>
-          <p>{t('servers.unavailableHelp')}</p>
-        </div>
-      )}
 
       <div ref={outcomeRef} aria-live="polite">
         {outcome && (
@@ -310,7 +286,7 @@ export default function ServersPanel({ language, timeZone, initialManageable }: 
         )}
       </div>
 
-      {manageable && !mode && (
+      {!mode && (
         <div className="button-row tight add-row">
           <button type="button" className="button-primary" onClick={openAdd} disabled={limitReached}>
             {t('servers.add')}
@@ -319,7 +295,7 @@ export default function ServersPanel({ language, timeZone, initialManageable }: 
         </div>
       )}
 
-      {manageable && mode && (
+      {mode && (
         <section ref={formRef} className="card server-form" aria-labelledby="server-form-title">
           <h2 id="server-form-title">
             {mode.type === 'add' ? t('servers.form.addTitle') : t('servers.form.editTitle', { name: serverLabel(mode.server, t) })}
@@ -433,54 +409,43 @@ export default function ServersPanel({ language, timeZone, initialManageable }: 
               {servers.map((s) => {
                 const name = serverLabel(s, t);
                 const busy = busyId === s.id;
-                const editable = manageable && s.source === 'db';
                 return (
                   <tr key={s.id}>
                     <td data-label={t('servers.col.name')}>
                       <strong>{name}</strong>
                     </td>
                     <td data-label={t('servers.col.endpoint')}>
-                      {s.host !== null && s.port !== null ? (
-                        <span className="mono">{t('servers.endpointValue', { host: s.host, port: String(s.port) })}</span>
-                      ) : (
-                        <span className="muted">{t('servers.endpointHidden')}</span>
-                      )}
+                      <span className="mono">{t('servers.endpointValue', { host: s.host, port: String(s.port) })}</span>
                     </td>
                     <td data-label={t('servers.col.state')}>{statusCell(s)}</td>
                     <td data-label={t('servers.col.lastTest')}>{lastTestCell(s)}</td>
                     <td className="actions">
                       <div className="row-actions" role="group" aria-label={t('servers.rowActions', { name })}>
-                        {editable && (
-                          <button type="button" className="button-small" onClick={() => openEdit(s)} disabled={saving}>
-                            {t('servers.action.edit')}
-                          </button>
-                        )}
+                        <button type="button" className="button-small" onClick={() => openEdit(s)} disabled={saving}>
+                          {t('servers.action.edit')}
+                        </button>
                         <button
                           type="button"
                           className="button-small"
                           onClick={() => void runTest(s)}
-                          disabled={busyId !== null || s.needsPassword || (s.source === 'db' && !manageable)}
+                          disabled={busyId !== null || s.needsPassword}
                           aria-busy={busy}
                         >
                           {busy ? t('servers.action.testing') : t('servers.action.test')}
                         </button>
-                        {editable && (
-                          <button type="button" className="button-small" onClick={() => void toggle(s)} disabled={busyId !== null}>
-                            {t(s.enabled ? 'servers.action.disable' : 'servers.action.enable')}
+                        <button type="button" className="button-small" onClick={() => void toggle(s)} disabled={busyId !== null}>
+                          {t(s.enabled ? 'servers.action.disable' : 'servers.action.enable')}
+                        </button>
+                        <span className="destructive-group">
+                          <button
+                            type="button"
+                            className="button-small button-outline-danger"
+                            onClick={() => setDeleting(s)}
+                            disabled={busyId !== null}
+                          >
+                            {t('servers.action.delete')}
                           </button>
-                        )}
-                        {editable && (
-                          <span className="destructive-group">
-                            <button
-                              type="button"
-                              className="button-small button-outline-danger"
-                              onClick={() => setDeleting(s)}
-                              disabled={busyId !== null}
-                            >
-                              {t('servers.action.delete')}
-                            </button>
-                          </span>
-                        )}
+                        </span>
                       </div>
                     </td>
                   </tr>

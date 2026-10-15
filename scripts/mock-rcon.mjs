@@ -5,7 +5,8 @@
 //   MOCK_RCON_PORTS     待ち受けポート(カンマ区切り。例 7776,7777)。1 つのプロセスで複数のポートを待ち受け、
 //                       ポートごとに状態(プレイヤー・BAN・マップ)を独立に持つ。MOCK_RCON_PORT より優先
 //   MOCK_RCON_PORT      待ち受けポート 1 つ(既定 7776。MOCK_RCON_PORTS が無いときだけ使う)
-//   MOCK_RCON_PASSWORD  Authorization: Bearer と照合する値(全ポート共通。既定は下記のダミー文字列)
+//   MOCK_RCON_PASSWORD  Authorization: Bearer と照合する値(全ポート共通。既定は下記のダミー文字列)。
+//                       パネルの「サーバー設定」(/servers)でサーバーを追加するときに、この値を RCON パスワードとして入力する
 //   MOCK_RCON_PASSWORDS ポートごとのパスワード(カンマ区切り、MOCK_RCON_PORTS と同じ順。空の要素は MOCK_RCON_PASSWORD)
 //
 // 127.0.0.1 と ::1 だけで待ち受ける。サーバー名は "Mock Server <ポート>"。

@@ -1,13 +1,14 @@
 # Worker 内部 API 契約
 
-作成日: 2026-10-15(JST)/ 更新: 2026-10-16(複数サーバー対応: 1.2、3・4 章の `server`、5 章のコード、7 章)/ 担当: architect。型の正本は `src/types/api.ts`(本書と食い違ったら司令塔に報告)。
+作成日: 2026-10-15(JST)/ 更新: 2026-10-16(複数サーバー対応: 1.2、3・4 章の `server`、5 章のコード、7 章。Worker Secrets の廃止: 1 章、2 章の `/setup`、5 章、既定サーバーの削除)/ 担当: architect。型の正本は `src/types/api.ts`(本書と食い違ったら司令塔に報告)。
 構成・認証の詳細は `docs/ARCHITECTURE.md`。RCON の確度は第 6 章と `docs/research/wardogs-rcon.md`。
 
 ## 1. 共通
 
 - ベース: Worker と同じオリジン(`https://<worker>.<account>.workers.dev` またはカスタムドメイン)。
 - 認証: すべての `/api/*` はログイン Cookie(`__Host-wo_session`)が必要。無い・不正・期限切れは 401 `UNAUTHENTICATED`。
-- 設定不足(必須 Secrets の不足・不正)のときは、すべての `/api/*` が 503 `NOT_CONFIGURED`。
+- D1 が無い・マイグレーション未適用のときは、すべての `/api/*` が 503 `NOT_CONFIGURED`。管理者が未登録(`/setup` で管理パスワードを登録する前)のときは 503 `SETUP_REQUIRED`(ARCHITECTURE 5.1.1)。いずれも認証より先に判定する。
+- Worker Secrets は使わない(2026-10-16)。管理パスワード・鍵・RCON の接続先とパスワードはすべて D1 にある(ARCHITECTURE 第 5 章)。
 - POST / PUT / DELETE: `Content-Type: application/json` 必須(415)、本文 8 KiB まで(413)、Origin 検査(403 `FORBIDDEN_ORIGIN`。ARCHITECTURE 5.5)。本文の無い DELETE は受け付けない(7 章の DELETE は本文必須)。
 - 未定義のメソッドは 405 `METHOD_NOT_ALLOWED`。
 - 応答ヘッダ: `Content-Type: application/json; charset=utf-8`、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`。
@@ -33,7 +34,7 @@
 
 ### 1.2 対象サーバー(`server`)
 
-複数サーバー対応(ARCHITECTURE 第 15 章)。RCON を呼ぶ API は対象サーバーを `ServerId`(`"default"` = Secrets の既定サーバー、`"3"` など = 画面から登録したサーバー。形式 `SERVER_ID_PATTERN`)で受け取る。
+複数サーバー対応(ARCHITECTURE 第 15 章)。RCON を呼ぶ API は対象サーバーを `ServerId`(`"3"` など = 画面から登録したサーバーの `servers.id`。形式 `SERVER_ID_PATTERN`)で受け取る。Secrets による既定サーバー(`"default"`)は 2026-10-16 に廃止した(`"default"` は形式不正)。
 
 | API | 渡し方 | 省略時 |
 |---|---|---|
@@ -47,31 +48,45 @@
 | 状況 | 応答 |
 |---|---|
 | 形式が不正 | 400 `VALIDATION_FAILED`(`fields.server = invalid_format`) |
-| 該当するサーバーが無い(削除済み、既定サーバーの Secrets が両方未設定) | 404 `SERVER_NOT_FOUND` |
+| 該当するサーバーが無い(削除済み) | 404 `SERVER_NOT_FOUND` |
 | 無効にしてある | 409 `SERVER_DISABLED` |
-| 保存済みの RCON パスワードを復号できない | 409 `SERVER_NEEDS_PASSWORD` |
-| 既定サーバーの Secrets に不備(片方だけ・`RCON_URL` 不正) | 503 `NOT_CONFIGURED` |
+| 保存済みの RCON パスワードを復号できない(通常は起きない。ARCHITECTURE 15.3) | 409 `SERVER_NEEDS_PASSWORD` |
 | サーバーが 1 台も無い(省略時の解決で見つからない) | 409 `NO_SERVERS` |
-| 登録サーバーを指定したが D1 が使えない・0002 未適用 | 503 `SERVERS_UNAVAILABLE` |
 
-RCON パスワード(平文・暗号文とも)はどの応答にも含めない。既定サーバーの `RCON_URL` も返さない。
+RCON パスワード(平文・暗号文とも)、管理パスワードのハッシュ、`instance_key` はどの応答にも含めない。
 
 ## 2. ページ側のエンドポイント(フォーム)
 
 | メソッド・パス | 本文 | 結果 |
 |---|---|---|
-| `GET /login` | − | ログインフォーム。ログイン済みなら `/` へ 303 |
+| `GET /setup` | − | D1 の不備なら案内(`D1_MISSING` / `D1_NOT_MIGRATED`。フォームなし)。管理者が未登録なら登録フォーム。登録済みなら `/login` へ 303(ログイン済みなら `/`)。ARCHITECTURE 5.1.1・9.1 |
+| `POST /setup` | `application/x-www-form-urlencoded`: `password`(必須、16〜256 文字)、`passwordConfirm`(必須、`password` と完全一致) | 成功: 管理者を登録し `/login?registered=1` へ 303(自動ログインはしない)。失敗: 下表のステータスでフォームを再表示(入力したパスワードは再表示しない)。Origin 不一致: 403。D1 の不備: フォームを処理せず案内を表示(503) |
+| `GET /login` | − | ログインフォーム。ログイン済みなら `/` へ 303。管理者が未登録なら `/setup` へ 303。`?registered=1` のときは登録完了の案内を出す |
 | `POST /login` | `application/x-www-form-urlencoded`: `password`(必須、256 文字まで評価)、`operator`(任意、32 文字まで) | 成功: Cookie 発行 + `/` へ 303。失敗: 401 でフォーム再表示(文言はカタログ `login.failed`)。ロック中: 429 でフォーム再表示(`login.locked`、残り分数)。Origin 不一致: 403 |
 | `POST /logout` | なし(Origin 検査あり) | Cookie 削除 + `/login` へ 303 |
-| `GET /setup` | − | 設定の案内(ARCHITECTURE 5.7) |
+
+`POST /setup` の失敗(`SetupFormError`。文言はカタログ `setup.error.<code>`、HTTP ステータスは `SETUP_FORM_ERROR_STATUS`):
+
+| code | HTTP | 意味 |
+|---|---|---|
+| `BAD_REQUEST` | 400 | フォームを読み取れない |
+| `PASSWORD_TOO_SHORT` | 400 | 16 文字(`ADMIN_PASSWORD_MIN_LENGTH`、コードポイント)未満。空を含む |
+| `PASSWORD_TOO_LONG` | 400 | 256 文字(`ADMIN_PASSWORD_MAX_LENGTH`)超 |
+| `PASSWORD_MISMATCH` | 400 | 確認入力が一致しない |
+| `PASSWORD_SAME_AS_RCON` | 400 | 登録済みサーバーの RCON パスワードと同じ(管理者を消して登録し直す場合) |
+| `SETUP_ALREADY_DONE` | 409 | 管理者が既に登録されている(先に誰かが登録した・二重送信)。登録は `admins` が 0 行のときだけ、条件付きの INSERT で受け付ける |
+
+- 判定の順序: D1 の判定 → Origin 検査 → 管理者の有無(登録済みなら `SETUP_ALREADY_DONE`)→ 入力検証 → 登録(条件付き INSERT。0 行なら `SETUP_ALREADY_DONE`)。
+- 成功時は `settings_audit_log` に `admin_register` を記録する(3 章の `kind=settings` で見える)。
+- `/setup` にはログイン失敗のようなレート制限は掛けない(登録は 1 回だけで、総当たりの対象が無い)。
 
 ## 3. 読み取り API
 
 ### `GET /api/session` → `SessionResponse`
 
-ログイン中のセッション情報、段階的有効化の状態(`features`。`servers` = 画面からサーバーを管理できるか)、設定の警告(`warnings`。`SetupWarning` の配列)。RCON は呼ばない。`server` は受け取らない。
+ログイン中のセッション情報、機能の可否(`features`。D1 必須化により通常はすべて true)、設定の警告(`warnings`。`SetupWarning` の配列)。RCON は呼ばない。`server` は受け取らない。
 
-`warnings` の変更(2026-10-16): `RCON_URL_*` / `RCON_PASSWORD_MISSING` はログインを止めない警告になった(既定サーバーの不備)。登録サーバーに復号できないパスワードがあると `SERVER_PASSWORDS_UNREADABLE` が入る。
+`warnings` の変更(2026-10-16): Worker Secrets の廃止で、Secrets に関する警告(`ADMIN_PASSWORD_*`、`RCON_URL_*`、`RCON_PASSWORD_*`、`SESSION_SECRET_TOO_SHORT`)と `AUDIT_DISABLED_WRITES_ALLOWED` を削除した。ログイン後に入り得るのは `LOGIN_FAILURES_HIGH` と `SERVER_PASSWORDS_UNREADABLE`(登録サーバーに復号できないパスワードがある。通常は起きない)だけ。`D1_MISSING` / `D1_NOT_MIGRATED` はログイン前の `/setup` にだけ出る。
 
 `status` は `pending` / `succeeded` / `failed` / `unknown`。`unknown` = RCON がタイムアウトし、実行されたかどうか不明(DB 上は `failed` + `error_code = RCON_TIMEOUT` のまま。DB スキーマは変えず、API の変換で `unknown` にする)。
 
@@ -83,7 +98,7 @@ RCON パスワード(平文・暗号文とも)はどの応答にも含めない�
 
 ### `GET /api/status?server=<id>` → `StatusResponse`
 
-RCON `GET /v1/status`。成功時は人数スナップショットを記録(D1 がある場合、サーバーごとに 5 分に 1 行。`server_snapshots`)。
+RCON `GET /v1/status`。成功時は人数スナップショットを記録(サーバーごとに 5 分に 1 行。`server_snapshots`)。
 
 ### `GET /api/players?server=<id>` → `PlayersResponse`
 
@@ -91,7 +106,7 @@ RCON `GET /v1/players`。`cash` 等の本パネルで使わない項目は返さ
 
 ### `GET /api/bans?server=<id>` → `BansResponse`
 
-RCON `GET /v1/bans`。D1 がある場合、`knownName` を audit_log(event=ban、succeeded、同じ Steam ID の最新)から補完する(サーバーで絞らない。Steam ID は全サーバー共通のため)。
+RCON `GET /v1/bans`。`knownName` を audit_log(event=ban、succeeded、同じ Steam ID の最新)から補完する(サーバーで絞らない。Steam ID は全サーバー共通のため)。
 
 ### `GET /api/maps?server=<id>` → `MapsResponse`
 
@@ -99,18 +114,28 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 
 ### `GET /api/audit?kind=operations&server=all&limit=50&before=<id>` → `AuditResponse`
 
-ログを新しい順に返す。RCON は呼ばない。D1 が使えない場合は 200 で `available: false`、`entries: []`。
+ログを新しい順に返す。RCON は呼ばない。`available` は D1 必須化により常に true(形は互換のため残す)。
 
 | クエリ | 値 | 既定 |
 |---|---|---|
-| `kind` | `operations`(audit_log: RCON の操作・login・logout)/ `settings`(settings_audit_log: サーバーの追加・変更・削除) | `operations` |
-| `server` | `all` / `ServerId`。`operations` で `ServerId` を指定すると、その対象サーバーの書き込み操作だけ(login / logout は除く)。`default` は `server_id IS NULL` の書き込み操作。`settings` ではその対象サーバーの変更だけ | `all` |
+| `kind` | `operations`(audit_log: RCON の操作・login・logout)/ `settings`(settings_audit_log: サーバーの追加・変更・削除、管理者の登録) | `operations` |
+| `server` | `all` / `ServerId`。`operations` で `ServerId` を指定すると、その対象サーバーの書き込み操作だけ(login / logout は除く)。`settings` ではその対象サーバーの変更だけ(`admin_register` は除く)。`default` は形式不正(400) | `all` |
 | `limit` | 1〜100 | 50 |
 | `before` | 前ページの `nextBefore`(`kind` ごとに id の系列が別) | − |
 
 - 2 つの `kind` は別テーブルで id の系列が違うため、1 回の応答に混ぜない(ARCHITECTURE 15.2)。
-- `entries[].serverId` / `serverName`: 書き込み操作は対象サーバー(D1 が NULL の行は `"default"`、`serverName` は操作時点の表示名。既定サーバーは null)。login / logout は両方 null。
-- `settings` の行: `event` は `server_add` / `server_update` / `server_delete`、`status` は常に `succeeded`、`params` は変更内容(`name` `host` `port` `enabled` `passwordChanged`。パスワードは含まない)、`targetSteamId` / `targetName` / `rconStatus` / `errorCode` は null。
+- `entries[].serverId` / `serverName`: 書き込み操作は対象サーバー(`serverName` は操作時点の表示名)。D1 の `server_id` が NULL の書き込み操作の行(複数サーバー対応前の行)は両方 null(画面は「不明」)。login / logout・`admin_register` も両方 null。
+- `settings` の行(`SETTINGS_EVENTS`。パスワード・ハッシュは `params` に含まない)。`targetSteamId` / `targetName` / `rconStatus` は null、`finishedAt` は `createdAt` と同じ:
+
+  | event | status | errorCode | params |
+  |---|---|---|---|
+  | `server_add` / `server_update` / `server_delete` | `succeeded` | null | 変更内容(`name` `host` `port` `enabled` `passwordChanged`。削除は削除時点の name / host / port) |
+  | `server_update_rejected` | `failed` | `VALIDATION_FAILED` | `reason: "reenter_required"`、変えようとした `host` / `port` |
+  | `server_delete_rejected` | `failed` | `VALIDATION_FAILED` | `reason: "mismatch"`(入力された表示名は残さない) |
+  | `server_test` | `ok` なら `succeeded`、それ以外は `failed` | 失敗時は `params.result`(`RCON_*`) | `result: "ok" \| <RCON_*>` |
+  | `admin_register` | `succeeded` | null | `{}` |
+
+  拒否の記録は 7 章の PUT(`reenter_required`)と DELETE(`confirmName` の不一致)だけ。それ以外の入力検証の失敗(400)は記録しない。D1 に status 列は無く、API が event と params から決める(未知の event の行は返さない)。`admin_register` の `operator` / `sessionTag` は null(ログイン前の操作のため)。
 - `server` が存在しない id でもエラーにせず、該当 0 件として返す(削除済みサーバーのログも引けるようにするため)。形式不正は 400。
 
 読み取り API の RCON 由来のエラーは第 5 章の `RCON_*`。
@@ -119,7 +144,7 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 
 すべての書き込みは `prepare` → `execute` の 2 リクエストで行う。`execute` だけを直接呼んでも、有効な確認トークンが無ければ実行されない。どちらも本文に対象サーバー `server` が必須(1.2)。
 
-`features.writes` が false(D1 が無く `AUDIT_REQUIRED` が `"false"` でない)なら、どちらも 503 `WRITES_DISABLED`。
+`features.writes` が false なら、どちらも 503 `WRITES_DISABLED`(D1 必須化により通常は起きない。`AUDIT_REQUIRED` は効果なし)。
 
 ### `POST /api/actions/prepare`
 
@@ -204,14 +229,13 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 | `CONFIRM_EXPIRED` | 409 | 確認トークンの期限切れ |
 | `ALREADY_EXECUTED` | 409 | 同じ確認トークンで実行済み |
 | `CAPABILITY_MISSING` | 409 | このサーバーのビルドに該当ルートが無い |
-| `WRITES_DISABLED` | 503 | D1 が使えず書き込みを止めている(ARCHITECTURE 7.4) |
-| `NOT_CONFIGURED` | 503 | 必須 Secrets(ADMIN_PASSWORD 系)の不足・不正。または既定サーバーの Secrets の不備で既定サーバーを使えない(1.2) |
+| `WRITES_DISABLED` | 503 | 書き込みを止めている(`features.writes` が false。D1 必須化により通常は起きない) |
+| `NOT_CONFIGURED` | 503 | D1 が無い・マイグレーション未適用(ARCHITECTURE 7.4)。画面は `/setup` の案内へ |
+| `SETUP_REQUIRED` | 503 | 管理者が未登録(`/setup` で管理パスワードを登録する前)。画面は `/setup` へ |
 | `SERVER_NOT_FOUND` | 404 | 指定したサーバーが無い(1.2、7 章) |
 | `SERVER_DISABLED` | 409 | サーバーが無効になっている |
-| `SERVER_NEEDS_PASSWORD` | 409 | 保存済みの RCON パスワードを復号できない(ADMIN_PASSWORD / SESSION_SECRET の変更後。7 章の PUT で入れ直す) |
-| `SERVER_READ_ONLY` | 409 | 既定サーバー(Secrets)は画面から変更・削除できない |
+| `SERVER_NEEDS_PASSWORD` | 409 | 保存済みの RCON パスワードを復号できない(D1 の `instance_key` を手で消した・データ破損。通常は起きない。7 章の PUT で入れ直す) |
 | `SERVER_LIMIT_REACHED` | 409 | 登録できる上限(`MAX_SERVERS` = 20)に達した |
-| `SERVERS_UNAVAILABLE` | 503 | D1 が使えない・0002 未適用のため、登録サーバーを扱えない |
 | `NO_SERVERS` | 409 | サーバーが 1 台も無い(画面は `/servers` への案内を出す) |
 | `RCON_UNREACHABLE` | 502 | RCON に接続できない |
 | `RCON_TIMEOUT` | 504 | RCON の応答なし(読み取り 5 秒 / 書き込み 8 秒) |
@@ -257,24 +281,23 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 
 画面 `/servers` が使う。構成・暗号化・選択の詳細は ARCHITECTURE 第 15 章。共通:
 
-- 登録サーバーは D1 `servers` に保存する。D1 が使えない・0002 未適用(`features.servers` が false)なら、`GET` は既定サーバーだけを返し、追加・変更・削除・登録サーバーの接続テストは 503 `SERVERS_UNAVAILABLE`。
-- 既定サーバー(`:id` = `default`)への PUT / DELETE は 409 `SERVER_READ_ONLY`(接続テストは可)。
+- サーバーは D1 `servers` に保存する。Secrets による既定サーバーは廃止した(`:id` = `default` は形式不正の 400)。
 - 応答の `ServerSummary` に RCON パスワード・暗号文は含めない。保存後のパスワードは二度と返さない。
-- 追加・変更・削除は D1 の変更と `settings_audit_log` の INSERT を 1 つの `db.batch()` で行う(ARCHITECTURE 15.2)。検証で拒否したもの(400)は記録しない。
+- 追加・変更・削除は D1 の変更と `settings_audit_log` の INSERT を 1 つの `db.batch()` で行う(ARCHITECTURE 15.2)。検証で拒否したもの(400)は記録しない。例外は PUT の `reenter_required` と DELETE の `confirmName` 不一致で、`server_update_rejected` / `server_delete_rejected` を記録する(QA M-2。3 章)。
 - `:id` の形式が不正なら 400(`fields.server = invalid_format`)、無ければ 404 `SERVER_NOT_FOUND`。
 
 ### `GET /api/servers` → `ServersResponse`
 
-`{ manageable, servers: ServerSummary[], limit }`。並びは既定サーバー(あれば先頭)→ 登録サーバーを `sort_order`、`id` の順。RCON は呼ばない(接続テストの結果は保存済みの `lastTest`)。登録サーバーのパスワードを復号して `needsPassword` / `passwordShort` を決める。SESSION_SECRET が設定されていて古い鍵(`k = "a"`)の行を復号できたら、応答後にその行を再暗号化する(15.3)。
+`{ servers: ServerSummary[], limit }`。並びは `sort_order`、`id` の順。RCON は呼ばない(接続テストの結果は保存済みの `lastTest`)。各行のパスワードを復号して `needsPassword` / `passwordShort` を決める(再暗号化はしない。ARCHITECTURE 15.3)。
 
 `ServerSummary` の例(値はダミー):
 
 ```jsonc
 {
-  "id": "3", "source": "db", "name": "サーバー B",
+  "id": "3", "name": "サーバー B",
   "host": "rcon-b.example.com", "port": 7777,
   "enabled": true, "sortOrder": 0,
-  "needsPassword": false, "passwordShort": false, "secretsIssue": null, "usable": true,
+  "needsPassword": false, "passwordShort": false, "usable": true,
   "lastTest": { "at": 1792050000000, "result": "ok" },
   "createdAt": 1792040000000, "updatedAt": 1792050000000
 }
@@ -293,7 +316,7 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 | `name` | 必須。前後の空白を除いて 1〜32 文字(`required` / `too_long`)、改行・制御文字不可(`invalid_characters`)、既存と重複不可(`duplicate`) |
 | `host` | 必須。ホスト名のみ。空白・`/` `?` `#` `@` `:` `[` `]` `\` を含むと `invalid_format`、IP アドレスは `ip_address`、253 文字超は `too_long`、同じ `host` + `port` が既にあれば `duplicate`。小文字に正規化して保存 |
 | `port` | 必須。整数でなければ `invalid_format`、1〜65535 の外は `out_of_range` |
-| `password` | 必須。1〜256 文字(`required` / `too_long`)、`ADMIN_PASSWORD` と同じ値は `same_as_admin_password` |
+| `password` | 必須。1〜256 文字(`required` / `too_long`)、管理パスワードと同じ値は `same_as_admin_password`(管理者のハッシュで検証。ARCHITECTURE 5.2) |
 
 処理: 検証 → 上限確認(登録サーバーが 20 台なら 409 `SERVER_LIMIT_REACHED`)→ 暗号化して INSERT + `server_add` の変更ログ → **接続テスト**(RCON `GET /v1/status`、5 秒)→ 結果を `last_test_*` に保存 → 応答。**接続テストに失敗しても保存は取り消さない**(`test.ok: false` と `test.code` で返す)。
 
@@ -307,17 +330,19 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 - `needsPassword` のサーバーは、`password` を送れば解消する(他の項目は省略可)。
 - 変更が 1 つも無ければ何もせず現在の値を返す(変更ログも書かない)。
 
+`reenter_required` で拒否したときは `server_update_rejected` を 1 行記録する(3 章)。
+
 処理: 検証 → UPDATE + `server_update` の変更ログ(`params` は変えた項目と `passwordChanged`)→ そのサーバーの capabilities キャッシュを破棄 → 接続に関わる項目(`host` / `port` / `password`、または `enabled` を true にした)を変えたときだけ接続テスト(変えていなければ `test: null`)。
 
 ### `DELETE /api/servers/:id` → `DeleteServerResponse`
 
-本文 `DeleteServerRequest`: `{ "confirmName": "<現在の表示名>" }`。画面は確認ダイアログで表示名を入力させる。現在の表示名と完全一致しなければ 400(`fields.confirmName = mismatch`)。
+本文 `DeleteServerRequest`: `{ "confirmName": "<現在の表示名>" }`。画面は確認ダイアログで表示名を入力させる。現在の表示名と完全一致しなければ 400(`fields.confirmName = mismatch`)。このとき `server_delete_rejected` を 1 行記録する(3 章)。
 
 処理: 行の削除 + `server_delete` の変更ログ(`params` は削除時点の name / host / port)→ capabilities キャッシュの破棄 → `{ deletedId }`。操作ログ・人数スナップショットは残す(id は再利用しない)。選択 Cookie がこの id を指していても、次のページ表示で無視・削除される。
 
 ### `POST /api/servers/:id/test` → `ServerMutationResponse`
 
-本文 `{}`(JSON 必須)。保存済みの設定で接続テスト(RCON `GET /v1/status`、5 秒)を行い、`last_test_*` を更新して返す(既定サーバーも可。既定サーバーの結果は isolate 内メモリにだけ持つ)。capabilities キャッシュも破棄する。
+本文 `{}`(JSON 必須)。保存済みの設定で接続テスト(RCON `GET /v1/status`、5 秒)を行い、`last_test_*` の更新と `server_test` の記録(3 章。結果 `ok` / `RCON_*`)を同じ `db.batch()` で行って返す。capabilities キャッシュも破棄する。POST / PUT に伴う接続テストは `server_test` を記録しない(`server_add` / `server_update` の行で足りるため)。
 
 - 同じサーバーへのテストは isolate 内で 5 秒に 1 回まで(`SERVER_TEST_MIN_INTERVAL_SEC`。超えたら 429 `RATE_LIMITED`、`retryAfterSec` 付き)。
 - 無効(`enabled: false`)のサーバーもテストできる(有効にする前の確認のため)。`needsPassword` は 409 `SERVER_NEEDS_PASSWORD`。

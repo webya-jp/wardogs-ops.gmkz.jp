@@ -1,9 +1,8 @@
 // 人数スナップショット(読み取り時の間引き)。docs/ARCHITECTURE.md 4.4・8.2・15.6。
 // /api/status が RCON から状態を取れたときだけ、(server_id, bucket = floor(unix 秒 / 300)) を主キーに
-// server_snapshots へ INSERT OR IGNORE(サーバーごとに 5 分に最大 1 行)。既定サーバーの server_id は 0。
+// server_snapshots へ INSERT OR IGNORE(サーバーごとに 5 分に最大 1 行)。server_id は servers.id(0 は旧既定サーバー用の予約で使わない)。
 // プレイヤー情報は入れない(人数とマップだけ)。旧 status_snapshots は以後書かない。
 import type { ServerId, StatusResponse } from '../types/api';
-import { snapshotServerIdOf } from './servers';
 
 export const SNAPSHOT_BUCKET_SEC = 300;
 
@@ -20,7 +19,7 @@ export function resetSnapshotsForTest(): void {
 }
 
 export async function recordSnapshot(db: D1Database, server: ServerId, status: StatusResponse, now = Date.now()): Promise<void> {
-  const serverId = snapshotServerIdOf(server);
+  const serverId = Number(server);
   const bucket = snapshotBucket(now);
   if (lastBucket.get(serverId) === bucket) return;
   await db

@@ -4,7 +4,8 @@
 // - ロック中(窓内で 5 回に達している)は UPSERT の WHERE で更新しない(書き込みを増やさない)
 // - 全体(global): 失敗を 1 時間の窓で数えるだけ(全体ロックはしない)。50 回超で LOGIN_FAILURES_HIGH の警告。
 //   200 回を超えたら以後その時間は D1 に書かずメモリで近似する(D1 の書き込み枠を守る。最悪でも 1 日 約 9,600 行)
-// - D1 が無い場合は isolate 内のメモリで同じ規則を近似する(isolate ごとに独立し、再起動で消える)
+// - D1 は必須(2026-10-16)。D1 が無い場合のメモリ近似は廃止した。メモリを使うのは global の上限超と、D1 の一時的な失敗のときだけ
+//   (isolate ごとに独立し、再起動で消える)
 import type { SetupWarning } from '../types/api';
 
 export const IP_WINDOW_MS = 15 * 60 * 1000;
@@ -131,7 +132,7 @@ export class D1ThrottleStore implements ThrottleStore {
   }
 }
 
-/** isolate 内で共有するメモリの記録(D1 が無い場合・global が上限を超えた場合・D1 が失敗した場合に使う) */
+/** isolate 内で共有するメモリの記録(global が上限を超えた場合・D1 が失敗した場合に使う) */
 const sharedMemory = new MemoryThrottleStore();
 
 export type ThrottleCheck = { locked: false } | { locked: true; retryAfterMs: number };
@@ -141,17 +142,17 @@ function inWindow(row: ThrottleRow | null, now: number, windowMs: number): numbe
 }
 
 export class LoginThrottle {
-  private readonly d1: ThrottleStore | null;
+  private readonly d1: ThrottleStore;
   private readonly memory: ThrottleStore;
 
-  constructor(opts: { db?: D1Database | null; store?: ThrottleStore | null; memory?: ThrottleStore } = {}) {
-    this.d1 = opts.store ?? (opts.db ? new D1ThrottleStore(opts.db) : null);
+  /** db(D1)か store(テスト用の差し替え)のどちらかが必須 */
+  constructor(opts: { db: D1Database; memory?: ThrottleStore } | { store: ThrottleStore; memory?: ThrottleStore }) {
+    this.d1 = 'store' in opts ? opts.store : new D1ThrottleStore(opts.db);
     this.memory = opts.memory ?? sharedMemory;
   }
 
   /** D1 に書いてよいか(global の失敗が 1 時間の上限未満) */
   private async d1Writable(now: number): Promise<boolean> {
-    if (!this.d1) return false;
     try {
       return inWindow(await this.d1.get(GLOBAL_KEY), now, GLOBAL_WINDOW_MS) < GLOBAL_D1_WRITE_LIMIT;
     } catch {
@@ -170,7 +171,7 @@ export class LoginThrottle {
     }
     if (await this.d1Writable(now)) {
       try {
-        const r = await this.d1!.tryAcquire(ipKey, now, IP_WINDOW_MS, IP_MAX_FAILURES);
+        const r = await this.d1.tryAcquire(ipKey, now, IP_WINDOW_MS, IP_MAX_FAILURES);
         return r.ok ? { locked: false } : { locked: true, retryAfterMs: r.retryAfterMs };
       } catch {
         // D1 の失敗時はメモリで近似する
@@ -184,7 +185,7 @@ export class LoginThrottle {
   async recordFailure(now = Date.now()): Promise<void> {
     if (await this.d1Writable(now)) {
       try {
-        await this.d1!.increment(GLOBAL_KEY, now, GLOBAL_WINDOW_MS);
+        await this.d1.increment(GLOBAL_KEY, now, GLOBAL_WINDOW_MS);
         return;
       } catch {
         // メモリで近似する
@@ -196,18 +197,16 @@ export class LoginThrottle {
   /** 成功したら接続元の行を消す */
   async recordSuccess(ipKey: string): Promise<void> {
     await this.memory.clear(ipKey);
-    if (this.d1) await this.d1.clear(ipKey).catch(() => undefined);
+    await this.d1.clear(ipKey).catch(() => undefined);
   }
 
   /** 直近 1 時間の全体の失敗が警告の閾値を超えているか */
   async globalAlert(now = Date.now()): Promise<boolean> {
     let n = inWindow(await this.memory.get(GLOBAL_KEY), now, GLOBAL_WINDOW_MS);
-    if (this.d1) {
-      try {
-        n += inWindow(await this.d1.get(GLOBAL_KEY), now, GLOBAL_WINDOW_MS);
-      } catch {
-        // 無視
-      }
+    try {
+      n += inWindow(await this.d1.get(GLOBAL_KEY), now, GLOBAL_WINDOW_MS);
+    } catch {
+      // 無視
     }
     return n > GLOBAL_ALERT_FAILURES;
   }

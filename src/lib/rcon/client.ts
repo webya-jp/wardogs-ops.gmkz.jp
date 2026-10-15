@@ -1,5 +1,5 @@
 // RCON HTTP API への fetch。docs/ARCHITECTURE.md 6.2・6.3。
-// - Authorization: Bearer <RCON_PASSWORD>、リダイレクト非追従、タイムアウト(読み取り 5 秒 / 書き込み 8 秒)、再試行しない
+// - Authorization: Bearer <そのサーバーの RCON パスワード>、リダイレクト非追従、タイムアウト(読み取り 5 秒 / 書き込み 8 秒)、再試行しない
 // - 応答は 512 KiB まで。エラーは ApiErrorCode に分類する
 // - ログに出すのはルート名・HTTP ステータス・所要時間・エラーコードのみ(接続先・パスワード・応答本文・Steam ID は出さない)
 import type { ApiErrorCode } from '../../types/api';

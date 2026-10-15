@@ -11,8 +11,7 @@ export const GET = apiHandler(async (api, context) => {
   if (!target.ok) return jsonError(target.code, target.opts);
   const r = await readFromRcon(target.data, 'status', normalizeStatus);
   if (!r.ok) return jsonError(r.code, r.opts);
-  const db = api.state.features.snapshots ? api.state.db : null;
-  if (db) getWaitUntil(context.locals)(recordSnapshot(db, target.data.id, r.data));
+  if (api.state.features.snapshots) getWaitUntil(context.locals)(recordSnapshot(api.db, target.data.id, r.data));
   return jsonOk(r.data);
 });
 

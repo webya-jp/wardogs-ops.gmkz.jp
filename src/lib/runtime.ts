@@ -4,9 +4,9 @@ import { env as workersEnv } from 'cloudflare:workers';
 import type { APIContext, APIRoute } from 'astro';
 import { discardBody, errName, jsonError, methodNotAllowed } from './http';
 import type { OpsEnv } from '../types/env';
-import { checkConfig, collectWarnings, getFeatures } from './config';
-import type { ConfigCheck, FeatureState } from './config';
-import { getKeys, getServerPasswordKeys } from './keys';
+import { collectWarnings, getFeatures, invalidateD1Cache } from './config';
+import type { FeatureState } from './config';
+import { getKeys } from './keys';
 import type { DerivedKeys } from './keys';
 import { resolveServerForRead, serverCookieName } from './servers';
 import type { ResolvedServer, ServerContext, ServerOutcome } from './servers';
@@ -23,34 +23,36 @@ export const IS_DEV = import.meta.env.DEV;
 
 export interface ApiContext {
   env: OpsEnv;
-  config: ConfigCheck;
   keys: DerivedKeys;
   session: SessionData;
   state: FeatureState;
-  /** 設定と D1 の警告(SERVER_PASSWORDS_UNREADABLE は含まない。/api/session が一覧から足す) */
+  /** D1(必須。middleware が D1 の判定を通してからここに来る) */
+  db: D1Database;
+  /** 警告の初期値(SERVER_PASSWORDS_UNREADABLE・LOGIN_FAILURES_HIGH は /api/session が足す) */
   warnings: SetupWarning[];
   /** 対象サーバーの解決・サーバー API に使う */
   servers: ServerContext;
 }
 
 /**
- * middleware を通った後の /api/* ハンドラ用。設定不足・未ログインは middleware で弾かれているので、
+ * middleware を通った後の /api/* ハンドラ用。D1 の不備・未登録・未ログインは middleware で弾かれているので、
  * ここで null になるのは想定外(呼び出し側は INTERNAL_ERROR を返す)
  */
 export async function getApiContext(locals: object): Promise<ApiContext | null> {
   const env = getEnv();
-  const config = checkConfig(env);
   const session = getAttachedSession(locals);
-  if (!config.ok || !session) return null;
-  const [keys, state, serverKeys] = await Promise.all([getKeys(env), getFeatures(env), getServerPasswordKeys(env)]);
+  const state = await getFeatures(env);
+  const db = state.db;
+  if (!session || !db) return null;
+  const keys = await getKeys(db);
   return {
     env,
-    config,
     keys,
     session,
     state,
-    warnings: collectWarnings(config, state),
-    servers: { env, db: state.features.servers ? state.db : null, keys: serverKeys },
+    db,
+    warnings: collectWarnings(),
+    servers: { db, key: keys.serverPassword },
   };
 }
 
@@ -73,6 +75,8 @@ export function apiHandler(fn: (api: ApiContext, context: APIContext) => Promise
       if (!api) return jsonError('INTERNAL_ERROR');
       return await fn(api, context);
     } catch (err) {
+      // D1 の障害の可能性があるので、次のリクエストで D1 を判定し直す
+      invalidateD1Cache();
       console.error(JSON.stringify({ kind: 'api-error', path: new URL(context.request.url).pathname, error: errName(err) }));
       return jsonError('INTERNAL_ERROR');
     }

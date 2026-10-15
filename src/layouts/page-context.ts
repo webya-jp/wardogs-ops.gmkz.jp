@@ -3,8 +3,8 @@
 // warnings は設定と D1 の状態から作る初期値。LOGIN_FAILURES_HIGH を含む最新値はアイランドが /api/session で取り直す。
 // サーバーの選択(docs/ARCHITECTURE.md 15.5): クエリ ?server= → Cookie(__Host-wo_server)→ 表示順で最初に使えるサーバー → 先頭。
 // RCON パスワード(平文・暗号文)はここで扱う値に含めない(ServerSummary には入っていない)。
-import { checkConfig, collectWarnings, getFeatures } from '../lib/config';
-import { getServerPasswordKeys } from '../lib/keys';
+import { collectWarnings, getFeatures } from '../lib/config';
+import { getKeys } from '../lib/keys';
 import { getEnv, IS_DEV } from '../lib/runtime';
 import { clearServerCookie, listServers, selectServer, serializeServerCookie, serverCookieName } from '../lib/servers';
 import { readCookie } from '../lib/session';
@@ -19,7 +19,7 @@ export interface PageContext {
   session: SessionInfo | null;
   features: Features;
   warnings: SetupWarning[];
-  /** サーバー一覧(既定サーバー → 登録サーバー)。パスワードは含まない */
+  /** サーバー一覧(表示順)。パスワードは含まない */
   servers: ServerSummary[];
   /** 選択中のサーバーの id(0 台、または ?server= が見つからないときは null) */
   serverId: ServerId | null;
@@ -44,9 +44,12 @@ export async function getPageContext(
   const env = getEnv();
   const language = resolveLanguage(env.LANGUAGE, request.headers.get('Accept-Language'));
   const timeZone = resolveTimeZone(env.TIMEZONE);
-  const [state, keys] = await Promise.all([getFeatures(env), getServerPasswordKeys(env)]);
-  const list = await listServers({ env, db: state.features.servers ? state.db : null, keys });
-  const warnings = collectWarnings(checkConfig(env), state, list.unreadable);
+  const state = await getFeatures(env);
+  // ログイン後のページは middleware が D1 の判定を通してから来るので db はある(無ければ 0 台として扱う)
+  const list = state.db
+    ? await listServers({ db: state.db, key: (await getKeys(state.db)).serverPassword })
+    : { servers: [], unreadable: false };
+  const warnings = collectWarnings(list.unreadable);
 
   const query = new URL(request.url).searchParams.get('server');
   const cookie = readCookie(request, serverCookieName(IS_DEV));

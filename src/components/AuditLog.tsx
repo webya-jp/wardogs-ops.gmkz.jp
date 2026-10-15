@@ -197,7 +197,7 @@ export default function AuditLog({ language, timeZone, servers }: Props) {
                   <td data-label={t('audit.col.operator')}>
                     {e.operator ?? t('audit.anonymous', { tag: e.sessionTag ?? t('common.unknown') })}
                   </td>
-                  <td data-label={t('audit.col.server')}>{auditServerLabel(e.serverId, e.serverName, t)}</td>
+                  <td data-label={t('audit.col.server')}>{auditServerLabel(e, t)}</td>
                   <td data-label={t('audit.col.event')}>{eventLabel(e.event)}</td>
                   {!isSettings && <td data-label={t('audit.col.target')}>{targetCell(e)}</td>}
                   <td data-label={t('audit.col.details')}>{detailsCell(e)}</td>

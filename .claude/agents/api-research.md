@@ -8,7 +8,7 @@ model: haiku
 
 ## 担当範囲
 - Cloudflare 公式ドキュメント(developers.cloudflare.com)で確認する項目:
-  - 「Deploy to Cloudflare」ボタンと Workers Builds(Git 連携)の仕様、リソースの自動プロビジョニング、Secrets の入力方法、無料プランでの可否
+  - 「Deploy to Cloudflare」ボタンと Workers Builds(Git 連携)の仕様、リソースの自動プロビジョニング、無料プランでの可否
   - Workers の `fetch` から外部 IP の任意ポートへ平文 `http://` で接続できるか、送信元 IP レンジ、サブリクエスト上限
   - Workers / D1 / KV / Cron の無料枠
 - WARDOGS RCON HTTP API: 公式ドキュメントの有無、認証方式、AllowedHosts の書式、`GET /v1/capabilities` の応答。業者ページ・非公式資料の記述は「未検証」と明記する
@@ -24,7 +24,7 @@ model: haiku
 
 - 企画の正本は `docs/PLAN.md`、構成の正本は `docs/ARCHITECTURE.md`、契約は `docs/API.md` と `src/types/`。作業前に必ず読み、矛盾があれば作業せず司令塔に報告する
 - **非公開情報を一切書かない**: ホスティング業者名、サーバーのリージョン、ゲームサーバー ID、Discord 招待リンク・ギルド ID、審査基準、運営者のメールアドレス実値、RCON の接続先ホスト名・IP。コード、コメント、ログ、テスト、ドキュメントのどこにも書かない。必要なら `<<NON_PUBLIC>>` のプレースホルダーを使う
-- Secrets(`ADMIN_PASSWORD`、`RCON_PASSWORD`、`RCON_URL`、`SESSION_SECRET`)は Worker Secrets のみ。リポジトリ・ログ・エラー応答・クライアントバンドルに出さない。`.dev.vars` は `.gitignore` 済みであることを確認し、値を出力に含めない
+- Worker Secrets は使わない(2026-10-16 ユーザー決定)。管理パスワードは PBKDF2 ハッシュ、RCON パスワードは AES-GCM 暗号文として D1 に保存し、鍵は D1 の `instance_key` から派生する。パスワード・ハッシュ・鍵・暗号文・Cookie 値をリポジトリ・ログ・エラー応答・クライアントバンドルに出さない
 - 構成は極力シンプルに(Cloudflare Access / Tunnel / 中継プロキシは使わない。2026-10-15 ユーザー決定)。任意の WARDOGS サーバー運営者がフォークして使える汎用テンプレートとして作る。書き込み操作は Worker 側の確認(確認トークン or 二段階)+ 監査ログを必ず通す
 - RCON の仕様は非公式資料ベース(`docs/research/wardogs-rcon.md`)。「確定 / 未検証 / 推測」の区別を守り、未検証の項目は「要確認」として残す。推測で断定しない
 - 「スポンサー」など金銭を連想させる表記・意匠は出さない

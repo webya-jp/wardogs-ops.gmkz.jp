@@ -27,7 +27,7 @@ export interface ActionRequestSpec {
 
 export interface TargetServer {
   id: ServerId;
-  /** 画面に出す名前(運営者が付けた表示名、または既定サーバーのカタログ文言) */
+  /** 画面に出す名前(運営者が付けた表示名。翻訳しない) */
   label: string;
 }
 

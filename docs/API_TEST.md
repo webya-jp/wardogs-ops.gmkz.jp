@@ -1,6 +1,6 @@
 # API 動作確認記録
 
-確認日: 2026-10-15(JST)/ 担当: backend(同日、QA レビュー M-2・M-3・M-4・M-6 の修正後に N-18・E-4・E-6b・E-25〜E-27 と 4 章を再確認)/ 2026-10-16: 複数サーバー対応(5 章)
+確認日: 2026-10-15(JST)/ 担当: backend(同日、QA レビュー M-2・M-3・M-4・M-6 の修正後に N-18・E-4・E-6b・E-25〜E-27 と 4 章を再確認)/ 2026-10-16: 複数サーバー対応(5 章)、Worker Secrets の廃止(6 章。1〜5 章のうち Secrets・既定サーバーに関わる記録は旧方式のもの)
 対象: `docs/API.md` の各エンドポイント。値(パスワード・Cookie・接続先)は記録しない。
 
 ## 1. 確認環境
@@ -143,13 +143,15 @@
 | S-E11 | 1 台目で prepare したトークンを、`server` = 2 台目で execute | 400 `CONFIRM_INVALID`。RCON は呼ばない。監査ログに `status: failed`・`serverId` = 2 台目で 1 行残る | OK |
 | S-E12 | 宛先(ポート)だけを変える PUT(パスワードなし) | 400、`fields.password = reenter_required` | OK |
 | S-E13 | 無効にしたサーバーの `GET /api/status` | 409 `SERVER_DISABLED` | OK |
-| S-E14 | `PUT /api/servers/default` | 409 `SERVER_READ_ONLY` | OK |
+| S-E14 | `PUT /api/servers/default` | (旧)409 `SERVER_READ_ONLY` → 2026-10-16 の既定サーバー廃止後は 400、`fields.server = invalid_format`(6.4 で再確認) | OK |
 | S-E15 | 同じサーバーの接続テストを 5 秒以内に再実行 | 429 `RATE_LIMITED`、`retryAfterSec` 付き | OK |
 | S-E16 | DELETE の `confirmName` が現在の表示名と違う | 400、`fields.confirmName = mismatch` | OK |
-| S-E17 | 本文の無い DELETE | 400 `BAD_REQUEST` | OK |
+| S-E17 | 本文の無い DELETE | `Content-Type` 無し・本文なし → 415 `UNSUPPORTED_MEDIA_TYPE`。`Content-Type: application/json`・本文なし → 400 `BAD_REQUEST`(2026-10-16 再実行。QA M-3 で旧記録「400」の食い違いを指摘されたため、2 通りに分けて記録) | OK |
 | S-E18 | `GET /api/audit?kind=bad` | 400、`fields.kind = invalid_format` | OK |
 
 ### 5.4 単体テストのみで確認した項目
+
+(2026-10-16 の Worker Secrets 廃止で、下記のうち鍵の出所 `k`・`s` / `a` の切り替え・再暗号化・既定サーバーの項目は削除された仕組みの記録。現行の単体テストは 6.5)
 
 - 暗号化(`src/lib/servers.test.ts`): AES-256-GCM の往復、暗号文に平文を含まないこと、IV が毎回変わること。AAD(宛先・スキーム・鍵の出所 `k`)が違うと復号できないこと。鍵の切り替え(`s` は SESSION_SECRET だけ、`a` は ADMIN_PASSWORD だけに依存)。ADMIN_PASSWORD を変えると `needsPassword: true`・`SERVER_NEEDS_PASSWORD`・`unreadable`(警告 `SERVER_PASSWORDS_UNREADABLE`)、パスワードの入れ直しで解消。SESSION_SECRET 設定後の `a` → `s` の再暗号化(1 回きり、`updated_at`・変更ログを変えない)
 - 上限 20 台(既定サーバーは数えない)で `SERVER_LIMIT_REACHED`、削除した id を再利用しないこと、変更ログの `params`(パスワードを含まない)
@@ -162,5 +164,83 @@
 
 ### 5.5 未確認
 
-- ページの選択 Cookie の発行(`?server=` で決まったとき)は、`getPageContext(request, locals, Astro.response)` のように第 3 引数を渡したページでだけ行う。現状のページ(frontend 担当)はまだ渡していないため、`GET /?server=…` で `Set-Cookie: wo_server` が出ないことを確認した(frontend の対応後に再確認する)
+- ~~ページの選択 Cookie の発行は第 3 引数を渡したページでだけ行い、現状のページは渡していないため `Set-Cookie: wo_server` が出ない~~ → 2026-10-16 に再実行(QA M-3): 全ページが `Astro.response` を渡しており、`GET /?server=1` は `Set-Cookie: wo_server=<id>; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000`(開発のため `Secure` 無し)を返す。`?server=default`(形式不正)・`?server=999`(存在しない)は Cookie を出さず、ページは 200 で「見つかりません」の案内になる(6.4)
 - `wrangler dev`(本番ビルド、`__Host-wo_server`)と本番 D1 での `db.batch()` の原子性(M-2)は未確認
+
+## 6. Worker Secrets の廃止(2026-10-16)
+
+`docs/ARCHITECTURE.md` 第 5 章(5.1.1 初期設定、5.1.2 instance_key、5.2 PBKDF2、5.3 Cookie v2)・7.4・8 章・16 章、`docs/API.md` 2 章。値(パスワード・ハッシュ・鍵・Cookie・接続先)は記録しない。
+
+### 6.1 確認環境
+
+| 項目 | 内容 |
+|---|---|
+| RCON | `MOCK_RCON_PORTS=7776,7777 pnpm mock:rcon`(2 ポート。パスワードはモックの既定のダミー値) |
+| Worker | `pnpm dev --host 127.0.0.1 --port 4322`(astro dev。Cookie 名 `wo_session` / `wo_server`) |
+| Secrets | **なし**。先に旧 `.dev.vars`(`ADMIN_PASSWORD` / `RCON_URL` / `RCON_PASSWORD` 入り)が残った状態で起動し、wrangler が読み込んでも(「Using secrets defined in .dev.vars」)コードが使わないことを確認(6.2 の S2-1〜S2-4 と同じ結果)。その後 `.dev.vars` を削除して再起動し、以降を確認した |
+| D1 | 既存のローカル D1(`.wrangler/state/v3/d1`)を退避し、`pnpm db:migrate:local` で `0001_init.sql` + 書き換え後の `0002_servers.sql` を適用し直した空の D1 |
+| 手段 | Node の `fetch` で書いた確認スクリプト(リポジトリ外)。管理パスワードはスクリプト内でランダム生成(24 文字)。全応答の本文に管理パスワード・RCON パスワードが含まれないことも確かめた(0 件) |
+| 単体テスト | `pnpm test`(vitest、13 ファイル・105 件すべて成功)。`pnpm build` 成功。`pnpm check` は frontend 担当のファイルに 12 件残る(backend のファイルは 0 件) |
+
+### 6.2 初期設定(/setup)
+
+| # | 操作 | 期待 | 結果 |
+|---|---|---|---|
+| S2-1 | 管理者 0 件で `GET /`・`GET /login` | 303 → `/setup` | OK |
+| S2-2 | 管理者 0 件で `GET /api/status`・`GET /api/session`(Cookie なし) | 503 `SETUP_REQUIRED`(認証より先に判定) | OK |
+| S2-3 | 管理者 0 件で `POST /api/servers` | 503 `SETUP_REQUIRED` | OK |
+| S2-4 | 管理者 0 件で `GET /setup` | 200、登録フォーム(`password` / `passwordConfirm`) | OK |
+| S2-5 | `POST /setup` Origin なし(`Sec-Fetch-Site` なし)/ 別オリジン | 403(CSRF。/setup も対象) | OK |
+| S2-6 | `POST /setup` 15 文字 | 400 `PASSWORD_TOO_SHORT`、フォーム再表示、入力したパスワードは再表示しない | OK |
+| S2-7 | `POST /setup` 257 文字 | 400 `PASSWORD_TOO_LONG`(同上) | OK |
+| S2-8 | `POST /setup` 確認入力が不一致 | 400 `PASSWORD_MISMATCH`(同上) | OK |
+| S2-9 | `POST /setup` `Content-Type: text/plain` | 400 `BAD_REQUEST` | OK |
+| S2-10 | `POST /setup` 正常(24 文字・確認一致) | 303 → `/login?registered=1`(自動ログインしない) | OK |
+| S2-11 | 登録後にもう一度 `POST /setup` | 409 `SETUP_ALREADY_DONE`(フォームは出さず、ログイン画面へのリンク) | OK |
+| S2-12 | 登録後の `GET /setup`(未ログイン / ログイン済み) | 303 → `/login` / 303 → `/` | OK |
+| S2-13 | 登録後の `GET /`・`GET /api/status`(未ログイン) | 303 → `/login` / 401 `UNAUTHENTICATED` | OK |
+| S2-14 | `GET /api/audit?kind=settings` | `admin_register` が 1 行(`operator` / `sessionTag` / `serverId` は null、`params` は `{}`) | OK |
+
+### 6.3 ログイン(PBKDF2・Cookie v2)
+
+| # | 操作 | 期待 | 結果 |
+|---|---|---|---|
+| L2-1 | `POST /login` 誤ったパスワード | 401(フォーム再表示) | OK |
+| L2-2 | `POST /login` 登録したパスワード | 303 → `/`、`Set-Cookie: wo_session=v2.<aid>.…; HttpOnly; SameSite=Strict; Max-Age=43200` | OK |
+| L2-3 | `GET /api/session` | 200、`features` はすべて true、`warnings: []` | OK |
+| L2-4 | `POST /logout` | 303 → `/login`、`wo_session` と `wo_server` を消す。操作ログに `logout` | OK |
+
+### 6.4 サーバー・書き込み操作・QA 2026-10-16 の要修正
+
+| # | 操作 | 期待 | 結果 |
+|---|---|---|---|
+| T2-1 | 0 台で `GET /api/status` | 409 `NO_SERVERS` | OK |
+| T2-2 | `POST /api/servers` で RCON パスワード = 管理パスワード | 400、`fields.password = same_as_admin_password`(管理者のハッシュで検証) | OK |
+| T2-3 | `POST /api/servers`(`localhost` 7776 / 7777) | 201、id `1` / `2`、接続テスト成功(`Mock Server 7776` / `7777`) | OK |
+| T2-4 | `GET /api/servers` | 200、`{ servers, limit }`(`manageable` 無し)。行に `source` / `secretsIssue` 無し、パスワード・暗号文無し | OK |
+| T2-5 | `GET /api/status?server=1` / `?server=default` | 200 `Mock Server 7776` / 400 `fields.server = invalid_format` | OK |
+| T2-6 | kick の prepare → execute(server `1`) | 200、`auditId` は number、`server: "1"`。再送は 409 `ALREADY_EXECUTED` | OK |
+| T2-7 | `GET /api/audit` | 先頭が `kick` / `succeeded` / `serverId: "1"` / `serverName: "Mock A"`、次が `login`(`serverId: null`)。`?server=default` は 400 | OK |
+| T2-8 | (M-2)`PUT /api/servers/2 { port: 7778 }`(パスワードなし) | 400 `reenter_required`。`settings_audit_log` に `server_update_rejected`(`params`: `reason`・変更しようとした `host` / `port`)。`/api/audit?kind=settings` では `event: server_update`・`status: failed`・`errorCode: VALIDATION_FAILED` | OK |
+| T2-9 | (M-2)`DELETE /api/servers/2 { confirmName: "mock b" }` | 400 `mismatch`。`server_delete_rejected`(`params`: `{ reason: "mismatch" }`。入力した名前は残さない)。API では `server_delete` / `failed` | OK |
+| T2-10 | (M-2)`POST /api/servers/2/test` | 200 `test.ok: true`。`settings_audit_log` に `server_test`(`params`: `{ result }`)。契約の `SETTINGS_EVENTS` に無いため `/api/audit` には出さない(要確認、報告済み) | OK(D1 の行は単体テストで確認) |
+| T2-11 | `PUT /api/servers/default` | 400、`fields.server = invalid_format`(旧 S-E14 の `SERVER_READ_ONLY` は廃止) | OK |
+| T2-12 | (M-3)`GET /?server=1` | 200、`Set-Cookie: wo_server=<id>; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000` | OK |
+| T2-13 | (M-3)`GET /players?server=default` / `?server=999` | 200(「見つかりません」の案内)、`Set-Cookie` なし | OK |
+| T2-14 | (M-3、S-E17 の再実行)`DELETE /api/servers/2` を `Content-Type` 無し・本文なしで | 415 `UNSUPPORTED_MEDIA_TYPE` | OK |
+| T2-15 | (同)`Content-Type: application/json`・本文なし | 400 `BAD_REQUEST` | OK |
+
+### 6.5 単体テストで確認した項目
+
+- `src/lib/password.test.ts`: PBKDF2 の往復、保存形式、salt が毎回変わる、反復回数 1 万回(定数 1 か所)、古い回数で `needsRehash`、範囲外の回数・形式不正・長さ違いは破損(`invalidHash`)、256 文字で打ち切り、空白を除かない
+- `src/lib/keys.test.ts`: `instance_key` の `INSERT OR IGNORE` → `SELECT`(並行しても 1 行)、壊れた値は例外、用途別の鍵(`extractable: false`)、5 分キャッシュ
+- `src/lib/session.test.ts`: Cookie v2 の往復、改ざん(期限・署名・操作者名・`aid` の付け替え)、`v1` は形式不正、`session_stamp` の変更・管理者の行の削除・鍵の変更で失効、行を消して登録し直すと(AUTOINCREMENT で新しい id)既存の Cookie は通らない
+- `src/lib/auth.test.ts`: 初期設定の登録(`admins`・`settings`・`admin_register`)、入力検証、2 回目と**並行した 2 本の登録で 2 本目が `SETUP_ALREADY_DONE`**(条件付き INSERT の変更行数 0)、登録し直しで登録サーバーの RCON パスワードと同じ値を拒否(`instance_key` は変わらない)、ログイン(未登録で `setup_required`、成功で `login` を記録、5 回失敗でロック・失敗は記録しない、古い回数のハッシュの保存し直しで `session_stamp` を変えない、壊れたハッシュはコードだけをログに出す)
+- `src/lib/servers.test.ts`: 暗号化 `v2.<iv>.<ct>`(AAD = 宛先、鍵違い・旧 `v1` は復号不可)、`same_as_admin_password`、`default` は形式不正、`instance_key` が変わると `needsPassword`・入れ直しで解消、拒否と接続テストの記録(M-2。他の項目にも誤りがある場合と `same_as_admin_password` は記録しない)
+- `src/lib/actions.test.ts`: D1 必須(メモリ近似・`AUDIT_REQUIRED` の経路は削除)、`auditId` は常に number、pending を書けなければ RCON を呼ばない(`INTERNAL_ERROR`)、`server_id` が NULL の書き込み行は `serverId: null`
+- `src/lib/config.test.ts`: `admins` / `settings` が欠けた D1 は `not_migrated`、旧 Secrets と `AUDIT_REQUIRED` を設定しても読まない
+
+### 6.6 未確認
+
+- `wrangler dev`(本番ビルド。`__Host-wo_session` / `__Host-wo_server`)での同じ確認は未実施
+- 本番の Workers での PBKDF2(1 万回)の CPU 時間(C-20)、本番 D1 での条件付き INSERT・`db.batch()` の原子性(M-2)

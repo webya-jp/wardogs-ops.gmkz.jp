@@ -17,9 +17,9 @@ import { makeD1 } from './testing/sqlite-d1';
 const T = 1_800_000_000_000;
 const KEY = 'ip:0123456789abcdef';
 
-describe('throttle (memory)', () => {
+describe('throttle(D1 必須。node:sqlite で実際の SQL を実行)', () => {
   it('評価前に加算: 5 回までは評価、6 回目は拒否。窓の終わりで解除', async () => {
-    const th = new LoginThrottle({ memory: new MemoryThrottleStore() });
+    const th = new LoginThrottle({ db: await makeD1(), memory: new MemoryThrottleStore() });
     for (let i = 0; i < IP_MAX_FAILURES; i++) expect(await th.acquire(KEY, T + i)).toEqual({ locked: false });
     const c = await th.acquire(KEY, T + 20);
     expect(c.locked).toBe(true);
@@ -28,13 +28,13 @@ describe('throttle (memory)', () => {
   });
 
   it('並行に acquire しても上限を超えて通さない', async () => {
-    const th = new LoginThrottle({ memory: new MemoryThrottleStore() });
+    const th = new LoginThrottle({ db: await makeD1(), memory: new MemoryThrottleStore() });
     const results = await Promise.all(Array.from({ length: 20 }, () => th.acquire(KEY, T)));
     expect(results.filter((r) => !r.locked)).toHaveLength(IP_MAX_FAILURES);
   });
 
   it('成功で行を消す。接続元ごとに独立', async () => {
-    const th = new LoginThrottle({ memory: new MemoryThrottleStore() });
+    const th = new LoginThrottle({ db: await makeD1(), memory: new MemoryThrottleStore() });
     for (let i = 0; i < IP_MAX_FAILURES; i++) await th.acquire(KEY, T);
     expect((await th.acquire('ip:other', T)).locked).toBe(false);
     expect((await th.acquire(KEY, T)).locked).toBe(true);
@@ -45,17 +45,17 @@ describe('throttle (memory)', () => {
 
 describe('LOGIN_FAILURES_HIGH', () => {
   it('1 時間に 50 回を超えたら warnings に足し、50 回ちょうど・窓の外では足さない', async () => {
-    const th = new LoginThrottle({ memory: new MemoryThrottleStore() });
+    const th = new LoginThrottle({ db: await makeD1(), memory: new MemoryThrottleStore() });
     for (let i = 0; i < GLOBAL_ALERT_FAILURES; i++) await th.recordFailure(T);
-    expect(await withLoginAlert(['RCON_PASSWORD_SHORT'], th, T)).toEqual(['RCON_PASSWORD_SHORT']);
+    expect(await withLoginAlert(['SERVER_PASSWORDS_UNREADABLE'], th, T)).toEqual(['SERVER_PASSWORDS_UNREADABLE']);
     await th.recordFailure(T);
-    expect(await withLoginAlert(['RCON_PASSWORD_SHORT'], th, T)).toEqual(['RCON_PASSWORD_SHORT', 'LOGIN_FAILURES_HIGH']);
+    expect(await withLoginAlert(['SERVER_PASSWORDS_UNREADABLE'], th, T)).toEqual(['SERVER_PASSWORDS_UNREADABLE', 'LOGIN_FAILURES_HIGH']);
     expect(await withLoginAlert(['LOGIN_FAILURES_HIGH'], th, T)).toEqual(['LOGIN_FAILURES_HIGH']);
     expect(await withLoginAlert([], th, T + GLOBAL_WINDOW_MS)).toEqual([]);
   });
 });
 
-describe('throttle (D1。node:sqlite で実際の SQL を実行)', () => {
+describe('throttle(D1 ストア)', () => {
   it('UPSERT … RETURNING: 5 回まで加算、6 回目は更新せず拒否、窓が過ぎたら 1 回目から', async () => {
     const db = await makeD1();
     const store = new D1ThrottleStore(db);
@@ -103,7 +103,7 @@ describe('throttle (D1。node:sqlite で実際の SQL を実行)', () => {
     expect((await mem.get(GLOBAL_KEY))?.failures).toBe(1);
   });
 
-  it('D1 が失敗してもメモリで動く', async () => {
+  it('D1 が一時的に失敗してもメモリで近似する', async () => {
     const broken: ThrottleStore = {
       get: async () => {
         throw new Error('d1 down');

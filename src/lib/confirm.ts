@@ -3,7 +3,7 @@
 //   payload = base64url(JSON { v:1, a:action, h:SHA-256(正規化 params の JSON) 先頭 128 bit, s:セッション ID, e:期限, n:nonce 128 bit, t?:対象名,
 //                              sv:ServerId, sh:SHA-256(対象サーバーの baseUrl) 先頭 128 bit })
 //   sig     = base64url(HMAC-SHA256(confirm 鍵, "v1.<payload>"))
-// 中身は秘密ではないが改ざんできない。1 回限りの保証は audit_log.confirm_nonce の UNIQUE(または isolate 内メモリ)で行う。
+// 中身は秘密ではないが改ざんできない。1 回限りの保証は audit_log.confirm_nonce の UNIQUE で行う(D1 必須)。
 // t(対象名)は監査ログの target_name に使う。sv / sh は別サーバーへのすり替えと prepare 後の宛先変更を検出する(ARCHITECTURE 15.6)。
 import { CONFIRM_TTL_MS } from '../types/api';
 import { SERVER_ID_PATTERN } from '../types/api';
@@ -171,18 +171,4 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   const x = enc.encode(a);
   const y = enc.encode(b);
   return x.byteLength === y.byteLength && timingSafeEqualBytes(x, y);
-}
-
-// ------------------------------------------------------------
-// D1 が無く AUDIT_REQUIRED="false" のときの 1 回限りの近似(isolate 内メモリ)
-// ------------------------------------------------------------
-
-const usedNonces = new Map<string, number>();
-
-/** 未使用なら記録して true、使用済みなら false。期限切れの記録は掃除する */
-export function claimNonceInMemory(nonce: string, expiresAt: number, now = Date.now()): boolean {
-  if (usedNonces.size > 1000) for (const [n, e] of usedNonces) if (e <= now) usedNonces.delete(n);
-  if (usedNonces.has(nonce)) return false;
-  usedNonces.set(nonce, expiresAt);
-  return true;
 }

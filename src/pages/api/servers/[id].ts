@@ -1,5 +1,5 @@
 // PUT /api/servers/:id → ServerMutationResponse、DELETE /api/servers/:id → DeleteServerResponse(docs/API.md 7 章)
-// 既定サーバー(default)は 409 SERVER_READ_ONLY。DELETE は本文 { confirmName } 必須
+// :id の形式不正(default を含む)は 400。DELETE は本文 { confirmName } 必須
 import { jsonError, jsonOk, readJsonBody } from '../../../lib/http';
 import { apiHandler, methodNotAllowedRoute } from '../../../lib/runtime';
 import { deleteServer, updateServer } from '../../../lib/servers';

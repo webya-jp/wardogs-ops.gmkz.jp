@@ -1,47 +1,28 @@
 /**
- * Worker のバインディング・Secrets・vars の型。docs/ARCHITECTURE.md 第 10 章と同期(変更は architect 経由)。
+ * Worker のバインディング・vars の型と、D1 に保存する認証情報の形式。docs/ARCHITECTURE.md 第 5・10 章と同期(変更は architect 経由)。
  * 値はここに書かない。Astro からは `import { env } from 'cloudflare:workers'` で参照する。
  *
- * 必須の Secrets が欠けていても Worker は起動し、/setup で「どの名前が足りないか」だけを案内する
- * (値は出さない)。そのため Secrets も型の上では optional にしてある。
- *
- * 複数サーバー対応(docs/ARCHITECTURE.md 第 15 章)以降、必須は ADMIN_PASSWORD だけ。
- * RCON_URL / RCON_PASSWORD は任意で、両方あれば「既定サーバー」(ServerId 'default')として扱う。
+ * **Worker Secrets は使わない**(2026-10-16 ユーザー決定)。管理パスワードは初期設定画面(/setup)で登録して
+ * D1 `admins` に PBKDF2 のハッシュで保存し、鍵は D1 `settings` の `instance_key` から HKDF で派生する
+ * (docs/ARCHITECTURE.md 5.1〜5.3)。RCON の接続先とパスワードは D1 `servers`(第 15 章)。
+ * 旧 Secrets(ADMIN_PASSWORD / RCON_URL / RCON_PASSWORD / SESSION_SECRET)は設定されていても読まない。
  */
 export interface OpsEnv {
   // ---- bindings ----
   /**
-   * D1(操作ログ・人数スナップショット・ログイン失敗の記録)。
-   * 利用者が wrangler.jsonc から外した場合は undefined になり得る。
-   * undefined またはテーブル未作成のときは「操作ログ無し」モード(docs/ARCHITECTURE.md 7.4)
+   * D1(管理者・鍵・登録サーバー・操作ログ・人数スナップショット・ログイン失敗の記録)。**必須**。
+   * 自動プロビジョニングで作られる前提。利用者が wrangler.jsonc から外した場合だけ undefined になり、
+   * そのときは /setup で D1_MISSING を案内して他の画面を止める(docs/ARCHITECTURE.md 7.4)
    */
   DB?: D1Database;
   /** 静的アセット(@astrojs/cloudflare が使う) */
   ASSETS: Fetcher;
 
-  // ---- secrets(必須) ----
-  /** パネルのログインパスワード。16 文字以上。満たさない場合はログインを受け付けない */
-  ADMIN_PASSWORD?: string;
-
-  // ---- secrets(任意: 既定サーバー。両方そろったときだけ有効) ----
+  // ---- vars(wrangler.jsonc。将来は画面の「設定」〔D1 settings〕に移す予定。docs/ARCHITECTURE.md 10.1) ----
   /**
-   * 既定サーバーの RCON HTTP API の基点 URL(`http://<ホスト名>:<ポート>`)。IP アドレス直指定は不可。値をログ・応答に出さない。
-   * 画面から追加するサーバー(D1 servers)とは別枠で、画面からは編集・削除できない
+   * @deprecated D1 必須化(2026-10-16)で効果が無くなった(D1 が無いとログインできないため、
+   * 「ログ無しで書き込む」状態が存在しない)。値は読まない。削除はユーザー確認後(docs/ARCHITECTURE.md 14 章 U-12)
    */
-  RCON_URL?: string;
-  /** 既定サーバーの RCON パスワード(`Authorization: Bearer` に使う)。値をログ・応答に出さない */
-  RCON_PASSWORD?: string;
-
-  // ---- secrets(任意) ----
-  /**
-   * 設定時は ADMIN_PASSWORD と組み合わせて Cookie 署名鍵などを派生する。未設定なら ADMIN_PASSWORD のみから派生(HKDF)。
-   * 画面から追加したサーバーの RCON パスワードの暗号鍵は、設定時は SESSION_SECRET だけから派生する
-   * (ADMIN_PASSWORD を変えても復号できる。docs/ARCHITECTURE.md 15.3)
-   */
-  SESSION_SECRET?: string;
-
-  // ---- vars ----
-  /** "true"(既定。未設定も true 扱い)/ "false"。"false" のときだけ D1 無しでも書き込み操作を許す */
   AUDIT_REQUIRED?: string;
   /**
    * 表示言語の言語コード(`ja` / `en` など)。既定 "ja"。対応言語(src/i18n の SUPPORTED_LANGUAGES)ならそれに固定、
@@ -53,24 +34,41 @@ export interface OpsEnv {
   TIMEZONE?: string;
 }
 
+// ============================================================
+// D1 に保存する認証情報の形式(docs/ARCHITECTURE.md 5.2・5.3、db/migrations/0002_servers.sql)
+// ============================================================
+
 /**
- * @deprecated 複数サーバー対応前の必須 Secrets。backend が config.ts を LOGIN_REQUIRED_SECRETS に切り替え、
- * config.test.ts を更新した時点で architect が削除する(docs/ARCHITECTURE.md 15.6)
+ * 管理パスワードのハッシュ方式。保存形式は
+ * `pbkdf2-sha256$<反復回数(10 進)>$<salt(base64url)>$<導出値(base64url)>`(区切りは `$`、base64url はパディング無し)
  */
-export const REQUIRED_SECRETS = ['ADMIN_PASSWORD', 'RCON_URL', 'RCON_PASSWORD'] as const;
-export type RequiredSecretName = (typeof REQUIRED_SECRETS)[number];
+export const PASSWORD_HASH_SCHEME = 'pbkdf2-sha256';
+/**
+ * 新しく保存するときの PBKDF2-HMAC-SHA256 の反復回数。
+ * 実測(2026-10-16): ローカルの workerd(wrangler dev)で 1 回あたり約 0.44 µs/反復(1 万回 ≒ 4.4 ms、10 万回 ≒ 44 ms)。
+ * 無料プランの CPU 10 ms/リクエストに収めるため 1 万回にした。本番の Workers での実測は要確認(C-20)。
+ * 値を上げた場合は、ログイン成功時に古い反復回数のハッシュを新しい値で保存し直す(docs/ARCHITECTURE.md 5.2)
+ */
+export const PASSWORD_HASH_ITERATIONS = 10_000;
+/** 検証で受け付ける反復回数の範囲(範囲外の保存値は破損として扱い、ログインを失敗させる)。上限は Workers の PBKDF2 の上限(要確認 C-20) */
+export const PASSWORD_HASH_ITERATIONS_MIN = 1_000;
+export const PASSWORD_HASH_ITERATIONS_MAX = 100_000;
+/** salt の長さ(バイト。ランダム) */
+export const PASSWORD_HASH_SALT_BYTES = 16;
+/** 導出値の長さ(バイト) */
+export const PASSWORD_HASH_BYTES = 32;
 
-/** ログインに必須の Secrets(/setup の「未設定の Secrets」に出すのはこれだけ) */
-export const LOGIN_REQUIRED_SECRETS = ['ADMIN_PASSWORD'] as const;
-export type LoginRequiredSecretName = (typeof LOGIN_REQUIRED_SECRETS)[number];
+/** D1 settings の instance_key の長さ(バイト。ランダム。値は base64url で保存) */
+export const INSTANCE_KEY_BYTES = 32;
+/** admins.session_stamp の長さ(バイト。ランダム。値は base64url で保存) */
+export const SESSION_STAMP_BYTES = 16;
 
-/** 既定サーバーの Secrets。両方あれば既定サーバーを作る。片方だけなら RCON_URL_MISSING / RCON_PASSWORD_MISSING を警告(ログインは止めない) */
-export const DEFAULT_SERVER_SECRETS = ['RCON_URL', 'RCON_PASSWORD'] as const;
-export type DefaultServerSecretName = (typeof DEFAULT_SERVER_SECRETS)[number];
+/**
+ * D1 settings のキー。**どの API の応答にも値を含めない**(instance_key は全鍵の元)。
+ * 将来 vars(LANGUAGE / TIMEZONE)を画面の設定に移すときは、ここにキーを足し、API で返すキーを明示的に列挙する
+ */
+export const SETTINGS_KEYS = ['instance_key'] as const;
+export type SettingsKey = (typeof SETTINGS_KEYS)[number];
 
-/** ADMIN_PASSWORD の長さの下限(README.md 3 章と同期)。満たさない場合はログイン不可 */
-export const ADMIN_PASSWORD_MIN_LENGTH = 16;
-/** SESSION_SECRET を設定する場合の長さの下限。満たさない場合は設定エラー扱い */
-export const SESSION_SECRET_MIN_LENGTH = 32;
-/** RCON_PASSWORD(および画面から入力した RCON パスワード)がこれ未満なら警告を出す(Worker からは強制できない) */
+/** RCON パスワード(画面から入力したもの)がこれ未満なら一覧で警告を出す(Worker からは強制できない) */
 export const RCON_PASSWORD_WARN_LENGTH = 24;

@@ -1,6 +1,8 @@
 // ログイン Cookie の発行・検証。docs/ARCHITECTURE.md 5.3。
-// 値: v1.<sid>.<iat>.<exp>.<op>.<sig>(sig = HMAC-SHA256(session 鍵, "v1.<sid>.<iat>.<exp>.<op>") の base64url)
-// Cookie の値・sid 全体をログや応答に出さない(画面・監査ログには先頭 8 文字の sessionTag だけ)。
+// 値: v2.<aid>.<sid>.<iat>.<exp>.<op>.<sig>
+//   sig = HMAC-SHA256(session 鍵, "v2.<aid>.<sid>.<iat>.<exp>.<op>." + その管理者の session_stamp) の base64url
+// 検証では署名を確かめる前に admins から aid の行を主キーで読む(キャッシュしない)。行が無い・session_stamp が違う → 未ログイン扱い。
+// Cookie の値・sid 全体・session_stamp をログや応答に出さない(画面・監査ログには先頭 8 文字の sessionTag だけ)。
 import { OPERATOR_NAME_MAX_LENGTH, SESSION_TTL_MS } from '../types/api';
 import type { SessionInfo } from '../types/api';
 import { b64urlToBytes, b64urlToUtf8, bytesToB64url, hmac, randomB64url, timingSafeEqualBytes, utf8ToB64url } from './keys';
@@ -10,11 +12,19 @@ export const COOKIE_NAME_PROD = '__Host-wo_session';
 export const COOKIE_NAME_DEV = 'wo_session';
 
 export interface SessionData {
+  /** 管理者の admins.id */
+  aid: number;
   /** セッション ID(16 バイト乱数の base64url)。外に出さない */
   sid: string;
   iat: number;
   exp: number;
   operator: string | null;
+}
+
+/** 署名の検証に使う管理者の行(admins.id と session_stamp) */
+export interface SessionAdmin {
+  id: number;
+  session_stamp: string;
 }
 
 const MAX_COOKIE_LENGTH = 512;
@@ -28,8 +38,13 @@ export function sanitizeOperator(input: string | null | undefined): string | nul
   return s === '' ? null : s;
 }
 
+function signingInput(body: string, stamp: string): string {
+  return `${body}.${stamp}`;
+}
+
 export async function issueSession(
   key: CryptoKey,
+  admin: SessionAdmin,
   opts: { operator?: string | null; now?: number } = {},
 ): Promise<{ value: string; data: SessionData }> {
   const iat = opts.now ?? Date.now();
@@ -37,20 +52,41 @@ export async function issueSession(
   const sid = randomB64url(16);
   const operator = sanitizeOperator(opts.operator);
   const op = operator ? utf8ToB64url(operator) : '';
-  const body = `v1.${sid}.${iat}.${exp}.${op}`;
-  const sig = bytesToB64url(await hmac(key, body));
-  return { value: `${body}.${sig}`, data: { sid, iat, exp, operator } };
+  const body = `v2.${admin.id}.${sid}.${iat}.${exp}.${op}`;
+  const sig = bytesToB64url(await hmac(key, signingInput(body, admin.session_stamp)));
+  return { value: `${body}.${sig}`, data: { aid: admin.id, sid, iat, exp, operator } };
 }
 
-export async function verifySession(key: CryptoKey, value: string | null | undefined, now = Date.now()): Promise<SessionData | null> {
+/**
+ * Cookie を検証する。形式を確かめた後に lookup(aid) で管理者の行を読み、その session_stamp を混ぜて署名を確かめる。
+ * v1(旧方式)は形式不正。lookup の例外(D1 の障害)はそのまま投げる
+ */
+export async function verifySession(
+  key: CryptoKey,
+  value: string | null | undefined,
+  lookup: (aid: number) => Promise<SessionAdmin | null>,
+  now = Date.now(),
+): Promise<SessionData | null> {
   if (!value || value.length > MAX_COOKIE_LENGTH) return null;
   const parts = value.split('.');
-  if (parts.length !== 6) return null;
-  const [v, sid = '', iatS = '', expS = '', op = '', sig = ''] = parts;
-  if (v !== 'v1' || !/^[A-Za-z0-9_-]{22}$/.test(sid) || !/^\d{1,16}$/.test(iatS) || !/^\d{1,16}$/.test(expS)) return null;
+  if (parts.length !== 7) return null;
+  const [v, aidS = '', sid = '', iatS = '', expS = '', op = '', sig = ''] = parts;
+  if (
+    v !== 'v2' ||
+    !/^[1-9][0-9]{0,15}$/.test(aidS) ||
+    !/^[A-Za-z0-9_-]{22}$/.test(sid) ||
+    !/^\d{1,16}$/.test(iatS) ||
+    !/^\d{1,16}$/.test(expS) ||
+    !/^[A-Za-z0-9_-]*$/.test(op)
+  ) {
+    return null;
+  }
   const sigBytes = b64urlToBytes(sig);
   if (!sigBytes || sigBytes.byteLength !== 32) return null;
-  const expected = await hmac(key, `v1.${sid}.${iatS}.${expS}.${op}`);
+  const aid = Number(aidS);
+  const admin = await lookup(aid);
+  if (!admin || Number(admin.id) !== aid) return null;
+  const expected = await hmac(key, signingInput(`v2.${aidS}.${sid}.${iatS}.${expS}.${op}`, admin.session_stamp));
   if (!timingSafeEqualBytes(sigBytes, expected)) return null;
   const iat = Number(iatS);
   const exp = Number(expS);
@@ -62,7 +98,7 @@ export async function verifySession(key: CryptoKey, value: string | null | undef
     if (decoded === null) return null;
     operator = sanitizeOperator(decoded);
   }
-  return { sid, iat, exp, operator };
+  return { aid, sid, iat, exp, operator };
 }
 
 export function toSessionInfo(data: SessionData): SessionInfo {
