@@ -11,7 +11,8 @@ if (!name || !/^[a-z0-9_-]+$/i.test(name)) {
 }
 const env = { ...process.env, CLOUDFLARE_ENV: name };
 const run = (cmd, args) => {
-  const r = spawnSync(cmd, args, { stdio: 'inherit', env, shell: process.platform === 'win32' // pnpm.cmd を解決するため(引数は固定値のみ) });
+  // Windows では pnpm.cmd を解決するため shell を使う(引数は固定値のみ)
+  const r = spawnSync(cmd, args, { stdio: 'inherit', env, shell: process.platform === 'win32' });
   if (r.status !== 0) process.exit(r.status ?? 1);
 };
 run('pnpm', ['exec', 'astro', 'build']);

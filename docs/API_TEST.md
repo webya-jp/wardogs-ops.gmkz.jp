@@ -5,11 +5,13 @@
 
 ## 1. 確認環境
 
+> 1〜4 章は 2026-10-15 時点(Worker Secrets 使用時)の記録。現在は Secrets・`.dev.vars` を使わず、管理パスワードは `/setup` で登録して D1 に保存する。現行の確認は 6 章。
+
 | 項目 | 内容 |
 |---|---|
 | RCON | `scripts/mock-rcon.mjs`(`pnpm mock:rcon`。架空のプレイヤー 4 人・BAN 1 件。形式は `docs/research/wardogs-rcon.md` 2 章に合わせた架空のもので、実サーバーの挙動は未確認) |
 | Worker | (a) `pnpm dev`(astro dev。Cookie 名 `wo_session`)、(b) `pnpm build` 後の `wrangler dev`(本番と同じ `__Host-wo_session`、`Secure` 付き) |
-| Secrets | `.dev.vars` にダミー値(`ADMIN_PASSWORD` はランダム 24 文字、`RCON_URL=http://localhost:7776`、`RCON_PASSWORD` はモックの既定値) |
+| Secrets | (旧方式。2026-10-16 の Worker Secrets 廃止で無くなった。現行は 6 章)当時は `.dev.vars` にダミー値(管理パスワード・RCON の接続先とパスワード)を置いた |
 | D1 | ローカル D1 に `pnpm db:migrate:local` で `0001_init.sql` を適用 |
 | 手段 | Node の `fetch` で書いた確認スクリプト(リポジトリ外)と curl。(a)(b) の両方で同じ結果(下記 4 章の 1 件を除く) |
 | 単体テスト | `pnpm test`(vitest、10 ファイル・62 件すべて成功。QA 修正後) |
@@ -69,12 +71,12 @@
 | E-25 | 未ログインで `/_image`、`/_image?href=x`、`/favicon.ico`、`/favicon.svg` | すべて 303 `/login`(middleware の除外は `/_astro/` のみ) | OK |
 | E-26 | ログイン後、偽の確認トークンで execute | 400 `CONFIRM_INVALID`。`/api/audit` の先頭に `event`(送った action)・`status: failed`・`errorCode: CONFIRM_INVALID`・操作者名付きの行が残る | OK |
 | E-27 | ログイン後、Steam ID が不正な prepare(400 `VALIDATION_FAILED`) | 監査ログに行を作らない(E-26 の行の次はログインの行) | OK |
-| E-24 | `ADMIN_PASSWORD` を短く、`RCON_URL` を IP アドレス(文書用アドレス)にして起動 | ページは 303 `/setup`、API は 503 `NOT_CONFIGURED`、`POST /login` も `/setup` へ。`/setup` は警告 2 件(短すぎる・IP アドレス不可)だけを表示し、値は出さない | OK |
+| E-24 | (旧方式。2026-10-16 の Worker Secrets 廃止で無くなった。現行は 6 章)管理パスワードの Secret を短く、RCON の接続先の Secret を IP アドレス(文書用アドレス)にして起動 | ページは 303 `/setup`、API は 503 `NOT_CONFIGURED`、`POST /login` も `/setup` へ。`/setup` は警告 2 件(短すぎる・IP アドレス不可)だけを表示し、値は出さない | OK |
 
 単体テストのみで確認した項目(実機・dev では未確認):
 
 - RCON のタイムアウト(`RCON_TIMEOUT`)、404 / 409 / 429(`Retry-After`)/ 5xx / 3xx / JSON 不正 / 512 KiB 超の分類、`rconMessage` の 200 文字切り詰めと制御文字除去、ログに接続先・パスワードが出ないこと(`src/lib/rcon/client.test.ts`)
-- D1 が無い / テーブルが無いときの features(書き込み不可、`AUDIT_REQUIRED="false"` で可)、D1 なしでの execute の 1 回限り(メモリ近似)とログに Steam ID・名前を出さないこと(`src/lib/actions.test.ts`)
+- (旧方式。2026-10-16 の Worker Secrets 廃止で無くなった。現行は 6 章)D1 が無い / テーブルが無いときの features と、D1 なしでの execute の 1 回限り(メモリ近似)。現在は D1 必須で、この経路は削除した
 - capabilities が `missing` のときの `CAPABILITY_MISSING`、別セッションのトークンの拒否(同上)
 - 拒否の監査ログ: `CAPABILITY_MISSING`(prepare)・`CONFIRM_INVALID`・`CONFIRM_EXPIRED` が `status=failed`・nonce なしで 1 行残り、入力検証失敗と action 不明は残らないこと。正常な execute は 1 行(pending → succeeded)。`node:sqlite` で実際の SQL を実行(`src/lib/actions.test.ts`)
 - ログイン制限の UPSERT … RETURNING(5 回まで加算、ロック中は更新しない、窓が過ぎたら 1 回目から、並行でも 5 回まで、成功で行を削除)を `node:sqlite` で実際の SQL で確認(`src/lib/throttle.test.ts`)
@@ -90,13 +92,15 @@
 
 `docs/ARCHITECTURE.md` 第 15 章・`docs/API.md` 1.2・7 章。値(パスワード・Cookie・接続先)は記録しない。
 
+> 5 章は Worker Secrets 廃止前(既定サーバー・`.dev.vars` あり)の記録。既定サーバー(`default`)・`SERVER_READ_ONLY`・鍵の 2 系統は廃止した。現行の確認は 6 章。
+
 ### 5.1 確認環境
 
 | 項目 | 内容 |
 |---|---|
 | RCON | `scripts/mock-rcon.mjs` を `MOCK_RCON_PORTS` で 2 ポート同時に起動(サーバー名 `Mock Server <ポート>`、ポートごとに人数・プレイヤー名が違う)。2 台目だけ `MOCK_RCON_PASSWORDS` で別のダミーパスワード。ポートは開発機の空きポート(既定の 7776 / 7777 とは別)を使った |
 | Worker | `pnpm dev`(astro dev。Cookie 名 `wo_session` / `wo_server`) |
-| Secrets | `.dev.vars` から `RCON_URL` / `RCON_PASSWORD` を**外し**、`ADMIN_PASSWORD` だけにした状態(確認後に元へ戻した) |
+| Secrets | (旧方式。2026-10-16 の Worker Secrets 廃止で無くなった。現行は 6 章)当時は `.dev.vars` を管理パスワードだけにした状態で確認した |
 | D1 | ローカル D1 に `pnpm db:migrate:local` で `0002_servers.sql` を適用 |
 | 手段 | Node の `fetch` で書いた確認スクリプト(リポジトリ外)。サーバーの追加はホスト名 `localhost` |
 | 単体テスト | `pnpm test`(vitest、11 ファイル・93 件すべて成功)。`pnpm check` エラー 0、`pnpm build` 成功 |
@@ -131,10 +135,10 @@
 | # | 操作 | 期待 | 結果 |
 |---|---|---|---|
 | S-E1 | 0 台で `GET /api/status`(`server` 省略) | 409 `NO_SERVERS` | OK |
-| S-E2 | Secrets なしで `?server=default` | 404 `SERVER_NOT_FOUND` | OK |
+| S-E2 | `?server=default` | (旧)404 `SERVER_NOT_FOUND` → 現在は 400、`fields.server = invalid_format`(6.4 の T2-5) | OK |
 | S-E3 | ホスト名に IP アドレス | 400、`fields.host = ip_address` | OK |
 | S-E4 | 既存と同じ表示名・ホスト名 + ポート | 400、`fields.name = duplicate`、`fields.host = duplicate` | OK |
-| S-E5 | ホスト名に `http://…:ポート` を貼り付け、ポート 70000、パスワードが `ADMIN_PASSWORD` と同じ | 400、`host = invalid_format`、`port = out_of_range`、`password = same_as_admin_password` | OK |
+| S-E5 | ホスト名に `http://…:ポート` を貼り付け、ポート 70000、パスワードが管理パスワードと同じ(現在は D1 の管理者のハッシュで検証。6.4 の T2-2) | 400、`host = invalid_format`、`port = out_of_range`、`password = same_as_admin_password` | OK |
 | S-E6 | モックの無いポートを登録 | 201 で保存され、`test.ok: false`、`test.code = RCON_UNREACHABLE`(接続テストの失敗で保存を取り消さない) | OK |
 | S-E7 | 本文が JSON の文字列(オブジェクトでない) | 400 `BAD_REQUEST` | OK |
 | S-E8 | 別オリジンの POST / `text/plain` の POST | 403 `FORBIDDEN_ORIGIN` / 415 | OK |
@@ -153,10 +157,10 @@
 
 (2026-10-16 の Worker Secrets 廃止で、下記のうち鍵の出所 `k`・`s` / `a` の切り替え・再暗号化・既定サーバーの項目は削除された仕組みの記録。現行の単体テストは 6.5)
 
-- 暗号化(`src/lib/servers.test.ts`): AES-256-GCM の往復、暗号文に平文を含まないこと、IV が毎回変わること。AAD(宛先・スキーム・鍵の出所 `k`)が違うと復号できないこと。鍵の切り替え(`s` は SESSION_SECRET だけ、`a` は ADMIN_PASSWORD だけに依存)。ADMIN_PASSWORD を変えると `needsPassword: true`・`SERVER_NEEDS_PASSWORD`・`unreadable`(警告 `SERVER_PASSWORDS_UNREADABLE`)、パスワードの入れ直しで解消。SESSION_SECRET 設定後の `a` → `s` の再暗号化(1 回きり、`updated_at`・変更ログを変えない)
-- 上限 20 台(既定サーバーは数えない)で `SERVER_LIMIT_REACHED`、削除した id を再利用しないこと、変更ログの `params`(パスワードを含まない)
+- 暗号化(`src/lib/servers.test.ts`): AES-256-GCM の往復、暗号文に平文を含まないこと、IV が毎回変わること。AAD(宛先・スキーム・鍵の出所 `k`)が違うと復号できないこと。鍵の 2 系統の切り替えと再暗号化(旧方式。現在は instance_key から派生した 1 系統で、鍵が変わると `needsPassword: true`・`SERVER_NEEDS_PASSWORD`・入れ直しで解消。6.5)
+- 上限 20 台で `SERVER_LIMIT_REACHED`、削除した id を再利用しないこと、変更ログの `params`(パスワードを含まない)
 - ホスト名の検証(小文字化・末尾の `.`・10 進 1 語の IPv4・IPv6・`@`・空白・253 文字超・国際化ドメイン名の punycode)、ポート・並び順の範囲
-- 既定サーバー: 両方ありで使える、片方だけで `NOT_CONFIGURED`(一覧に `secretsIssue`)、両方なしで一覧に出ず `SERVER_NOT_FOUND`。接続テストの結果はメモリだけ
+- 既定サーバーの扱い(旧方式。2026-10-16 の Worker Secrets 廃止で無くなった。現行は 6 章)
 - 確認トークン(`src/lib/confirm.test.ts`): `sv`(別サーバーの id)・`sh`(同じ id で宛先が変わった)のすり替えを `CONFIRM_INVALID`、期限切れより先に判定。`sv` の無い旧形式のトークンは `CONFIRM_INVALID`。トークンに baseUrl そのものを入れないこと
 - execute(`src/lib/actions.test.ts`): prepare 後にポートを変えたら `CONFIRM_INVALID`、無効にしたら `SERVER_DISABLED`(いずれも監査ログに `server_id` 付きで 1 行)、トークンが不正なら サーバーの状態より `CONFIRM_INVALID` を優先
 - D1 の判定(`src/lib/config.test.ts`): 0001 だけ適用した D1 は `not_migrated`(`features` がすべて false)、0002 まで適用で `servers: true`
@@ -195,6 +199,7 @@
 | S2-7 | `POST /setup` 257 文字 | 400 `PASSWORD_TOO_LONG`(同上) | OK |
 | S2-8 | `POST /setup` 確認入力が不一致 | 400 `PASSWORD_MISMATCH`(同上) | OK |
 | S2-9 | `POST /setup` `Content-Type: text/plain` | 400 `BAD_REQUEST` | OK |
+| S2-9b | 管理者 0 件・サーバー登録ありで、登録サーバーの RCON パスワードと同じ値を登録 | 303(登録する。`PASSWORD_SAME_AS_RCON` は返さない = 未認証者に一致を教えない。QA setup M-3) | OK(単体テスト `auth.test.ts`。dev サーバーでは未実施) |
 | S2-10 | `POST /setup` 正常(24 文字・確認一致) | 303 → `/login?registered=1`(自動ログインしない) | OK |
 | S2-11 | 登録後にもう一度 `POST /setup` | 409 `SETUP_ALREADY_DONE`(フォームは出さず、ログイン画面へのリンク) | OK |
 | S2-12 | 登録後の `GET /setup`(未ログイン / ログイン済み) | 303 → `/login` / 303 → `/` | OK |
@@ -235,7 +240,7 @@
 - `src/lib/password.test.ts`: PBKDF2 の往復、保存形式、salt が毎回変わる、反復回数 1 万回(定数 1 か所)、古い回数で `needsRehash`、範囲外の回数・形式不正・長さ違いは破損(`invalidHash`)、256 文字で打ち切り、空白を除かない
 - `src/lib/keys.test.ts`: `instance_key` の `INSERT OR IGNORE` → `SELECT`(並行しても 1 行)、壊れた値は例外、用途別の鍵(`extractable: false`)、5 分キャッシュ
 - `src/lib/session.test.ts`: Cookie v2 の往復、改ざん(期限・署名・操作者名・`aid` の付け替え)、`v1` は形式不正、`session_stamp` の変更・管理者の行の削除・鍵の変更で失効、行を消して登録し直すと(AUTOINCREMENT で新しい id)既存の Cookie は通らない
-- `src/lib/auth.test.ts`: 初期設定の登録(`admins`・`settings`・`admin_register`)、入力検証、2 回目と**並行した 2 本の登録で 2 本目が `SETUP_ALREADY_DONE`**(条件付き INSERT の変更行数 0)、登録し直しで登録サーバーの RCON パスワードと同じ値を拒否(`instance_key` は変わらない)、ログイン(未登録で `setup_required`、成功で `login` を記録、5 回失敗でロック・失敗は記録しない、古い回数のハッシュの保存し直しで `session_stamp` を変えない、壊れたハッシュはコードだけをログに出す)
+- `src/lib/auth.test.ts`: 初期設定の登録(`admins`・`settings`・`admin_register`)、入力検証、2 回目と**並行した 2 本の登録で 2 本目が `SETUP_ALREADY_DONE`**(条件付き INSERT の変更行数 0)、登録し直しでは登録サーバーの RCON パスワードとの同一判定をせず登録する(未認証者への漏えい防止。QA setup M-3。同一値はログイン後のサーバー保存時に `same_as_admin_password` で拒否。`instance_key` は変わらない)、ログイン(未登録で `setup_required`、成功で `login` を記録、5 回失敗でロック・失敗は記録しない、古い回数のハッシュの保存し直しで `session_stamp` を変えない、壊れたハッシュはコードだけをログに出す)
 - `src/lib/servers.test.ts`: 暗号化 `v2.<iv>.<ct>`(AAD = 宛先、鍵違い・旧 `v1` は復号不可)、`same_as_admin_password`、`default` は形式不正、`instance_key` が変わると `needsPassword`・入れ直しで解消、拒否と接続テストの記録(M-2。他の項目にも誤りがある場合と `same_as_admin_password` は記録しない)
 - `src/lib/actions.test.ts`: D1 必須(メモリ近似・`AUDIT_REQUIRED` の経路は削除)、`auditId` は常に number、pending を書けなければ RCON を呼ばない(`INTERNAL_ERROR`)、`server_id` が NULL の書き込み行は `serverId: null`
 - `src/lib/config.test.ts`: `admins` / `settings` が欠けた D1 は `not_migrated`、旧 Secrets と `AUDIT_REQUIRED` を設定しても読まない

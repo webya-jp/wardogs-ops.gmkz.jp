@@ -189,7 +189,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 登録の処理(`POST /setup`、`application/x-www-form-urlencoded`):
 
 1. Origin 検査(5.5。`/setup` も対象)。
-2. 入力検証: `password` が 16〜256 文字(コードポイント。`PASSWORD_TOO_SHORT` / `PASSWORD_TOO_LONG`)、`passwordConfirm` と完全一致(`PASSWORD_MISMATCH`)。前後の空白は除かない(入力どおりに扱う)。登録サーバーがある場合(管理者を消して登録し直すとき)は、各サーバーの RCON パスワードを復号し、同じ値なら拒否(`PASSWORD_SAME_AS_RCON`。5.2 の「別の値」の規則)。
+2. 入力検証: `password` が 16〜256 文字(コードポイント。`PASSWORD_TOO_SHORT` / `PASSWORD_TOO_LONG`)、`passwordConfirm` と完全一致(`PASSWORD_MISMATCH`)。前後の空白は除かない(入力どおりに扱う)。**登録サーバーの RCON パスワードとの同一判定は初期設定では行わない**(未認証者への情報漏えい防止。管理者 0 件・サーバー登録ありの間〔登録し直しの最中〕に判定すると、未認証者に「入力値が保存済みの RCON パスワードと同じか」を教えてしまうため。QA 2026-10-16 setup M-3)。同一値の拒否はログイン後のサーバー保存時(5.2 の `same_as_admin_password`)だけで行う。`PASSWORD_SAME_AS_RCON` は契約に残るが、現在は返さない。
 3. `instance_key` を用意する(5.1.2。無ければ作る)。
 4. ハッシュを計算し(5.2)、**条件付きの 1 文**で登録する:
 
@@ -255,7 +255,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 - 管理パスワードは **16 文字以上・256 文字以下**(`ADMIN_PASSWORD_MIN_LENGTH` / `ADMIN_PASSWORD_MAX_LENGTH`)。README ではランダム 24 文字以上の生成手順を案内する。
 - **管理パスワードと RCON パスワードは別の値**(旧 `ADMIN_PASSWORD_EQUALS_RCON_PASSWORD` の置き換え。警告ではなく、入力した時点で拒否する):
   - サーバーの追加・RCON パスワードの変更時: 入力した RCON パスワードを管理者のハッシュで検証し、一致したら `same_as_admin_password`(PBKDF2 1 回分の CPU。保存操作のときだけ)。管理者が複数行ある場合は全行と比べる。
-  - 初期設定(登録し直し)時: 5.1.1 の `PASSWORD_SAME_AS_RCON`。
+  - 初期設定(登録し直し)時: 判定しない(5.1.1。未認証者への情報漏えい防止。QA 2026-10-16 setup M-3)。
 - RCON パスワードは Worker から強制できないため、24 文字未満なら一覧で警告のみ(`passwordShort`)。README の推奨はランダム 32 文字以上。
 
 ### 5.3 Cookie の形式と有効期限

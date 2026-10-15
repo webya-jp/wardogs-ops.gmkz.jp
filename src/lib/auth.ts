@@ -9,7 +9,6 @@ import { codePointLength } from './config';
 import { hashClientIp } from './keys';
 import type { DerivedKeys } from './keys';
 import { verifyPasswordHash } from './password';
-import { decryptAllPasswords } from './servers';
 import { issueSession, sanitizeOperator, serializeSessionCookie, toSessionInfo } from './session';
 import type { SessionData } from './session';
 import { LoginThrottle, throttleKeyForIp } from './throttle';
@@ -38,7 +37,10 @@ export interface SetupInput {
 }
 
 /**
- * 判定の順序(docs/API.md 2 章): 管理者の有無 → 入力検証 → 登録サーバーの RCON パスワードとの同一判定 → instance_key → 条件付き INSERT。
+ * 判定の順序(docs/API.md 2 章): 管理者の有無 → 入力検証 → instance_key → 条件付き INSERT。
+ * 登録サーバーの RCON パスワードとの同一判定は行わない(QA 2026-10-16 setup M-3: 管理者 0 件・サーバー登録ありの間、
+ * 未認証者に「入力値が保存済みの RCON パスワードと同じか」を教えてしまうため。同一値の拒否はログイン後のサーバー保存時
+ * 〔same_as_admin_password〕だけで行う)。PASSWORD_SAME_AS_RCON は契約に残るが、ここでは返さない。
  * 成功時は settings_audit_log に admin_register を記録する(記録の失敗で登録は取り消さない)。自動ログインはしない
  */
 export async function handleSetup(input: SetupInput): Promise<SetupResult> {
@@ -53,10 +55,8 @@ export async function handleSetup(input: SetupInput): Promise<SetupResult> {
   if (len > ADMIN_PASSWORD_MAX_LENGTH) return err('PASSWORD_TOO_LONG');
   if (password !== confirm) return err('PASSWORD_MISMATCH');
 
-  // instance_key を用意する(無ければここで作られる)。登録し直しのときは登録サーバーのパスワードと比べる
+  // instance_key を用意する(無ければここで作られる。登録の記録の ip_hash に使う)
   const keys = await input.getKeys();
-  const rconPasswords = await decryptAllPasswords({ db, key: keys.serverPassword });
-  if (rconPasswords.includes(password)) return err('PASSWORD_SAME_AS_RCON');
 
   const now = input.now ?? Date.now();
   const r = await registerAdmin(db, { password, now, ...(input.iterations === undefined ? {} : { iterations: input.iterations }) });

@@ -80,7 +80,7 @@ describe('初期設定(/setup の POST)', () => {
     expect(await db2.prepare('SELECT COUNT(*) AS n FROM admins').first()).toEqual({ n: 1 });
   });
 
-  it('登録し直し(admins を消した後)では登録サーバーの RCON パスワードと同じ値を拒否する。instance_key は変わらない', async () => {
+  it('登録し直し(admins を消した後)では登録サーバーの RCON パスワードとの同一判定をしない(未認証者への漏えい防止)。instance_key は変わらない', async () => {
     const db = await makeD1();
     await setup(db, setupForm());
     const keys = await getKeys(db);
@@ -95,9 +95,17 @@ describe('初期設定(/setup の POST)', () => {
     expect(r.ok).toBe(true);
     const ik = await db.prepare(`SELECT value FROM settings`).first();
     await db.prepare('DELETE FROM admins').run();
-    expect(await setup(db, setupForm(RCON_PW))).toEqual({ kind: 'error', code: 'PASSWORD_SAME_AS_RCON' });
-    expect(await setup(db, setupForm('new-admin-password-0123'))).toEqual({ kind: 'registered' });
+    // 同じ値でも PASSWORD_SAME_AS_RCON を返さず登録する(応答で RCON パスワードとの一致を教えない)
+    expect(await setup(db, setupForm(RCON_PW))).toEqual({ kind: 'registered' });
     expect(await db.prepare(`SELECT value FROM settings`).first()).toEqual(ik);
+    // 同一値の拒否はログイン後のサーバー保存時(same_as_admin_password)で行う
+    const again = await createServer({ sctx: { db, key: keys.serverPassword }, actor, deps: { fetchFn: okFetch, log: () => undefined } }, {
+      name: 'B',
+      host: 'rcon-b.example.com',
+      port: 7777,
+      password: RCON_PW,
+    });
+    expect(again).toEqual({ ok: false, code: 'VALIDATION_FAILED', opts: { fields: { password: 'same_as_admin_password' } } });
   });
 });
 
