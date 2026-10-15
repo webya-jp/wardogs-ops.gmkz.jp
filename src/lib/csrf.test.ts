@@ -14,9 +14,13 @@ describe('csrf', () => {
   });
   it('Origin が違えば拒否(Sec-Fetch-Site が same-origin でも)', () => {
     expect(checkSameOrigin(req('POST', { Origin: 'https://evil.example', 'Sec-Fetch-Site': 'same-origin' }))).toBe(false);
-    expect(checkSameOrigin(req('POST', { Origin: 'null' }))).toBe(false);
     expect(checkSameOrigin(req('POST', { Origin: 'http://ops.example.com' }))).toBe(false);
     expect(checkSameOrigin(req('POST', { Origin: 'https://ops.example.com.evil.example' }))).toBe(false);
+  });
+  it('Origin が "null" なら Sec-Fetch-Site で判定する(フォーム送信で Chrome が送る)', () => {
+    expect(checkSameOrigin(req('POST', { Origin: 'null', 'Sec-Fetch-Site': 'same-origin' }))).toBe(true);
+    expect(checkSameOrigin(req('POST', { Origin: 'null', 'Sec-Fetch-Site': 'cross-site' }))).toBe(false);
+    expect(checkSameOrigin(req('POST', { Origin: 'null' }))).toBe(false);
   });
   it('Origin が無ければ Sec-Fetch-Site: same-origin を要求し、どちらも無ければ拒否', () => {
     expect(checkSameOrigin(req('POST', { 'Sec-Fetch-Site': 'same-origin' }))).toBe(true);

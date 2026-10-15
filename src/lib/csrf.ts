@@ -9,13 +9,14 @@ export function isSafeMethod(method: string): boolean {
 
 /**
  * 1. Origin があれば new URL(request.url).origin と完全一致
- * 2. Origin が無ければ Sec-Fetch-Site: same-origin
+ * 2. Origin が無い、または "null"(Chrome は Referrer-Policy や sandbox によりフォーム送信で "null" を送ることがある)
+ *    なら Sec-Fetch-Site: same-origin を要求(Sec-Fetch-Site は forbidden header でスクリプトから偽装できない)
  * 3. どちらも無ければ拒否
  */
 export function checkSameOrigin(request: Request): boolean {
   if (isSafeMethod(request.method)) return true;
   const origin = request.headers.get('Origin');
-  if (origin !== null) {
+  if (origin !== null && origin !== 'null') {
     let self: string;
     try {
       self = new URL(request.url).origin;

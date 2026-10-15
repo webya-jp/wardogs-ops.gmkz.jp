@@ -207,7 +207,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 - Cookie は `SameSite=Strict`(他サイトからのリクエストに付かない)。
 - GET / HEAD 以外のすべて(`/login`、`/logout`、`/api/*`)で検査する:
   1. `Origin` があれば `new URL(request.url).origin` と完全一致を要求
-  2. `Origin` が無ければ `Sec-Fetch-Site: same-origin` を要求
+  2. `Origin` が無い、または `null` なら `Sec-Fetch-Site: same-origin` を要求(Chrome は `Referrer-Policy: no-referrer` や sandbox 下のフォーム送信で `Origin: null` を送る。`Sec-Fetch-Site` は forbidden header でスクリプトから偽装できない。2026-10-15 のブラウザ確認で発見し修正)
   3. どちらも無ければ拒否(403 `FORBIDDEN_ORIGIN`。ページは 403 の簡易 HTML)
 - `/api/*` の POST は `Content-Type: application/json` を必須(他サイトの単純フォームからは送れない)。
 - Astro 標準の origin 検査(`security.checkOrigin`)は**無効化**し、上記の middleware の検査に一本化する。標準検査はフォーム形式の POST だけが対象で JSON 等は見ず、middleware より先に本文を読まずに 403(セキュリティヘッダ無し)を返し、開発サーバーでは直後の同一接続のリクエストが 500 になるため(`docs/API_TEST.md` 4 章。本番は C-19)。middleware の検査は GET / HEAD 以外の全リクエストが対象で、拒否前に本文を読み捨てる。
@@ -227,7 +227,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 
 ### 5.7 その他のヘッダ・保護
 
-- 全応答: `X-Frame-Options: DENY`、`Content-Security-Policy` に少なくとも `frame-ancestors 'none'; base-uri 'none'; form-action 'self'`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`X-Robots-Tag: noindex, nofollow`。HTML と API は `Cache-Control: no-store`。`script-src` を絞るかは Astro のアイランド用インラインスクリプトとの両立を確認してから決める(C-15)。
+- 全応答: `X-Frame-Options: DENY`、`Content-Security-Policy` に少なくとも `frame-ancestors 'none'; base-uri 'none'; form-action 'self'`、`Referrer-Policy: same-origin`(`no-referrer` だと同一オリジンのフォーム送信で `Origin: null` になり CSRF 検査に落ちる)、`X-Content-Type-Options: nosniff`、`X-Robots-Tag: noindex, nofollow`。HTML と API は `Cache-Control: no-store`。`script-src` を絞るかは Astro のアイランド用インラインスクリプトとの両立を確認してから決める(C-15)。
 - 未ログインのページ要求は `/login` へ 303、API は 401 `UNAUTHENTICATED`。
 - 必須 Secrets が不足・不正(`*_MISSING`、`*_TOO_SHORT`、`RCON_URL_INVALID`、`RCON_URL_IS_IP_ADDRESS`、`ADMIN_PASSWORD_EQUALS_RCON_PASSWORD`)なら `/setup` 以外は `/setup` へ 303、API は 503 `NOT_CONFIGURED`。
 - `/setup` は未ログインでも見られるが、**設定が揃っているときは「設定済み」以外を出さない**。不足時は不足している Secret の名前と警告種別だけを出す(値・長さ・接続先は出さない)。警告の文言は `SetupWarning` のコードからカタログ(`setup.warning.<コード>`)で引く。

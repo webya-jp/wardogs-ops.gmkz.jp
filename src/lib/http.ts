@@ -163,7 +163,8 @@ export const SECURITY_HEADERS: Record<string, string> = {
   'X-Frame-Options': 'DENY',
   // script-src は絞っていない(Astro のアイランド用インラインスクリプトとの両立が未確認。要確認 C-15)
   'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
-  'Referrer-Policy': 'no-referrer',
+  // no-referrer だと Chrome が同一オリジンのフォーム送信でも Origin: null を送り CSRF 検査に落ちるため same-origin にする
+  'Referrer-Policy': 'same-origin',
   'X-Content-Type-Options': 'nosniff',
   'X-Robots-Tag': 'noindex, nofollow',
 };
