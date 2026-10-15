@@ -1,3 +1,4 @@
+import type { SetupWarning } from '../types/api';
 // ログイン失敗のレート制限(固定窓)。docs/ARCHITECTURE.md 5.6・11.3。
 // - 接続元ごと(ip:<HMAC 先頭 16 桁>): 15 分の窓で失敗 5 回 → その窓の終わりまでロック
 // - ロック中はパスワードを評価せず、失敗回数も増やさない
@@ -7,7 +8,7 @@
 export const IP_WINDOW_MS = 15 * 60 * 1000;
 export const IP_MAX_FAILURES = 5;
 export const GLOBAL_WINDOW_MS = 60 * 60 * 1000;
-/** これを超えたら画面に警告(表示用の SetupWarning コードは未定義。要確認) */
+/** これを超えたら画面に警告(SetupWarning の LOGIN_FAILURES_HIGH) */
 export const GLOBAL_ALERT_FAILURES = 50;
 /** これを超えたら D1 への書き込みを止めてメモリで近似する */
 export const GLOBAL_D1_WRITE_LIMIT = 1000;
@@ -159,4 +160,14 @@ export class LoginThrottle {
 
 export function throttleKeyForIp(ipHash: string): string {
   return `ip:${ipHash}`;
+}
+
+/** 全体の失敗が多ければ warnings に LOGIN_FAILURES_HIGH を足す(/api/session 用。ログインは止めない) */
+export async function withLoginAlert(
+  warnings: SetupWarning[],
+  throttle: LoginThrottle,
+  now = Date.now(),
+): Promise<SetupWarning[]> {
+  const alert = await throttle.globalAlert(now).catch(() => false);
+  return alert && !warnings.includes('LOGIN_FAILURES_HIGH') ? [...warnings, 'LOGIN_FAILURES_HIGH'] : warnings;
 }

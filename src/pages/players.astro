@@ -1,0 +1,12 @@
+---
+// プレイヤー(/players)。docs/ARCHITECTURE.md 9 章。接続中一覧と行ごとの message / kick / ban。
+export const prerender = false;
+import OpsLayout from '../layouts/OpsLayout.astro';
+import { getPageContext } from '../layouts/page-context';
+import PlayersTable from '../components/PlayersTable';
+
+const ctx = await getPageContext(Astro.request, Astro.locals);
+---
+<OpsLayout title={ctx.t('nav.players')} language={ctx.language} ctx={ctx} active="players">
+  <PlayersTable client:load language={ctx.language} timeZone={ctx.timeZone} writesEnabled={ctx.features.writes} />
+</OpsLayout>

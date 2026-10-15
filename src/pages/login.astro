@@ -1,5 +1,6 @@
 ---
 // ログイン。GET: フォーム(ログイン済みなら / へ 303)、POST: 認証(docs/API.md 2 章、docs/ARCHITECTURE.md 4.1)。
+export const prerender = false;
 // Origin 検査・設定チェックは middleware が先に行う。見た目は frontend-pages が整える(文言はカタログ経由)。
 import { handleLogin } from '../lib/auth';
 import { getFeatures } from '../lib/config';
@@ -7,6 +8,7 @@ import { clientIp, getWaitUntil, readFormBody, redirect } from '../lib/http';
 import { getKeys } from '../lib/keys';
 import { getEnv, IS_DEV } from '../lib/runtime';
 import { getTranslator, resolveLanguage } from '../i18n';
+import OpsLayout from '../layouts/OpsLayout.astro';
 import type { MessageKey } from '../i18n';
 
 const env = getEnv();
@@ -52,30 +54,21 @@ if (Astro.request.method === 'POST') {
   return new Response(null, { status: 405, headers: { Allow: 'GET, POST' } });
 }
 ---
-<!doctype html>
-<html lang={language}>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="robots" content="noindex, nofollow" />
-    <title>{t('login.title')} | {t('app.name')}</title>
-  </head>
-  <body>
-    <main>
-      <h1>{t('login.title')}</h1>
-      {errorKey && <p role="alert">{t(errorKey, errorParams)}</p>}
-      <form method="post" action="/login">
-        <p>
-          <label for="password">{t('login.password')}</label>
-          <input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" required />
-        </p>
-        <p>
-          <label for="operator">{t('login.operator')}</label>
-          <input id="operator" name="operator" type="text" autocomplete="nickname" maxlength="32" aria-describedby="operator-help" />
-          <small id="operator-help">{t('login.operatorHelp')}</small>
-        </p>
-        <button type="submit">{t('login.submit')}</button>
-      </form>
-    </main>
-  </body>
-</html>
+<OpsLayout title={t('login.title')} language={language} narrow>
+  <section class="card">
+    <h1>{t('login.title')}</h1>
+    {errorKey && <p class="alert alert-error" role="alert">{t(errorKey, errorParams)}</p>}
+    <form method="post" action="/login">
+      <div class="field">
+        <label for="password">{t('login.password')}</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" required autofocus />
+      </div>
+      <div class="field">
+        <label for="operator">{t('login.operator')}</label>
+        <input id="operator" name="operator" type="text" autocomplete="nickname" maxlength="32" aria-describedby="operator-help" />
+        <small id="operator-help">{t('login.operatorHelp')}</small>
+      </div>
+      <button type="submit" class="button-primary">{t('login.submit')}</button>
+    </form>
+  </section>
+</OpsLayout>

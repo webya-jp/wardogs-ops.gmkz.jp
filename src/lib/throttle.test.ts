@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { GLOBAL_D1_WRITE_LIMIT, GLOBAL_KEY, IP_MAX_FAILURES, IP_WINDOW_MS, LoginThrottle, MemoryThrottleStore } from './throttle';
+import {
+  GLOBAL_ALERT_FAILURES,
+  GLOBAL_D1_WRITE_LIMIT,
+  GLOBAL_KEY,
+  GLOBAL_WINDOW_MS,
+  IP_MAX_FAILURES,
+  IP_WINDOW_MS,
+  LoginThrottle,
+  MemoryThrottleStore,
+  withLoginAlert,
+} from './throttle';
 import type { ThrottleStore } from './throttle';
 
 const T = 1_800_000_000_000;
@@ -33,6 +43,18 @@ describe('throttle (memory)', () => {
     for (let i = 0; i < 51; i++) await th.recordFailure(`ip:${i}`, T);
     expect(await th.globalAlert(T)).toBe(true);
     expect((await th.check('ip:new', T)).locked).toBe(false);
+  });
+});
+
+describe('LOGIN_FAILURES_HIGH', () => {
+  it('1 時間に 50 回を超えたら warnings に足し、50 回ちょうど・窓の外では足さない', async () => {
+    const th = new LoginThrottle({ memory: new MemoryThrottleStore() });
+    for (let i = 0; i < GLOBAL_ALERT_FAILURES; i++) await th.recordFailure(`ip:${i}`, T);
+    expect(await withLoginAlert(['RCON_PASSWORD_SHORT'], th, T)).toEqual(['RCON_PASSWORD_SHORT']);
+    await th.recordFailure('ip:last', T);
+    expect(await withLoginAlert(['RCON_PASSWORD_SHORT'], th, T)).toEqual(['RCON_PASSWORD_SHORT', 'LOGIN_FAILURES_HIGH']);
+    expect(await withLoginAlert(['LOGIN_FAILURES_HIGH'], th, T)).toEqual(['LOGIN_FAILURES_HIGH']);
+    expect(await withLoginAlert([], th, T + GLOBAL_WINDOW_MS)).toEqual([]);
   });
 });
 

@@ -1,0 +1,97 @@
+---
+// 運営パネル共通のレイアウト。lang は解決済みの言語、noindex、OG なし。
+// ctx(ログイン後のページの共通値)があるときだけ、ヘッダーの操作者名・ログアウト・ナビ・お知らせを出す。
+// 文言はすべてカタログ経由(docs/ARCHITECTURE.md 13 章)。
+import '../styles/ops.css';
+import SessionNotices from '../components/SessionNotices';
+import { formatDateTime, getTranslator, toLocale } from '../i18n';
+import type { Language, MessageKey } from '../i18n';
+import type { PageContext } from './page-context';
+
+export type NavId = 'status' | 'players' | 'bans' | 'audit';
+
+interface Props {
+  title: string;
+  language: Language;
+  ctx?: PageContext;
+  active?: NavId;
+  /** ログイン・設定画面など、幅を絞った 1 カラム表示 */
+  narrow?: boolean;
+}
+
+const { title, language, ctx, active, narrow = false } = Astro.props;
+const t = getTranslator(language);
+const appName = t('app.name');
+const fullTitle = title === appName ? appName : t('layout.title', { page: title, app: appName });
+
+const NAV: { id: NavId; href: string; label: MessageKey }[] = [
+  { id: 'status', href: '/', label: 'nav.status' },
+  { id: 'players', href: '/players', label: 'nav.players' },
+  { id: 'bans', href: '/bans', label: 'nav.bans' },
+  { id: 'audit', href: '/audit', label: 'nav.audit' },
+];
+
+const session = ctx?.session ?? null;
+const operatorText = session
+  ? session.operator
+    ? t('header.operator', { name: session.operator })
+    : t('header.operatorAnonymous', { tag: session.sessionTag })
+  : null;
+const expiresText =
+  session && ctx
+    ? t('header.sessionExpires', {
+        time: formatDateTime(session.expiresAt, toLocale(language), ctx.timeZone, { dateStyle: 'short', timeStyle: 'short' }),
+      })
+    : null;
+---
+<!doctype html>
+<html lang={language}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="light dark" />
+    <title>{fullTitle}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">{t('layout.skipToMain')}</a>
+    <header class="site-header">
+      <div class="container">
+        <a class="brand" href={session ? '/' : '/login'}>{appName}</a>
+        {session && (
+          <div class="header-session">
+            <span>{operatorText}</span>
+            <span>{expiresText}</span>
+            <form method="post" action="/logout">
+              <button type="submit" class="button-small">{t('logout.submit')}</button>
+            </form>
+          </div>
+        )}
+      </div>
+    </header>
+    {session && (
+      <nav class="site-nav" aria-label={t('nav.label')}>
+        <div class="container">
+          <ul>
+            {NAV.map((item) => (
+              <li>
+                <a href={item.href} aria-current={item.id === active ? 'page' : undefined}>{t(item.label)}</a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </nav>
+    )}
+    <div class="container">
+      {ctx && session && (
+        <SessionNotices client:load language={language} initialFeatures={ctx.features} initialWarnings={ctx.warnings} />
+      )}
+    </div>
+    <main id="main" class="container">
+      <div class={narrow ? 'narrow' : undefined}>
+        <slot />
+      </div>
+    </main>
+  </body>
+</html>

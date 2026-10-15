@@ -1,0 +1,12 @@
+---
+// 操作ログ(/audit)。docs/ARCHITECTURE.md 9 章。50 件ずつ。日時は vars TIMEZONE で表示。手動更新。
+export const prerender = false;
+import OpsLayout from '../layouts/OpsLayout.astro';
+import { getPageContext } from '../layouts/page-context';
+import AuditLog from '../components/AuditLog';
+
+const ctx = await getPageContext(Astro.request, Astro.locals);
+---
+<OpsLayout title={ctx.t('nav.audit')} language={ctx.language} ctx={ctx} active="audit">
+  <AuditLog client:load language={ctx.language} timeZone={ctx.timeZone} />
+</OpsLayout>

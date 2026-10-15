@@ -1,0 +1,12 @@
+---
+// BAN(/bans)。docs/ARCHITECTURE.md 9 章。BAN 一覧と解除。手動更新。
+export const prerender = false;
+import OpsLayout from '../layouts/OpsLayout.astro';
+import { getPageContext } from '../layouts/page-context';
+import BansTable from '../components/BansTable';
+
+const ctx = await getPageContext(Astro.request, Astro.locals);
+---
+<OpsLayout title={ctx.t('nav.bans')} language={ctx.language} ctx={ctx} active="bans">
+  <BansTable client:load language={ctx.language} timeZone={ctx.timeZone} writesEnabled={ctx.features.writes} />
+</OpsLayout>
