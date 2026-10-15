@@ -13,6 +13,8 @@ describe('config', () => {
   it('RCON_URL の検証', () => {
     expect(parseRconUrl('http://rcon.example.com:7776/')).toEqual({ ok: true, baseUrl: 'http://rcon.example.com:7776' });
     expect(parseRconUrl('https://proxy.example.com/rcon/')).toEqual({ ok: true, baseUrl: 'https://proxy.example.com/rcon' });
+    // ポートは任意(提供元ごとに 7776 以外もある)
+    expect(parseRconUrl('http://rcon.example.com:7789')).toEqual({ ok: true, baseUrl: 'http://rcon.example.com:7789' });
     expect(parseRconUrl('')).toEqual({ ok: false, warning: 'RCON_URL_MISSING' });
     expect(parseRconUrl('rcon.example.com:7776')).toEqual({ ok: false, warning: 'RCON_URL_INVALID' });
     expect(parseRconUrl('ftp://x.example.com')).toEqual({ ok: false, warning: 'RCON_URL_INVALID' });
