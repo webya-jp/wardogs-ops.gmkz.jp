@@ -1,0 +1,24 @@
+---
+// 準備中の仮ページ。画面の実装は frontend-pages が docs/ARCHITECTURE.md 第 9 章に沿って行う。
+// 文言はメッセージカタログ経由(docs/ARCHITECTURE.md 第 13 章)。
+import { env } from 'cloudflare:workers';
+import { getTranslator, resolveLanguage } from '../i18n';
+
+const language = resolveLanguage(env.LANGUAGE, Astro.request.headers.get('Accept-Language'));
+const t = getTranslator(language);
+---
+<!doctype html>
+<html lang={language}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>{t('app.name')}</title>
+  </head>
+  <body>
+    <main>
+      <h1>{t('app.name')}</h1>
+      <p>{t('app.preparing')}</p>
+    </main>
+  </body>
+</html>

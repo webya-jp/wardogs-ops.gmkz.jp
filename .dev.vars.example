@@ -1,0 +1,15 @@
+# wardogs-ops の Secrets。docs/ARCHITECTURE.md 10 章 / README.md 3 章を参照。
+# Deploy to Cloudflare ボタンはこのファイルに書かれた名前を入力欄として表示する。
+# ローカル開発では、このファイルを .dev.vars にコピーして値を入れる(.dev.vars は .gitignore 済み)。
+# このファイル自体には値を書かない(リポジトリは公開される)。
+
+# パネルのログインパスワード。16 文字以上(推奨: ランダムな 24 文字以上)。RCON_PASSWORD と同じ値は不可
+ADMIN_PASSWORD=
+# RCON の接続先。http://ホスト名:ポート の形(IP アドレス不可、末尾の /v1 は付けない)
+RCON_URL=
+# ServerSettings.ini に設定した RCON パスワード(推奨: ランダムな 32 文字以上)
+RCON_PASSWORD=
+
+# 任意(ボタンのフォームには出さない。必要ならダッシュボードで追加する)
+# SESSION_SECRET: ログイン Cookie の署名鍵を ADMIN_PASSWORD から分けたいときに設定(32 文字以上のランダム値)
+# AUDIT_REQUIRED / LANGUAGE / TIMEZONE: wrangler.jsonc の vars を開発時だけ上書きする場合に使う

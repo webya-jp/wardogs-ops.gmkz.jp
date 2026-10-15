@@ -1,0 +1,48 @@
+// wardogs-ops の Worker 設定。docs/ARCHITECTURE.md 第 3・10 章を参照。
+// - Secrets(ADMIN_PASSWORD, RCON_URL, RCON_PASSWORD, 任意で SESSION_SECRET)はここに書かない。
+//   Deploy to Cloudflare ボタンのフォーム(.dev.vars.example で宣言)、ダッシュボードの
+//   Settings > Variables and Secrets、または `wrangler secret put` で入れる。
+// - このリポジトリは公開前提。接続先ホスト名・IP、パスワードなどの非公開情報を書かない。
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Workers Builds はダッシュボード上の Worker 名とこの値の一致を要求する(docs/research/cloudflare-deploy-button.md E)
+  "name": "wardogs-ops",
+  // Astro 7 + @astrojs/cloudflare v14 のサーバーエントリ
+  "main": "@astrojs/cloudflare/entrypoints/server",
+  // 2024-09-02 以降にする(allow_custom_ports が既定で有効になり、RCON の 7776 番などを fetch できる)
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS"
+  },
+  // ボタン利用者は https://wardogs-ops.<アカウント>.workers.dev を使う(既定)
+  "workers_dev": true,
+  // バージョンごとのプレビュー URL は作らない(ログイン画面の入口を増やさない)
+  "preview_urls": false,
+  // カスタムドメインを使う場合の例(任意)。使うならコメントを外し、自分のドメインに書き換える
+  // "routes": [
+  //   { "pattern": "ops.example.com", "custom_domain": true }
+  // ],
+  "observability": {
+    "enabled": true
+  },
+  // D1 は自動プロビジョニング(database_id を省略。wrangler 4.45.0 以上、open beta)。
+  // 初回の `wrangler deploy` で database_name の名前で作成され、以後のデプロイでも紐づけが維持される。
+  // D1 が無い・テーブルが無い場合はアプリが「操作ログ無し(読み取り専用)」で動く(docs/ARCHITECTURE.md 7.4)
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "wardogs-ops-db",
+      "migrations_dir": "db/migrations"
+    }
+  ],
+  "vars": {
+    // "true"(既定): D1 の操作ログに書けないときは書き込み操作を止める。"false": ログ無しでも操作できる(非推奨)
+    "AUDIT_REQUIRED": "true",
+    // 表示言語(言語 / Language)。言語コード。"ja"(既定)で固定。"auto" にするとブラウザの言語設定から選ぶ(現在の対応は ja のみ)
+    "LANGUAGE": "ja",
+    // 日時表示のタイムゾーン(IANA 名)
+    "TIMEZONE": "Asia/Tokyo"
+  }
+}
