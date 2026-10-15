@@ -101,3 +101,58 @@ describe('features(段階的有効化)', () => {
     expect(s.features.writes).toBe(false);
   });
 });
+
+describe('actions (D1 あり。拒否も監査ログに残す)', () => {
+  const rows = async (db: D1Database) =>
+    (await db.prepare('SELECT event, status, error_code, confirm_nonce, target_steam_id, finished_at FROM audit_log ORDER BY id').all()).results as Record<string, unknown>[];
+
+  it('CONFIRM_INVALID / CONFIRM_EXPIRED / CAPABILITY_MISSING は failed で 1 行、入力検証失敗は記録しない', async () => {
+    const { makeD1 } = await import('./testing/sqlite-d1');
+    const db = await makeD1();
+    const c = await ctx({ db });
+    // 入力検証失敗(400)は記録しない
+    expect((await prepareAction(c, { action: 'kick', params: { steamId: '1' } })).ok).toBe(false);
+    expect(await rows(db)).toHaveLength(0);
+    // capability が missing
+    expect(await prepareAction(c, { action: 'broadcast', params: { message: 'x' } })).toEqual({ ok: false, code: 'CAPABILITY_MISSING' });
+    // 偽トークン
+    expect(await executeAction(c, { action: 'kick', params: { steamId: PLAYER.steamId }, confirmToken: 'v1.x.y' })).toEqual({
+      ok: false,
+      code: 'CONFIRM_INVALID',
+    });
+    // 期限切れ
+    const p = await prepareAction({ ...c, now: 1_000 }, { action: 'kick', params: { steamId: PLAYER.steamId } });
+    if (!p.ok) throw new Error('prepare failed');
+    expect(await executeAction({ ...c, now: 1_000 + 121_000 }, { action: 'kick', params: p.data.params, confirmToken: p.data.confirmToken })).toEqual({
+      ok: false,
+      code: 'CONFIRM_EXPIRED',
+    });
+    // action が分からないものは記録しない
+    await executeAction(c, { action: 'nope', confirmToken: 'x' });
+    const r = await rows(db);
+    expect(r.map((x) => [x.event, x.status, x.error_code, x.confirm_nonce])).toEqual([
+      ['broadcast', 'failed', 'CAPABILITY_MISSING', null],
+      ['kick', 'failed', 'CONFIRM_INVALID', null],
+      ['kick', 'failed', 'CONFIRM_EXPIRED', null],
+    ]);
+    expect(r[1]?.target_steam_id).toBe(PLAYER.steamId);
+    expect(r.every((x) => typeof x.finished_at === 'number')).toBe(true);
+  });
+
+  it('正常な execute は pending → succeeded の 1 行', async () => {
+    const { makeD1 } = await import('./testing/sqlite-d1');
+    const db = await makeD1();
+    const c = await ctx({ db });
+    const p = await prepareAction(c, { action: 'kick', params: { steamId: PLAYER.steamId } });
+    if (!p.ok) throw new Error('prepare failed');
+    const e = await executeAction(c, { action: 'kick', params: p.data.params, confirmToken: p.data.confirmToken });
+    expect(e.ok).toBe(true);
+    expect(await executeAction(c, { action: 'kick', params: p.data.params, confirmToken: p.data.confirmToken })).toEqual({
+      ok: false,
+      code: 'ALREADY_EXECUTED',
+    });
+    const r = await rows(db);
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ event: 'kick', status: 'succeeded', error_code: null });
+  });
+});

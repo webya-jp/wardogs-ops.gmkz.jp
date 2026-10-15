@@ -3,7 +3,7 @@
 // - 表示文言は保存しない(event + params + target_name を保存し、画面がカタログで組み立てる)
 // - 生の IP・パスワード・Cookie・RCON の接続先は保存しない
 import { API_ERROR_CODES } from '../types/api';
-import type { ApiErrorCode, AuditEntry, AuditEventType, AuditStatus } from '../types/api';
+import type { ApiErrorCode, AuditEntry, AuditEventType, AuditStatus, WriteAction } from '../types/api';
 
 export const AUDIT_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
 export const SNAPSHOT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -59,6 +59,31 @@ export async function finishAudit(
   await db
     .prepare(`UPDATE audit_log SET status = ?2, finished_at = ?3, rcon_status = ?4, error_code = ?5 WHERE id = ?1`)
     .bind(id, r.status, r.now, r.rconStatus, r.errorCode)
+    .run();
+}
+
+/**
+ * RCON を呼ぶ前に拒否した書き込み操作を 1 行で記録する(status=failed、error_code 付き、nonce なし)。
+ * 対象: execute の確認トークン検証失敗(CONFIRM_INVALID / CONFIRM_EXPIRED)、CAPABILITY_MISSING。
+ * 入力検証失敗(400 VALIDATION_FAILED)とログイン失敗は記録しない(D1 の書き込み枠の節約)
+ */
+export async function recordRejected(
+  db: D1Database,
+  e: AuditActor & {
+    now: number;
+    event: WriteAction;
+    targetSteamId: string | null;
+    params: Record<string, unknown>;
+    errorCode: ApiErrorCode;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO audit_log (created_at, finished_at, event, status, operator, session_tag, ip_hash,
+                              target_steam_id, params_json, error_code)
+       VALUES (?1, ?1, ?2, 'failed', ?3, ?4, ?5, ?6, ?7, ?8)`,
+    )
+    .bind(e.now, e.event, e.operator, e.sessionTag, e.ipHash, e.targetSteamId, JSON.stringify(e.params), e.errorCode)
     .run();
 }
 

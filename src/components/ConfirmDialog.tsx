@@ -35,7 +35,13 @@ interface Props {
 
 type Step = 'input' | 'preparing' | 'confirm' | 'executing' | 'done' | 'failed';
 
-const NO_RETRY: ReadonlySet<string> = new Set(['RCON_TIMEOUT', 'ALREADY_EXECUTED']);
+/**
+ * execute で応答を受け取れなかった(サーバー側で実行済みの可能性がある)コード。
+ * 「結果不明」と表示し、再実行ボタンは出さない(新しい prepare は新しい nonce になり二重実行になり得るため)
+ */
+const UNKNOWN_RESULT: ReadonlySet<string> = new Set(['NETWORK', 'INTERNAL_ERROR', 'RCON_TIMEOUT']);
+/** execute 後にやり直しを出さないコード(UNKNOWN_RESULT に加えて) */
+const NO_RETRY: ReadonlySet<string> = new Set([...UNKNOWN_RESULT, 'ALREADY_EXECUTED']);
 
 export default function ConfirmDialog({ i18n, request, mapNames = {}, onClose, onDone }: Props) {
   const { t, time } = i18n;
@@ -319,7 +325,26 @@ export default function ConfirmDialog({ i18n, request, mapNames = {}, onClose, o
         </>
       )}
 
-      {step === 'failed' && error && (
+      {step === 'failed' && error && failedPhase === 'execute' && UNKNOWN_RESULT.has(error.code) && (
+        <>
+          <div className="alert alert-warn" role="alert">
+            <p>
+              <strong>{t('confirm.unknownResult', { action: actionLabel })}</strong>
+            </p>
+            <p>{t('confirm.unknownResultHelp')}</p>
+          </div>
+          <div className="button-row">
+            <button type="button" onClick={close} autoFocus>
+              {t('common.close')}
+            </button>
+            <a className="button push-end" href="/audit">
+              {t('confirm.toAudit')}
+            </a>
+          </div>
+        </>
+      )}
+
+      {step === 'failed' && error && !(failedPhase === 'execute' && UNKNOWN_RESULT.has(error.code)) && (
         <>
           <ErrorView
             error={error}

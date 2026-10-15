@@ -8,7 +8,7 @@ WARDOGS のコミュニティサーバーを運営している人向けの、**�
 - プログラミングの知識は要りません。この手順書のとおりに、画面上でボタンを押して値を入力していけば使えます。
 - このパネルは非公式のツールです。WARDOGS の開発元・販売元とは関係ありません。RCON(後述)の仕様は公式の資料が見つかっておらず、**非公式の資料をもとに作っています**。サーバーのバージョンによっては一部の操作が使えないことがあります(使えない操作のボタンは自動で押せなくなります)。
 
-> 開発中です。現在は設計段階で、画面はまだ「準備中」です。
+> **公開前です。** 画面と API は実装済みで、付属のモック RCON で動作確認しています。本物の WARDOGS サーバーでの確認はまだです(RCON の仕様が非公式資料ベースのため)。下の「Deploy to Cloudflare」ボタンとフォーク手順の `<<REPO_URL>>` は、リポジトリを公開したときに実際の URL に差し替えます。
 
 ---
 
@@ -239,7 +239,7 @@ Cloudflare Workers は IP アドレスを直接指定して接続できません
 2. `.dev.vars.example` を `.dev.vars` にコピーし、次のように値を入れる(`.dev.vars` は `.gitignore` 済みでコミットされません)
    - `ADMIN_PASSWORD`: 16 文字以上の任意の文字列(ローカル用。本番と同じ値にしない)
    - `RCON_URL`: `http://localhost:7776`(`127.0.0.1` のような IP アドレスは使えない設計のため、`localhost` と書く)
-   - `RCON_PASSWORD`: モックの既定値 `mock-rcon-password-for-local-dev-only`(または、モックを起動するときに環境変数 `MOCK_RCON_PASSWORD` で指定した値)。`ADMIN_PASSWORD` とは別の値にする
+   - `RCON_PASSWORD`: モックの既定値(`scripts/mock-rcon.mjs` の先頭に書いてある公開のダミー値。または、モックを起動するときに環境変数 `MOCK_RCON_PASSWORD` で指定した値)。`ADMIN_PASSWORD` とは別の値にする。**本物のサーバーの RCON パスワードはローカル開発で絶対に使わない**
 3. `pnpm db:migrate:local`(ローカルの D1 に表を作る。初回だけ)
 4. 端末を 2 つ開き、先に `pnpm mock:rcon`、次に `pnpm dev` を起動する(モックのポートは環境変数 `MOCK_RCON_PORT` で変えられる。既定 7776)
 5. ブラウザで `pnpm dev` が表示した URL を開き、`ADMIN_PASSWORD` でログインする

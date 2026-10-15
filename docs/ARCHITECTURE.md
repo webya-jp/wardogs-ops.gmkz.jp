@@ -148,6 +148,10 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
            → audit_log を succeeded / failed に UPDATE → 結果を返す
 ```
 
+記録の範囲(2026-10-15 QA M-2 を受けた決定): execute のトークン検証失敗(`CONFIRM_INVALID` / `CONFIRM_EXPIRED`)と prepare の `CAPABILITY_MISSING` も `audit_log` に 1 行(`status=failed`、`error_code` 付き、`confirm_nonce` なし)残す。入力検証の失敗(400)と、D1 が使えないときにしか起きない `WRITES_DISABLED` は記録しない(後者は Workers Logs に操作種別・コード・sessionTag のみ出す)。ログイン失敗は `audit_log` に書かず、5.6 の `login_throttle` と `LOGIN_FAILURES_HIGH` 警告に任せる(D1 書き込み枠の節約)。
+
+画面側(2026-10-15 QA M-1): execute の応答を受け取れなかった場合(`NETWORK` / `INTERNAL_ERROR` / `RCON_TIMEOUT`)は RCON 側で実行済みの可能性があるため「結果不明」と表示し、再実行ボタンは出さず操作ログで確認させる(新しい prepare は新しい nonce になり、二重実行を防げないため)。
+
 **確認方式の決定: サーバー発行の確認トークンによる二段階(prepare → execute)**。根拠:
 
 1. 確認ダイアログに出す内容(対象プレイヤー名・正規化済みの操作内容)を Worker が RCON の現在値から決めて返すので、「画面で見た内容」と「実行される内容」を params のハッシュで結び付けられる。クライアントだけの `confirm()` では保証できない。
@@ -222,6 +226,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 | 接続元ごと(`ip:<HMAC 先頭 16 桁>`。IPv6 は /64) | 15 分の窓で失敗 5 回 → その窓の終わりまでロック |
 | ロック中 | パスワードを評価しない。失敗回数も増やさない(書き込みを増やさない) |
 | 全体(`global`) | 失敗回数を数えるだけ。1 時間に 50 回を超えたら画面上部に警告(`SetupWarning` の `LOGIN_FAILURES_HIGH`、`/api/session` の `warnings`)。**全体ロックはしない**(第三者が運営者を締め出せてしまうため。総当たりへの備えは 16 文字以上のパスワードで行う) |
+| 判定の順序 | 評価の前に試行回数を UPSERT で加算(`RETURNING`)し、上限超なら拒否、成功時に行を削除する(並行リクエストで回避されないよう原子的に。2026-10-15 QA M-3) |
 | 失敗時の待ち | 約 300 ms(応答を遅らせる。Workers の CPU 時間には数えられない) |
 | D1 が無い場合 | isolate 内のメモリで同じ規則を近似(isolate ごとに独立し、再起動で消える。弱いことを /setup で表示) |
 

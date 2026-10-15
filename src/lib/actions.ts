@@ -7,8 +7,9 @@ import type {
   ExecuteResponse,
   PrepareResponse,
   ValidationIssue,
+  WriteAction,
 } from '../types/api';
-import { finishAudit, insertPending, lastKnownName, logWithoutAudit } from './audit';
+import { finishAudit, insertPending, lastKnownName, logWithoutAudit, recordRejected } from './audit';
 import type { RconConfig } from './config';
 import { claimNonceInMemory, issueConfirmToken, verifyConfirmToken } from './confirm';
 import { isPlainObject } from './http';
@@ -20,7 +21,11 @@ import { getCapabilities, invalidateCapabilities } from './rcon/capabilities';
 import { normalizeMaps, normalizePlayers } from './rcon/normalize';
 import { buildWriteRequest, READ_ROUTES, routeKey } from './rcon/routes';
 import type { SessionData } from './session';
-import { isDestructive, targetSteamIdOf, validateActionRequest } from './validate';
+import { isDestructive, isWriteAction, targetSteamIdOf, validateActionRequest } from './validate';
+
+function actionOf(body: unknown): WriteAction | null {
+  return isPlainObject(body) && isWriteAction(body.action) ? body.action : null;
+}
 
 export type ActionOutcome<T> = { ok: true; data: T } | { ok: false; code: ApiErrorCode; opts?: ErrorOptions };
 
@@ -45,19 +50,48 @@ function fromRcon(r: Extract<RconResult, { ok: false }>): ActionOutcome<never> {
   return { ok: false, code: r.code, opts };
 }
 
+/**
+ * RCON を呼ぶ前の拒否を監査ログに 1 行残して返す(D1 が無ければ Workers Logs に操作種別・コード・sessionTag だけ)。
+ * 記録に失敗しても拒否の応答は変えない
+ */
+async function reject<T>(
+  ctx: ActionContext,
+  action: WriteAction | null,
+  params: Record<string, unknown>,
+  code: ApiErrorCode,
+): Promise<ActionOutcome<T>> {
+  const sessionTag = ctx.session.sid.slice(0, 8);
+  if (ctx.db && action) {
+    const steamId = typeof params.steamId === 'string' ? params.steamId : null;
+    await recordRejected(ctx.db, {
+      now: ctx.now ?? Date.now(),
+      event: action,
+      operator: ctx.session.operator,
+      sessionTag,
+      ipHash: ctx.ipHash,
+      targetSteamId: steamId,
+      params,
+      errorCode: code,
+    }).catch(() => undefined);
+  } else {
+    logWithoutAudit(action ?? 'unknown', code, sessionTag);
+  }
+  return { ok: false, code };
+}
+
 function invalid(fields: Record<string, ValidationIssue>): ActionOutcome<never> {
   return { ok: false, code: 'VALIDATION_FAILED', opts: { fields } };
 }
 
 export async function prepareAction(ctx: ActionContext, body: unknown): Promise<ActionOutcome<PrepareResponse>> {
-  if (!ctx.writesEnabled) return { ok: false, code: 'WRITES_DISABLED' };
+  if (!ctx.writesEnabled) return reject(ctx, actionOf(body), {}, 'WRITES_DISABLED');
   const v = validateActionRequest(body);
   if (!v.ok) return invalid(v.fields);
   const req = v.request;
 
   const caps = await getCapabilities(ctx.rcon, ctx.deps);
   const capability: CapabilityState = caps.write[req.action];
-  if (capability === 'missing') return { ok: false, code: 'CAPABILITY_MISSING' };
+  if (capability === 'missing') return reject(ctx, req.action, req.params as Record<string, unknown>, 'CAPABILITY_MISSING');
 
   // 対象の名前解決
   let targetName: string | null = null;
@@ -101,11 +135,14 @@ export async function prepareAction(ctx: ActionContext, body: unknown): Promise<
 }
 
 export async function executeAction(ctx: ActionContext, body: unknown): Promise<ActionOutcome<ExecuteResponse>> {
-  if (!ctx.writesEnabled) return { ok: false, code: 'WRITES_DISABLED' };
-  if (!isPlainObject(body) || typeof body.confirmToken !== 'string') return { ok: false, code: 'CONFIRM_INVALID' };
-  const v = validateActionRequest({ action: body.action, params: body.params });
-  // prepare で検証済みの params と一致するはずなので、検証に通らないものはトークン不一致として扱う
-  if (!v.ok) return { ok: false, code: 'CONFIRM_INVALID' };
+  // WRITES_DISABLED は D1 が使えないときだけ起きるので、記録は Workers Logs のみになる
+  if (!ctx.writesEnabled) return reject(ctx, actionOf(body), {}, 'WRITES_DISABLED');
+  const v = validateActionRequest(isPlainObject(body) ? { action: body.action, params: body.params } : null);
+  // prepare で検証済みの params と一致するはずなので、検証に通らないものはトークン不一致として扱う。
+  // action が分からないもの(event に入れられない)は記録しない
+  if (!isPlainObject(body) || typeof body.confirmToken !== 'string' || !v.ok) {
+    return reject(ctx, actionOf(body), v.ok ? (v.request.params as Record<string, unknown>) : {}, 'CONFIRM_INVALID');
+  }
   const req: ActionRequest = v.request;
 
   const now = ctx.now ?? Date.now();
@@ -115,7 +152,7 @@ export async function executeAction(ctx: ActionContext, body: unknown): Promise<
     sid: ctx.session.sid,
     now,
   });
-  if (!tk.ok) return { ok: false, code: tk.code };
+  if (!tk.ok) return reject(ctx, req.action, req.params as Record<string, unknown>, tk.code);
 
   const built = buildWriteRequest(req.action, req.params);
   const route = routeKey(built.route);

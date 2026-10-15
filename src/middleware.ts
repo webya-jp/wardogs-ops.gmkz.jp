@@ -3,7 +3,7 @@
 // 2. CSRF(GET / HEAD 以外は Origin / Sec-Fetch-Site 検査。API は 403 JSON、ページは 403 の簡易 HTML)
 // 3. ログイン Cookie の検証(未ログイン → ページは /login へ 303、API は 401 UNAUTHENTICATED)
 // 4. 応答にセキュリティヘッダと Cache-Control: no-store
-// 例外: /login・/setup は未ログインで通す。/setup は設定不足でも通す。静的アセット(/_astro/*)はここを通らない(念のため除外)。
+// 例外: /login・/setup は未ログインで通す。/setup は設定不足でも通す。静的アセット(/_astro/*)は本来ここを通らない(念のため除外。それ以外は除外しない)。
 import { defineMiddleware } from 'astro:middleware';
 import { checkConfig } from './lib/config';
 import { checkSameOrigin } from './lib/csrf';
@@ -16,7 +16,7 @@ import { getTranslator, resolveLanguage } from './i18n';
 const PUBLIC_PATHS = new Set(['/login', '/setup']);
 
 function isAssetPath(pathname: string): boolean {
-  return pathname.startsWith('/_astro/') || pathname.startsWith('/_image') || pathname === '/favicon.ico' || pathname === '/favicon.svg';
+  return pathname.startsWith('/_astro/');
 }
 
 function normalizePathname(pathname: string): string {

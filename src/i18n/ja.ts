@@ -166,6 +166,9 @@ export const ja = {
   'confirm.failed': '{action} を実行できませんでした。',
   'confirm.prepareFailed': '確認の準備ができませんでした。',
   'confirm.restart': '最初からやり直す',
+  'confirm.unknownResult': '{action} の結果が不明です。',
+  'confirm.unknownResultHelp': '応答を受け取れなかったため、実行されたかどうか分かりません。二重に実行しないよう、状態または操作ログを再読み込みして確認してください。',
+  'confirm.toAudit': '操作ログを開く',
 
   // 状態(/)
   'status.title': 'サーバーの状態',
