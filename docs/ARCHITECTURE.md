@@ -565,6 +565,7 @@ login_throttle の最悪値が上限に近いため、**global の失敗が 1 �
 - **C-3** Workers の fetch の送信元 IP を公式に列挙する資料は無い(AllowedHosts に書けない前提で設計した)。
 - **C-4** Deploy to Cloudflare ボタンが無料プランで使えるか(Workers Builds は Free 可と確定)。
 - **C-5** ボタン経由で D1 が自動作成され、`database_id` 省略の設定で動くか。ボタンが作成した ID をコピー先リポジトリに書き戻すか。**`wrangler d1 migrations apply DB --remote` は D1 が存在しないと失敗する(wrangler 4.151 のソースで確認: "Couldn't find a D1 DB named ...")** ため、`deploy` スクリプトは「`wrangler deploy`(ここで作成)→ マイグレーション」の順にした(指示の順序と逆。理由は本項)。新しいコードが新しいマイグレーションより一瞬先に動くため、マイグレーションは追加のみ(列・テーブルの追加)とし、コードはテーブル・列が無い場合も段階 1 として動くようにする。
+  - **実機確認(2026-10-16、CLI 経由)**: `wrangler deploy`(4.151)で `database_id` 省略の D1 が自動作成・バインドされ、`wrangler.jsonc` は書き換えられなかった(ID は Cloudflare 側で保持)。続く `wrangler d1 migrations apply DB --remote` も成功。Secrets 未設定の状態でトップが `/setup` に誘導されることも確認。**ボタン経由**の自動作成と Secrets 入力フォームは未確認のまま。
 - **C-6** ボタンのフォームで入力した Secrets が実行時 Secrets(Settings > Variables and Secrets)に入るか。`.dev.vars.example` の空値・コメント行の扱い。
 - **C-7** ボタンの設定画面で Worker 名を変えた場合に、`wrangler.jsonc` の `name` との一致(Workers Builds の要件)が保たれるか。
 - **C-8** `wrangler.jsonc` の `vars`(`AUDIT_REQUIRED`)がダッシュボードで設定した値をデプロイ時に上書きするか。
