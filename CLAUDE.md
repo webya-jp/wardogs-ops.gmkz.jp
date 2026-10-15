@@ -13,8 +13,8 @@ WARDOGS コミュニティサーバーの**運営用 RCON 操作パネル**。�
 ## 決定事項
 
 - 技術: **Astro + React アイランド**(`@astrojs/cloudflare`、`@astrojs/react`)。Astro は SSR・ルーティング・認証ミドルウェア、React は操作画面(状態の定期取得、kick / ban / broadcast 等のボタン)
-- 認証: **アプリ内のパスワードログイン**。Worker Secret `ADMIN_PASSWORD` 1 つ。ログイン後は HMAC 署名付き Cookie(`Secure; HttpOnly; SameSite=Strict`)、Origin 検査による CSRF 対策、Worker 内の簡易なログイン失敗制限
-- RCON への経路: **Worker から RCON HTTP API を直接 fetch する**。接続先は Secret `RCON_URL`、パスワードは Secret `RCON_PASSWORD`
+- 認証: **アプリ内のパスワードログイン。Worker Secrets は使わない(2026-10-16 ユーザー決定)**。初回アクセス時の `/setup` で管理パスワードを登録し、PBKDF2 + salt で D1 に保存。初期設定時に生成したランダムな `instance_key`(D1 保存)から HKDF で用途別の鍵を派生し、セッション Cookie の HMAC と RCON パスワードの暗号化に使う。Cookie は `Secure; HttpOnly; SameSite=Strict`、Origin 検査による CSRF 対策、ログイン失敗制限あり
+- RCON への経路: **Worker から RCON HTTP API を直接 fetch する**。接続先(ホスト名・ポート)と RCON パスワード(AES-GCM で暗号化)は **D1 の `servers` テーブル**に保存し、ログイン後の「サーバー」画面から**サーバーを何台でも追加・編集・削除**できる(2026-10-16 ユーザー決定)。ヘッダーのセレクトで操作対象を切り替える。環境変数での指定は廃止
 - デプロイ: **「Deploy to Cloudflare」ボタン + Workers Builds の Git 連携**を第一候補。バインディング(D1 など)は `wrangler.jsonc` に宣言し自動プロビジョニングに任せる。ドメインは既定で workers.dev、カスタムドメインは任意
 - データ: D1 = 操作の監査ログ(誰が・いつ・何を・結果)、人数の履歴スナップショット。自動プロビジョニングで作れない場合は KV のみ、または「ログ無し」でも動くよう段階的に有効化する。R2 は当面使わない
 - 画面(初期スコープ): 状態 / プレイヤー / BAN 一覧 / 操作ログ。設定ファイルの編集は第 2 段階
@@ -30,14 +30,15 @@ WARDOGS コミュニティサーバーの**運営用 RCON 操作パネル**。�
 
 ## 明示するトレードオフ(設計書・README に書く)
 
-- RCON の全権パスワードが Cloudflare の Secret に置かれる(RCON に読み取り専用トークンは無い)
+- RCON の全権パスワード(暗号化済み)と暗号化鍵が同じ D1 に置かれる。D1 を読める相手(Cloudflare アカウントの乗っ取り)には復号できるため、アカウントの 2 要素認証が前提(RCON に読み取り専用トークンは無い)
+- デプロイ直後、管理者が未登録の間は誰でも `/setup` で登録できる。デプロイしたらすぐ登録すること、先に登録されていたら D1 の `admins` 行を消してやり直すことを README に書く
 - RCON ポートがインターネットから到達可能である必要がある。Workers の送信元 IP は固定されないため、AllowedHosts で絞れない可能性がある(サーバー提供元の仕様次第。要確認)
 - 認証は単一パスワードのため、強いパスワードを使う前提とし、漏えい時の差し替え手順を README に書く
 
 ## 正本と調査資料
 
 - 企画の正本: `docs/PLAN.md`。構成の正本: `docs/ARCHITECTURE.md`(architect が起草)。API 契約: `docs/API.md`
-- 構築手順(非エンジニア向け): `README.md`(1. フォーク 2. Deploy to Cloudflare 3. Secrets の入力 4. サーバー側で RCON を有効化、の順)
+- 構築手順(非エンジニア向け): `README.md`(1. フォーク 2. Deploy to Cloudflare 3. URL を開いて管理パスワードを登録 4. サーバー側で RCON を有効化し、画面からサーバーを追加、の順)
 - RCON の仕様調査: `docs/research/wardogs-rcon.md`(非公式資料ベース。「確定 / 未検証 / 推測」の区別を守る。実在ルートは `GET /v1/capabilities` で確定する)
 - Cloudflare のデプロイ方式調査: `docs/research/cloudflare-deploy-button.md`
 - Discord の仕様調査: `docs/research/discord-bot-capabilities.md`(本リポジトリでは参考。ボット本体は別リポジトリ)
@@ -47,7 +48,7 @@ WARDOGS コミュニティサーバーの**運営用 RCON 操作パネル**。�
 
 - 言語は日本語。日時は JST
 - **非公開情報を一切書かない**: ホスティング業者名、サーバーのリージョン、ゲームサーバー ID、Discord 招待リンク・ギルド ID、審査基準、運営者のメールアドレス実値、RCON の接続先ホスト名・IP。必要なら `<<NON_PUBLIC>>` のプレースホルダーを使う
-- Secrets(`ADMIN_PASSWORD`、`RCON_URL`、`RCON_PASSWORD` など)の値はリポジトリ・ログ・ドキュメントに置かない。`.dev.vars.example` はキー名のみ・値は空
+- パスワード・ホスト名などの実値はリポジトリ・ログ・ドキュメントに置かない。テストとモックはダミー値のみ
 - 「スポンサー」など金銭を連想させる表記・意匠は出さない
 - 推測で断定しない。一次資料で確認できない項目は「要確認」として設計書に残す
 - 利用者が Cloudflare ダッシュボードで行う操作は、画面の名称と順番を README に書き、CLI(wrangler)を必須にしない。CLI は開発者向けの補足にとどめる
