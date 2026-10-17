@@ -72,3 +72,30 @@ export type SettingsKey = (typeof SETTINGS_KEYS)[number];
 
 /** RCON パスワード(画面から入力したもの)がこれ未満なら一覧で警告を出す(Worker からは強制できない) */
 export const RCON_PASSWORD_WARN_LENGTH = 24;
+
+// ============================================================
+// Cron Trigger(docs/ARCHITECTURE.md 17.3・17.4。wrangler.jsonc の triggers.crons)
+// ============================================================
+
+/**
+ * Cron の式(UTC。1 分ごと)。wrangler.jsonc の triggers.crons(最上位と env.gmkz)と一致させる。
+ * scheduled ハンドラ(src/worker.ts)はこの値と controller.cron を比べず、1 本だけの前提で動く
+ */
+export const RECORDING_CRON = '* * * * *';
+/**
+ * 掃除(古い生データ・試合・日次カウンタの削除。17.7)を行う分(UTC の「分」)。毎時この分の実行でだけ行う。
+ * 0 分を避けるのは、他のスケジュール処理と時刻が重なりにくくするため(根拠は弱い。値は任意)
+ */
+export const CLEANUP_MINUTE_UTC = 17;
+/** 1 回の掃除で消す行数の上限(1 つの表あたり。D1 の 1 クエリの実行時間と書き込み枠を抑える) */
+export const CLEANUP_BATCH_ROWS = 2000;
+/** Cron 1 回で同時に問い合わせるサーバー数(Workers の同時接続 6 の内側に収める) */
+export const CRON_RCON_CONCURRENCY = 3;
+
+/**
+ * scheduled ハンドラが受け取る env のうち、Cron の処理(src/lib/cron.ts。backend)が使うもの。
+ * fetch と同じ Worker・同じバインディングなので、`import { env } from 'cloudflare:workers'` で取っても同じ値になる。
+ * Cron の処理はログイン・CSRF・middleware を通らない(リクエストではないため)。D1 の判定(probeD1)も行わず、
+ * 最初のクエリが失敗したら(D1 が無い・0003 未適用)何もせずに終える
+ */
+export type CronEnv = Pick<OpsEnv, 'DB' | 'TIMEZONE'>;

@@ -1,6 +1,6 @@
 # wardogs-ops 構成(正本)
 
-作成日: 2026-10-15(JST)/ 更新: 2026-10-17(画面構成をサイドバー + ヘッダータブに。第 9 章・13.8・15.5)、2026-10-16(複数サーバー対応、第 15 章。Worker Secrets の廃止、第 5 章・第 16 章)/ 担当: architect
+作成日: 2026-10-15(JST)/ 更新: 2026-10-17(スコア記録とキルフィードの観測モード、第 17 章。Cron の同居、受信エンドポイントの認証の例外 5.8)、2026-10-17(画面構成をサイドバー + ヘッダータブに。第 9 章・13.8・15.5)、2026-10-16(複数サーバー対応、第 15 章。Worker Secrets の廃止、第 5 章・第 16 章)/ 担当: architect
 上位の正本: `docs/PLAN.md`(2026-10-15 改訂版)。契約: `docs/API.md`、`src/types/api.ts`、`src/types/env.ts`、`db/schema.sql`、`db/migrations/`、`wrangler.jsonc`。
 RCON の仕様は非公式資料ベース(`docs/research/wardogs-rcon.md`)。本書の「未検証」「要確認」は第 14 章の番号(R-n / C-n / I-n / M-n / K-n / U-n)で参照する。
 
@@ -8,7 +8,7 @@ RCON の仕様は非公式資料ベース(`docs/research/wardogs-rcon.md`)。本
 
 - 任意の WARDOGS コミュニティサーバー運営者が、**フォーク(またはボタンで複製)→ Deploy to Cloudflare → パネルの URL を開いて管理パスワードを登録(`/setup`)→ サーバー側で RCON を有効化 → パネルの画面でサーバー(ホスト名・ポート・RCON パスワード)を追加** だけで使える運営パネル。**Cloudflare 側で Secrets・環境変数を入力する手順は無い**(2026-10-16。第 5 章)。サーバーは何台でも追加できる(上限 20 台。第 15 章)。
 - 運営者 1〜数人が 1 つの管理パスワードを共有して使う規模を想定する。アカウント管理・権限分離はしない(D1 `admins` は将来に備えて複数行を許す形だけ用意する。8.7)。
-- Cloudflare 無料プラン(Workers / D1)の範囲で動かす。KV・R2・Cron・Access・Tunnel は使わない(第 2 段階の選択肢は 12 章)。
+- Cloudflare 無料プラン(Workers / D1)の範囲で動かす。KV・R2・Access・Tunnel は使わない(第 2 段階の選択肢は 12 章)。Cron は 1 本だけ使う(1 分ごと。スコア記録。2026-10-17、第 17 章)。
 - 公開リポジトリのテンプレートなので、リポジトリには接続先・パスワード等を一切含めない。利用者固有の値(管理パスワードのハッシュ、鍵、RCON の接続先と暗号化したパスワード)はすべて利用者自身の D1 に置く。
 
 ## 2. 構成図
@@ -21,14 +21,22 @@ Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
   ├─ middleware: D1 の判定 → CSRF(Origin)検査 → 管理者の登録の有無(未登録なら /setup)→ ログイン Cookie 検証 → セキュリティヘッダ
   ├─ /setup(初期設定: 管理パスワードの登録)、/login, /logout(フォーム POST。JS 無しで動く)
   ├─ ページ: / 状態, /players, /bans, /audit, /servers(ヘッダーで対象サーバーを選ぶ。15.5)
-  ├─ /api/*: 読み取り(status / players / bans / maps / capabilities / audit / session / servers)
-  │          書き込み(actions/prepare → actions/execute の二段階)、サーバー設定(servers の追加・変更・削除・接続テスト)
+  ├─ /api/*: 読み取り(status / players / bans / maps / capabilities / audit / session / servers / matches / feed/raw)
+  │          書き込み(actions/prepare → actions/execute の二段階。スコア記録の開始・停止を含む)、サーバー設定(servers の追加・変更・削除・接続テスト・受信用トークン)
+  ├─ /api/ingest/events: キルフィードの受信(ゲームサーバーから。ログイン・CSRF 検査の対象外、サーバーごとの受信用トークンで認証。17.6)
+  ├─ scheduled(Cron、1 分ごと): 記録中のサーバーだけ RCON の status / players を取りサンプルを保存(17.3)
   ├─ D1「DB」(必須): admins / settings(instance_key)/ servers / audit_log / server_snapshots / login_throttle / settings_audit_log
+  │                  / match_recordings / match_samples / server_feeds / feed_raw_events / feed_daily(0003)
   └─ fetch(選択中のサーバーへ。Authorization: Bearer <そのサーバーの RCON パスワード>、タイムアウト付き、リダイレクト非追従)
         │  平文 HTTP(C-1 要確認)。送信元 IP は固定されない(C-3)
         ▼
      RCON HTTP API(http://<ホスト名>:<ポート>。D1 servers に登録。IP アドレス直指定は不可)
      ゲームサーバー側: ServerSettings.ini の [/Script/WDRCON.WDRCONSettings](R-3, R-4 要確認)
+
+ゲームサーバー(WDServerFeed。設定した場合のみ)
+  │  POST https://<パネルのホスト名>/api/ingest/events(Authorization: Bearer <受信用トークン>。約 2 秒ごと。K-1 要確認)
+  ▼
+Cloudflare Worker「wardogs-ops」の /api/ingest/events(上と同じ Worker)
 ```
 
 ブラウザが RCON を直接叩くことはない。RCON パスワード(D1 の暗号文とその平文)、管理パスワードのハッシュ、`instance_key` と派生した鍵はブラウザに一切渡らない(クライアントバンドル・HTML・API 応答のいずれにも含めない)。画面から登録したサーバーのホスト名・ポートだけは、編集のためにログイン済みの運営者に表示する(15.2)。Worker Secrets は使わない(第 5 章)。
@@ -41,7 +49,7 @@ Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
 | アダプタ | `@astrojs/cloudflare@^14.3.4`、`output: 'server'` | 全ページにログイン判定を掛けるため、静的ページは作らない(静的アセットは middleware を通らない) |
 | セッション機能 | Astro Sessions は無効(`session: false`) | 有効だと KV「SESSION」が自動作成される。KV 書き込み 1,000/日の枠と自動プロビジョニングの対象を増やさない |
 | 画像 | `imageService: 'passthrough'` | Images バインディング・sharp を要求しない |
-| Worker 設定 | `wrangler.jsonc`(`name: wardogs-ops`、`workers_dev: true`、`preview_urls: false`、`compatibility_date: 2026-09-01`、`nodejs_compat`) | 2024-09-02 以降で `allow_custom_ports` が既定有効(7776 等への fetch) |
+| Worker 設定 | `wrangler.jsonc`(`name: wardogs-ops`、`main: ./src/worker.ts`、`workers_dev: true`、`preview_urls: false`、`compatibility_date: 2026-09-01`、`nodejs_compat`、`triggers.crons: ["* * * * *"]`) | 2024-09-02 以降で `allow_custom_ports` が既定有効(7776 等への fetch)。`main` と Cron は 17.4 |
 | D1 | `database_id` 省略の自動プロビジョニング(`database_name: wardogs-ops-db`) | wrangler 4.45.0 以上(open beta)。本リポジトリは 4.151 |
 | パッケージ管理 | pnpm 10 | 参考実装と同じ |
 
@@ -50,10 +58,11 @@ Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
 ├─ astro.config.mjs / wrangler.jsonc / tsconfig.json / package.json
 ├─ db/
 │  ├─ schema.sql              # 現行スキーマのまとめ(参照用)
-│  └─ migrations/0001_init.sql, 0002_servers.sql(複数サーバー・管理者・設定。8 章)
+│  └─ migrations/0001_init.sql, 0002_servers.sql(複数サーバー・管理者・設定)、0003_recordings.sql(スコア記録・キルフィード。8 章・17.1)
 ├─ docs/                      # PLAN / ARCHITECTURE / API / research
 └─ src/
    ├─ env.d.ts                # Cloudflare.Env と App.Locals の型付け
+   ├─ worker.ts               # Worker のエントリ(fetch は Astro の handle に委譲、scheduled = Cron。17.4)
    ├─ middleware.ts           # 設定チェック、ヘッダ、認証、CSRF(backend)
    ├─ i18n/                   # 多言語化(第 13 章。architect が雛形、文言の追加は各担当)
    │  ├─ ja.ts                # 日本語カタログ(キーの正本。型で全キーを強制)。言語を足すときは en.ts 等
@@ -79,6 +88,9 @@ Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
    │  ├─ audit.ts             # 監査ログ
    │  ├─ snapshots.ts         # 人数スナップショット
    │  ├─ servers.ts           # サーバーの検証・暗号化・CRUD・解決・接続テスト(第 15 章)
+   │  ├─ recordings.ts        # スコア記録の開始・停止・終了・サンプル・一覧(17.2・17.5)
+   │  ├─ cron.ts              # scheduled の本体(17.3・17.7)
+   │  ├─ feed.ts              # キルフィードの受信・トークン・生データ(17.6)
    │  └─ rcon/
    │     ├─ client.ts         # fetch、タイムアウト、エラー分類
    │     ├─ routes.ts         # 本パネルが使う RCON ルートの一覧(API.md 6 章)
@@ -86,13 +98,16 @@ Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
    │     └─ normalize.ts      # RCON 応答の正規化
    ├─ pages/                  # frontend-pages(API は backend)
    │  ├─ index.astro          # 状態
-   │  ├─ players.astro / bans.astro / audit.astro / servers.astro / killfeed.astro(準備中。9.6)
+   │  ├─ players.astro / bans.astro / audit.astro / servers.astro / killfeed.astro(スコア推移と受信した生データ。17.9)
    │  ├─ login.astro          # GET 表示 / POST 認証
    │  ├─ logout.ts            # POST のみ
    │  ├─ setup.astro          # 初期設定(管理パスワードの登録)/ D1 の不備の案内。GET 表示 / POST 登録
    │  └─ api/
    │     ├─ session.ts / status.ts / players.ts / bans.ts / maps.ts / capabilities.ts / audit.ts
    │     ├─ servers/index.ts(GET・POST)/ servers/[id].ts(PUT・DELETE)/ servers/[id]/test.ts(POST)
+   │     ├─ servers/[id]/feed.ts(GET・PUT)/ servers/[id]/feed-token.ts(POST・DELETE)
+   │     ├─ matches/index.ts(GET)/ matches/[id]/samples.ts(GET)/ feed/raw.ts(GET)
+   │     ├─ ingest/events.ts(POST。ゲームサーバーからの受信。ログイン不要・トークン認証)
    │     └─ actions/prepare.ts / actions/execute.ts
    ├─ components/             # React アイランド(frontend-pages)
    └─ layouts/
@@ -169,6 +184,8 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 許容する副作用: `GET /api/status` は 5 分に最大 1 行を `INSERT OR IGNORE` で書く。冪等で、クロスサイトからは Cookie が付かないため悪用できない(2026-10-15 QA S-9)。
 
 根拠: (1) Cron を Astro の Worker に同居させるにはカスタムエントリが必要で、`@astrojs/cloudflare@14` の公式ガイドに記載が無い(`./handler` の export は存在するが組み合わせは未検証、C-10)。(2) Cron はアカウントあたり 5 個までで、テンプレート利用者の既存 Worker と枠を取り合う。(3) 人数履歴グラフは PLAN で後回し。常時記録が必要になったら第 2 段階で Cron 化する(12 章)。
+
+**2026-10-17 の追記**: スコア記録(第 17 章)のために Cron を 1 本使うことになった(カスタムエントリの方法は Astro 公式ガイドで確認し、ローカルで動作を確認した。17.4)。それでも人数スナップショットは**この節の方式のまま**とし、スコア記録の `match_samples` とは併存させる(17.1 の 1。粒度・保持・始まり方が違い、常時の Cron 記録にすると 1 台あたり 1 日 1,440 回の RCON 呼び出しが記録の有無に関係なく発生するため)。
 
 ## 5. 認証の詳細
 
@@ -290,6 +307,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 - `/api/*` の POST は `Content-Type: application/json` を必須(他サイトの単純フォームからは送れない)。
 - Astro 標準の origin 検査(`security.checkOrigin`)は**無効化**し、上記の middleware の検査に一本化する。標準検査はフォーム形式の POST だけが対象で JSON 等は見ず、middleware より先に本文を読まずに 403(セキュリティヘッダ無し)を返し、開発サーバーでは直後の同一接続のリクエストが 500 になるため(`docs/API_TEST.md` 4 章。本番は C-19)。middleware の検査は GET / HEAD 以外の全リクエストが対象で、拒否前に本文を読み捨てる。
 - 許可オリジンを設定値で持たない(workers.dev でもカスタムドメインでも、リクエスト自身のオリジンと比較する)。
+- **例外: `POST /api/ingest/events`**(キルフィードの受信。2026-10-17)。ゲームサーバーが送るため `Origin` も `Sec-Fetch-Site` も無い。この 1 つのパスだけ CSRF 検査とログイン Cookie の検査を行わず、受信用トークンで認証する(5.8)。Cookie を使わないので CSRF の対象にならない(他サイトから送らせても、トークンを知らなければ 401)。
 
 ### 5.6 ログイン失敗のレート制限
 
@@ -308,9 +326,22 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
 
 - 全応答: `X-Frame-Options: DENY`、`Content-Security-Policy` に少なくとも `frame-ancestors 'none'; base-uri 'none'; form-action 'self'`、`Referrer-Policy: same-origin`(`no-referrer` だと同一オリジンのフォーム送信で `Origin: null` になり CSRF 検査に落ちる)、`X-Content-Type-Options: nosniff`、`X-Robots-Tag: noindex, nofollow`。HTML と API は `Cache-Control: no-store`。`script-src` を絞るかは Astro のアイランド用インラインスクリプトとの両立を確認してから決める(C-15)。
 - 未ログインのページ要求は `/login` へ 303、API は 401 `UNAUTHENTICATED`。
-- D1 の不備・管理者の未登録は 5.1.1 の表のとおり(ページは `/setup` へ 303、API は 503 `NOT_CONFIGURED` / `SETUP_REQUIRED`)。middleware の順序は「D1 の判定 → CSRF → 管理者の登録の有無 → ログイン Cookie → ヘッダ」。
+- D1 の不備・管理者の未登録は 5.1.1 の表のとおり(ページは `/setup` へ 303、API は 503 `NOT_CONFIGURED` / `SETUP_REQUIRED`)。middleware の順序は「D1 の判定 → CSRF → 管理者の登録の有無 → ログイン Cookie → ヘッダ」。`/api/ingest/events` は「D1 の判定 → ヘッダ」だけ(5.8)。
 - `/setup` は未ログインでも見られる。出すのは D1 の不備の種類(`D1_MISSING` / `D1_NOT_MIGRATED`)か登録フォームだけ。登録済みなら何も出さずに `/login` へ。
 - ログ(`console.*`、Workers Logs)に出してよいのは、ルート名・HTTP ステータス・所要時間・エラーコードのみ。管理パスワード・RCON パスワード(平文・暗号文)・パスワードのハッシュ・`instance_key`・派生した鍵・Cookie・`Authorization`・RCON の接続先・生の IP・プレイヤーのメッセージ本文は出さない。
+
+### 5.8 受信エンドポイントの認証(`/api/ingest/events`。2026-10-17)
+
+| 項目 | 決定 |
+|---|---|
+| 対象 | 正規化したパス(末尾の `/` を除く)が **`/api/ingest/events` と完全一致**するリクエストだけ。前方一致・大文字小文字の違い・`//api/...` は対象外(通常の `/api/*` として扱い、Cookie が無ければ 401)。定数 `FEED_INGEST_PATH` |
+| middleware で行うこと | D1 の判定(不備なら 503 `NOT_CONFIGURED`)とセキュリティヘッダだけ。**CSRF 検査・管理者の有無・ログイン Cookie の検査はしない**(`locals.session` は常に null) |
+| エンドポイントで行うこと | 17.6 の順序(メソッド → トークンの形式 → D1 の 1 行と定数時間の比較 → レート制限 → `Content-Type` → サイズ → JSON → 保存の判定) |
+| トークン | サーバーごと。`wof1.<ServerId>.<32 バイトの乱数>`。D1 には SHA-256 のハッシュだけ。発行時に 1 回だけ表示(17.6) |
+| レート制限 | サーバーごとに 1 分 90 回(isolate 内)。トークンの検証の後で数える(形式不正・不一致のリクエストで正しいサーバーの枠を使わせないため) |
+| ログ | トークン・`Authorization`・本文・接続元 IP を出さない(5.7) |
+
+ログイン画面と同じく、誰でもリクエストを送れること(Worker のリクエスト数を消費させられること)は防げない。トークンが漏れても RCON・パネルの操作はできず、観測データを汚されるだけ(再発行で止める)。
 
 ## 6. RCON 呼び出し
 
@@ -406,7 +437,7 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 
 ## 8. D1 スキーマ
 
-正本は `db/migrations/`(`0001_init.sql`、`0002_servers.sql`)。`db/schema.sql` は全マイグレーション適用後の参照用のまとめ。時刻はすべて UTC epoch ミリ秒。**本番稼働後のマイグレーションは追加のみ**(表・列・インデックスの追加。表の作り直し・列の削除・CHECK の変更はしない。C-5 のとおり新しいコードがマイグレーションより一瞬先に動くため)。
+正本は `db/migrations/`(`0001_init.sql`、`0002_servers.sql`、`0003_recordings.sql`)。`db/schema.sql` は全マイグレーション適用後の参照用のまとめ。時刻はすべて UTC epoch ミリ秒。**本番稼働後のマイグレーションは追加のみ**(表・列・インデックスの追加。表の作り直し・列の削除・CHECK の変更はしない。C-5 のとおり新しいコードがマイグレーションより一瞬先に動くため)。
 
 **0002 の書き換え(2026-10-16)**: 0002 はどの本番にも未適用(作者の本番は 0001 のみ)で利用者もまだいないため、複数サーバー(servers 等)に管理者(`admins`)と設定(`settings`)を足して 1 本に書き換えた。ローカルで旧 0002 を適用済みの D1 は作り直す(README「開発者向け」)。本番に適用した後は 0002 を変更しない。
 
@@ -448,6 +479,7 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 - status_snapshots / server_snapshots: 90 日より古い行を削除
 - login_throttle: `window_start` が 1 日より古い行を削除
 - servers / admins / settings: 掃除しない(運営者が削除するまで残す。`settings` の `instance_key` は消さない)
+- 0003 の表(match_recordings / match_samples / feed_raw_events / feed_daily / server_feeds)はログイン時ではなく、試合の終了時と Cron の毎時 17 分に掃除する(17.7)
 
 いずれも定数としてコードに持つ(vars にはしない。利用者の設定項目を増やさない)。
 
@@ -503,6 +535,28 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 - 将来 vars(`LANGUAGE` / `TIMEZONE`)を画面の「設定」に移すときもこの表に置く(値は非機密)。API で返すときは返してよいキーを列挙し、`instance_key` を決して含めない。
 - `instance_key` を別表にする案は採らない(表を増やさず、キーの列挙で十分に区別できるため)。
 
+### 8.9 0003 で既存の表に足した列
+
+- `servers.score_cap`(INTEGER、NULL 可、CHECK 1〜100,000): スコア記録の上限の設定値。NULL = 既定 100(17.5)。
+- `settings_audit_log.confirm_nonce`(TEXT、UNIQUE 索引 `idx_settings_audit_log_nonce`): `record_start` / `record_stop` の確認トークンの nonce(17.2)。他の行は NULL。8.6 の event に `record_start` / `record_stop` / `record_end` / `feed_token_issue` / `feed_token_revoke` / `feed_settings_update` が加わる(`SETTINGS_EVENTS`。トークンの値・ハッシュは `params_json` に入れない)。
+
+### 8.10 match_recordings(0003)
+
+試合 1 つ = 1 行。`id`(AUTOINCREMENT)、`server_id`・`server_name`(開始時点)、`status`(`recording` / `ended`、CHECK)、`started_at`・`ended_at`、`end_reason`(`MATCH_END_REASONS`、CHECK なし)、`map`(開始時点。マップ変更の検出用)、`score_cap`・`score_cap_source`、`empty_since`、`last_scores_json`(終了時の陣営スコア)、`created_at`・`updated_at`。索引: 部分 UNIQUE `(server_id) WHERE status = 'recording'`(1 サーバー 1 記録中)、`(server_id, id)`。
+
+### 8.11 match_samples(0003、WITHOUT ROWID)
+
+主キー `(recording_id, bucket_minute)`(`bucket_minute = floor(unix 秒 / 60)`)。`taken_at`、`map`、`players_current`・`players_max`、`faction_scores_json`(`FactionScore[]`)、`cash_total`(REAL)、`faction_stats_json`(`FactionStat[]`: 陣営ごとの人数と cash の合計)。プレイヤー名・Steam ID は入れない。
+
+### 8.12 server_feeds(0003)
+
+`server_id`(PK)、`token_hash`(`sha256$<base64url>`)、`token_hint`(末尾 4 文字)、`token_created_at`、`enabled`、受信の状況(`last_received_at`・`last_stored_at`・`last_rejected_at`・`last_rejected_reason`・`last_dropped_at`・`last_dropped_reason`。1 分に 1 回までの間引き更新)、`created_at`・`updated_at`。
+
+### 8.13 feed_raw_events / feed_daily(0003)
+
+- `feed_raw_events`: `id`、`server_id`、`received_at`、`bytes`、`event_count`、`recording_id`(受信時に記録中だった試合)、`body`(受けた JSON 文字列のまま。最大 64 KiB)。索引 `(server_id, id)`、`received_at`。保持 7 日。**Steam ID・プレイヤー名を含み得る**ため、ログイン済みの運営者にだけ返す。
+- `feed_daily`(WITHOUT ROWID): 主キー `(server_id, day)`(`day` = UTC の日。`server_id = 0` は全体)、`batches`、`bytes`。1 日の上限の判定用(17.6)。
+
 ## 9. 画面一覧
 
 2026-10-17 ユーザー決定: ログイン後の画面を「**左に固定サイドバー + 上にヘッダータブ + 中央にメイン**」の構成にする(参考: WARDOGS 向けの既存 RCON デスクトップアプリ)。ログイン前の画面(`/setup`、`/login`)は従来どおりサイドバー・タブの無い 1 カラム(`narrow`)。
@@ -518,7 +572,7 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 | `/bans` | BAN(Bans) | BAN 一覧と解除(9.4) | あり | 手動更新 |
 | `/audit` | 操作ログ(Audit) | 「操作」「設定変更」の切り替え、サーバーでの絞り込み(9.4、15.7) | あり | 手動更新 |
 | `/servers` | 設定(Settings) | サーバーの一覧・追加・編集・有効/無効・接続テスト・削除(15.7)。将来はアプリ設定も(9.4) | あり | 手動更新 |
-| `/killfeed` | キルフィード(Killfeed) | **枠だけ**。「準備中」の説明のみ(9.6) | なし | − |
+| `/killfeed` | キルフィード(Killfeed) | 試合の選択・スコア / cash の推移のグラフ・受信した生データ(観測モード)(9.6、17.9) | あり | 記録中の試合は 60 秒、生データは手動更新 |
 
 - パスは変えない(既存のブックマーク・README の案内を壊さないため)。タブ名と URL が一致しないのは `/`(概要)と `/servers`(設定)だけ。
 - サイドバーは、ログイン後のすべてのページ(上表の `/` 以下)に出す。「手動更新」のページでも、サイドバーの状態は 30 秒ごとに更新される(9.3)。
@@ -571,11 +625,11 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
   1. **サーバー切り替え**: 現在ヘッダーにあるセレクトをそのまま移す(15.5 の GET フォーム、JS があれば選択で即送信、現在のパスを保つ、選択肢の印〔無効・要パスワード再入力・設定に不備〕も従来どおり)。その下に「サーバーを追加」リンク(`/servers?server=<現在の id>#add`。`ServersPanel` は `location.hash === '#add'` のとき追加フォームを開いて最初の欄にフォーカスする)。0 台のときはセレクトを出さず「サーバーを追加」だけ。
   2. **サーバーカード**: 表示名(運営者が付けた名前)、ゲーム内サーバー名(`status.serverName`)、現在のマップ(`status.map`。表示名はメインの概要タブだけで引く)、人数(現在 / 最大)、ゲームモード(`status.experiences` を「・」区切りで。空なら行ごと出さない)、**ホスト名:ポート**(`ServerSummary.host` / `port`。等幅、長いホスト名は折り返す。2026-10-17 ユーザー判断で表示可)、接続状態(9.3 の表)。
   3. **試合の要点**: 陣営スコア(先頭 `SIDEBAR_FACTION_LIMIT` = 3 陣営。超える分は「ほか {n} 陣営」。陣営名は RCON の生データ)、次のマップ(`rotation.nextMapName ?? rotation.nextMap`)、ローテーション位置(`rotation.nowIndex` を 1 始まりにして「{now} / {count}」。count が無ければ「{now} 番目」)。値が無い項目は行ごと出さない。全部無ければブロックごと出さない。
-  4. **縦ナビ**: 状態 / プレイヤー / BAN / 操作ログ / サーバー設定。**タブと同じ定義**(`src/layouts/nav.ts` の 1 つの配列)から作り、ラベルも同じキー(`tabs.*`)を使う(タブと縦ナビで呼び名が食い違わないように)。リンクには `?server=<現在の id>`(15.5)。キルフィードは縦ナビには出さない(準備中のため)。
+  4. **縦ナビ**: 状態 / プレイヤー / BAN / 操作ログ / サーバー設定。**タブと同じ定義**(`src/layouts/nav.ts` の 1 つの配列)から作り、ラベルも同じキー(`tabs.*`)を使う(タブと縦ナビで呼び名が食い違わないように)。リンクには `?server=<現在の id>`(15.5)。キルフィードは縦ナビには出さない(準備中のため。2026-10-17 の第 17 章で縦ナビにも出すことにした。17.9)。
   5. **最下部**(`margin-top: auto` で下端に寄せる): 操作者名(`sidebar.session.operator` / `operatorAnonymous`)、ログインの有効期限(`formatDateTime`、タイムゾーンは vars `TIMEZONE`)、ログアウト(従来の `POST /logout` フォーム)。
 - **サイドバーに置かないもの**: スポンサー画像・説明欄など金銭を連想させる要素、ホスティング業者の案内・広告、ゲームサーバー ID(非公開情報。`GET /v1/server-id` は呼ばない)、RCON パスワードやその長さ・`passwordShort`。
 - **ヘッダー**: アプリ名(`/` へのリンク。`?server=` 付き)と、幅 1024px 未満のときだけサイドバーの開閉ボタン(9.5)。操作者名・期限・ログアウトはサイドバー最下部へ移したのでヘッダーには出さない。
-- **タブ**: 概要 / プレイヤー / BAN / 操作ログ / 設定 / キルフィード。現在のページは `aria-current="page"`。キルフィードは「準備中」の小さな印(`tabs.comingSoon`)付きで `/killfeed` へのリンク(9.6)。タブはページ遷移で切り替える。ARIA の `tablist` / `tab` は使わない(各タブは別 URL の通常のリンクで、JS 無しでも動き、`?server=` の規則〔15.5〕をそのまま使えるため。`tablist` はページ内のパネル切り替え用の役割で、ページ遷移のリンクに付けると支援技術の操作説明と食い違う)。
+- **タブ**: 概要 / プレイヤー / BAN / 操作ログ / 設定 / キルフィード。現在のページは `aria-current="page"`。キルフィードは `/killfeed` へのリンク(2026-10-17 の第 17 章で「準備中」の印を外す。9.6)。タブはページ遷移で切り替える。ARIA の `tablist` / `tab` は使わない(各タブは別 URL の通常のリンクで、JS 無しでも動き、`?server=` の規則〔15.5〕をそのまま使えるため。`tablist` はページ内のパネル切り替え用の役割で、ページ遷移のリンクに付けると支援技術の操作説明と食い違う)。
 - サイドバーの縦ナビとタブは同じ行き先の重複になる。要望どおり両方置くが、幅 1024px 未満では縦ナビを出さない(9.5)。重複を嫌う場合は `nav.ts` の `inSidebar` を外すだけで済む(要確認 U-16)。
 
 ### 9.3 サイドバーのデータ源と更新
@@ -623,12 +677,14 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 
 | タブ | メイン | 主なキー |
 |---|---|---|
-| 概要(`/`) | 状態の詳細(ゲーム内サーバー名、マップ〔表示名と id〕、人数、陣営スコア〔全陣営〕、ゲームモード、ローテーション位置、次のマップ、最終更新時刻と「更新」)。**よく使う操作**: 全体メッセージ(broadcast)、マップ変更、試合終了。各操作のボタン・フォームの直下に「何が起きるか」の短い説明(`action.help.<action>`) | `status.*`、`action.help.broadcast` / `map` / `match_end` |
+| 概要(`/`) | 状態の詳細(ゲーム内サーバー名、マップ〔表示名と id〕、人数、陣営スコア〔全陣営〕、ゲームモード、ローテーション位置、次のマップ、最終更新時刻と「更新」)。**よく使う操作**: 全体メッセージ(broadcast)、マップ変更、試合終了。各操作のボタン・フォームの直下に「何が起きるか」の短い説明(`action.help.<action>`)。**スコア記録**の節(記録を開始 / 停止、記録中の状態。17.9) | `status.*`、`action.help.broadcast` / `map` / `match_end` / `record_start` / `record_stop`、`recording.*` |
 | プレイヤー(`/players`) | 接続中一覧(名前、陣営、K/D、ping、Steam ID)。行ごとに kick / 個別メッセージ / BAN。一覧の上に 3 操作の説明を 1 回だけ出す(行ごとには出さない。モバイルで行が長くなるため) | `players.*`、`action.help.kick` / `message` / `ban` |
 | BAN(`/bans`) | BAN 一覧(Steam ID、日時、理由、実行者、監査ログからの名前)。解除。一覧の上に解除の説明 | `bans.*`、`action.help.unban` |
 | 操作ログ(`/audit`) | 従来どおり(「操作」「設定変更」の切り替え、サーバーでの絞り込み。既定は全サーバー〔U-9〕。サイドバーで選んだサーバーに自動では絞らない) | `audit.*` |
-| 設定(`/servers`) | 従来の「サーバー設定」(15.7)。ページ見出しは「設定」、その下に「サーバー」の節を置く。将来アプリ設定(言語・タイムゾーン。D1 `settings`、8.8)を足すときは同じページに「アプリ」の節を足す(パスは `/servers` のまま。節が増えて長くなったら `/settings` を作り、`/servers` はそのサーバーの節として残す) | `servers.*`、`tabs.settings` |
-| キルフィード(`/killfeed`) | 「準備中」の説明だけ(9.6)。API を呼ばない | `killfeed.*` |
+| 設定(`/servers`) | 従来の「サーバー設定」(15.7)。ページ見出しは「設定」、その下に「サーバー」の節を置く。2026-10-17: 選択中のサーバーの「スコア記録」(上限)と「キルフィード(観測モード)」(受信用トークン・ini の案内・受信の状況)の節を足す(17.9)。将来アプリ設定(言語・タイムゾーン。D1 `settings`、8.8)を足すときは同じページに「アプリ」の節を足す(パスは `/servers` のまま。節が増えて長くなったら `/settings` を作り、`/servers` はそのサーバーの節として残す) | `servers.*`、`tabs.settings`、`settings.recording.*`、`feed.*` |
+| キルフィード(`/killfeed`) | 試合の選択(現在 / 直近 5 試合)、スコア / cash の推移のグラフ(SVG)、試合の要約、受信した生データ(観測モード)。17.9 | `killfeed.*`、`chart.*`、`match.endReason.*`、`feed.*` |
+
+- 要確認 U-22(2026-10-17、実装しない): 実サーバーの陣営名・陣営ごとの人数は `players[].faction` から集計できる見込み(スコア記録のサンプルでは集計する。17.1)。サイドバーの「試合の要点」に陣営ごとの人数を足すか(足すなら `/api/status` に `/v1/players` の呼び出しが 30 秒ごとに増える)。
 
 **操作の説明(`action.help.*`)の規則**
 
@@ -647,16 +703,11 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 - **ページ全体に横スクロールを出さない**(`body` の `overflow-x: hidden` で隠すのではなく、はみ出す要素を作らない。ホスト名・Steam ID・マップ id は `overflow-wrap: anywhere`、表は既存の 1 列表示〔`ops.css` の `max-width: 719px`〕を使う。グリッドの列は `minmax(0, 1fr)`)。
 - 確認: 375×812 で、横スクロールが無いこと、開閉・タブ・サーバー切り替え・ログアウトが操作できることをスクリーンショットで確認する(QA)。
 
-### 9.6 キルフィード(将来。枠だけ)
+### 9.6 キルフィード(2026-10-17 に第 17 章で設計を確定)
 
-- 今回はタブと `/killfeed` ページだけを作り、「準備中」と理由の短い説明(`killfeed.*`)を出す。API・D1 の追加は無い。
-- 理由: RCON HTTP API には接続・キルのイベントを取得するルートが無い。資料上、イベントはゲームサーバー側から外部へ送る `WDServerFeed` だけ(`docs/research/wardogs-rcon.md` 2.4。`killed` のみ、未検証)。
-- 実現するには**別タスク**として次を決める(14 章 K-1〜K-5):
-  1. Worker に受信エンドポイント(資料では `Url + /api/ingest/events` に Bearer トークン付きで約 2 秒ごとにバッチ POST)を足す。ログイン Cookie・Origin 検査の対象外にし、サーバーごとの受信用トークン(RCON パスワードとは別。D1 にハッシュで保存)で認証する。
-  2. ゲームサーバーの設定(`[WDServerFeed] Url / Token`)に Worker の URL とトークンを入れる手順(設定ファイルの編集は第 2 段階の範囲)。
-  3. 量の見積り: 2 秒ごとの POST は 1 台で最大 43,200 リクエスト/日になり、無料枠 10 万/日を 2〜3 台で使い切る。D1 の書き込みも同様。保存せず画面に流すだけにするか、間引くかを含めて決める。
-  4. 画面への届け方(30 秒ポーリングで足りるか)。
-- 上記が決まるまで、`/killfeed` はログイン済みの人にだけ見える静的な案内ページのままにする。
+- 2026-10-17 までは「準備中」の案内だけのページだった(RCON HTTP API にはキル・接続のイベントを取るルートが無く、資料上はゲームサーバーから外部へ送る `WDServerFeed` だけのため。`docs/research/wardogs-rcon.md` 2.4、未検証)。
+- 2026-10-17 のユーザー決定で、キルフィードタブは (1) スコア記録の推移のグラフ(17.9)と、(2) キルフィードの**第 1 段階: 観測モード**(受信した生データをそのまま表示。17.6)になった。キル数・ヘッドショット率などの集計は**第 2 段階**で、実サーバーで形式を確かめた後に設計する(17.10)。
+- 旧版の検討事項(受信エンドポイント、ゲーム側の設定、量の見積り、届け方)は 17.6・17.8・17.9 で決めた(14 章 K-1〜K-5 の更新を参照)。
 
 ### 9.7 frontend-pages への引き継ぎ(ファイル単位)
 
@@ -757,6 +808,8 @@ backend の作業: `src/lib/rcon/normalize.ts`(`experiences` と `/v1/rotation` 
 | login_throttle | 失敗 1 回 = 2 行(ip + global)。ロック中は書かないので 1 接続元あたり 15 分に最大 5 回 | 接続元ごとの上限だけだと 100 接続元が 24 時間続けて 100 × 96 × 5 × 2 = 96,000 で上限に近い。global の上限(下記、1 時間 200 回)で頭打ちにし、最悪 200 × 2 × 24 = 9,600 行(インデックス更新が数えられても約 2 万行、上限の 2 割以内) |
 | 合計(通常) | | 約 1,500(上限の 1.5%)。複数サーバーでの増分は 15.9(最悪でも上限の約 12% 増) |
 
+スコア記録とキルフィードの受信(2026-10-17)による増分は 17.8(受信を 2 台以上で常時続けると Worker のリクエスト数が無料枠を超え得る)。
+
 login_throttle の最悪値が上限に近いため、**global の失敗が 1 時間に 200 回を超えたら以後その時間は throttle を書かない**(`GLOBAL_D1_WRITE_LIMIT`。2026-10-15 QA S-11 で 1,000 から引き下げ)(ロック判定はメモリ近似に切り替える)実装とする。読み取りは監査ログ 50 件 × 閲覧回数程度で 500 万行/日に遠い。ストレージは 1 年で数十 MB 以内(5 GB に遠い)。
 
 ## 12. 撤回した旧方針とトレードオフ
@@ -772,10 +825,11 @@ login_throttle の最悪値が上限に近いため、**global の失敗が 1 �
 | RCON ポート | Tunnel 経由でインターネットに出さない | **RCON ポートがインターネットから到達可能である必要**。平文 HTTP のため経路上でパスワードが読まれ得る(C-1、R-5) | 強いパスワード、`PasswordHash` で ini に平文を残さない、TLS が使えるなら https(R-3) |
 | 接続元の制限 | AllowedHosts に中継機の IP 1 つ | **Workers の送信元 IP は固定されず公式に列挙できないため、AllowedHosts で絞れない**(C-3)。全許可にするしかない可能性が高い(書式・挙動は R-4) | パスワードの強度(32 文字以上推奨)、RCON 側の監査ログ `/v1/audit` での AUTH_FAIL の確認(第 2 段階で画面化) |
 | パネルの入口 | Access の前段で遮断 | workers.dev 上のログイン画面がインターネットに公開される | 16 文字以上のパスワード、接続元ごとのロック、`preview_urls: false` |
+| キルフィードの受信(2026-10-17) | − | **`/api/ingest/events` はログイン不要でインターネットに公開される**(ゲームサーバーから送るため)。トークンが漏れると観測データに偽の行を入れられる。誰でもリクエスト数を消費させられる。ゲームが 2 秒ごとに送ると、それだけで 1 台 1 日約 4.3 万リクエストを使う | サーバーごとのトークン(ハッシュで保存、再発行・取り消し可)、64 KiB・1 分 90 回・1 日の上限、受信は 1 台ずつ・確認が済んだら ini の `Url` を消す案内(17.6・17.8) |
 
 Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワードが Worker Secret(または ADMIN_PASSWORD / SESSION_SECRET 由来の鍵で暗号化した D1)にあり、「D1 だけが漏れた」場合は平文を得られなかった。現方針ではその場合も復号できる。一方で、Cloudflare アカウントを乗っ取られた場合は以前も Secrets ごと漏れていたため、守れる範囲の差は「D1 だけが漏れる」場合に限られる。利用者が Cloudflare 側で値を入力・管理しなくてよい簡単さを優先した(ユーザー決定)。
 
-将来の選択肢(実装しない。短く記録するだけ): (a) 利用者が自前ドメインを持つ場合に Cloudflare Access をログインの前段に追加する、(b) RCON 側で TLS が使える場合の https 化、(c) 中継プロキシを任意オプションとして復活させ AllowedHosts を絞る、(d) Cron による常時スナップショット、(e) `PUT /v1/config` による設定変更(第 2 段階)、(f) 任意の Secret(例 `KEY_ENCRYPTION_SECRET`)を設定した場合だけ `instance_key` をそれで包む(D1 だけの漏洩に備えたい上級者向け)。
+将来の選択肢(実装しない。短く記録するだけ): (a) 利用者が自前ドメインを持つ場合に Cloudflare Access をログインの前段に追加する、(b) RCON 側で TLS が使える場合の https 化、(c) 中継プロキシを任意オプションとして復活させ AllowedHosts を絞る、(d) Cron による常時スナップショット(Cron 自体はスコア記録で使うようになった。17.3)、(e) `PUT /v1/config` による設定変更(第 2 段階)、(f) 任意の Secret(例 `KEY_ENCRYPTION_SECRET`)を設定した場合だけ `instance_key` をそれで包む(D1 だけの漏洩に備えたい上級者向け)。
 
 ## 13. 多言語化
 
@@ -894,6 +948,8 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **R-17** 開発元による公式ドキュメント・RCON の外部利用に関する規約(未確認)。
 - **R-19** `/v1/status` の `experiences[]` が「ゲームモード」を表すか(要素の形式・値の例)。`/v1/rotation` の `entries[]` の要素の形式(マップ id のフィールド名、表示名の有無)と `enabled: false` の意味。違っていた場合、サイドバーのゲームモードは非表示にし、次のマップは `rotation.nextIndex` だけに戻す(9.3)。**添字の起点も未検証**: 画面は `nowIndex` / `nextIndex` を 0 始まりとみなして +1 表示し、次のマップを `entries[nextIndex]` で引いている(モックも 0 始まり)。実機が 1 始まりなら表示と次のマップが 1 つずれるため、確定までは推定表示(QA 2026-10-17 layout M-1)。
 - **R-20** `POST /v1/match/end` の後にローテーションの次のマップへ進むか、`POST /v1/match/map` が進行中の試合をどう扱うか。操作の説明(`action.help.*`。9.4)の文言はこれを断定しない形にしてあり、確認後に直す。
+- **R-21** `/v1/status` の `scoreCap` / `matchSeconds` の有無(ビルド依存と資料にある)・意味・型。`factionScores[].score` が上限に向かって**増える**方式か(減っていく方式ならスコア記録の `score_cap` の判定〔17.5〕を「0 に達したら」等に直す)。
+- **R-22** `/v1/players` の `players[].cash` の意味(所持している額か、試合の累計か)と型、`players[].faction` の表記が `status.factionScores[].faction` と一致するか(違うと陣営ごとの cash・人数のグラフの線がスコアの線と別名になる。17.1)。`/v1/players` が無いビルドの有無。
 - **R-18** 書き込みルートの成功時の応答(ステータスが 200 / 204 のどちらか、本文の有無と形式)。現在は 2xx なら本文に関係なく成功とする。
 
 ### Cloudflare(一次資料で未確定、または実機確認が必要)
@@ -907,8 +963,8 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **C-6**(2026-10-16 に不要)ボタンのフォームで入力した Secrets の扱い。Secrets を廃止し `.dev.vars.example` を削除したため確認不要。残る確認は「`.dev.vars.example` が無いとき、ボタンの設定画面に Secrets の入力欄が出ないこと」だけ(C-4 と合わせて確認)。
 - **C-7** ボタンの設定画面で Worker 名を変えた場合に、`wrangler.jsonc` の `name` との一致(Workers Builds の要件)が保たれるか。
 - **C-8** `wrangler.jsonc` の `vars`(`LANGUAGE` / `TIMEZONE`)がダッシュボードで設定した値をデプロイ時に上書きするか。vars を画面の設定(D1 `settings`)に移せば不要になる(10.1)。
-- **C-9** Cron 実行が 10 万リクエスト/日に含まれるか(第 2 段階で Cron 化する場合)。
-- **C-10** `@astrojs/cloudflare@14` のカスタムエントリ(`@astrojs/cloudflare/handler` の `handle` は export されていることを確認済み)に `scheduled` を同居させられるか。
+- **C-9** Cron 実行が 10 万リクエスト/日に含まれるか(2026-10-17 から 1 分ごとの Cron を使う。数えられても 1,440/日。17.8)。
+- **C-10** `@astrojs/cloudflare@14` のカスタムエントリに `scheduled` を同居させられるか。**2026-10-17 更新**: Astro 公式ガイドの「Custom entrypoint API」(`main: ./src/worker.ts` + `handle` の委譲)で方法を確認し、ローカル(`pnpm build`、`wrangler dev --test-scheduled` の `/cdn-cgi/handler/scheduled`)で動作を確認した(17.4)。残りは**本番(Workers Builds・Deploy ボタン)で Cron が 1 分ごとに起動すること**の確認。
 - **C-11** RCON のホスト名がプロキシ(オレンジクラウド)だと 7776 番が使えない。DNS only(グレークラウド)必須であることの実機確認。
 - **C-12** `redirect: 'manual'` の挙動と、無料プランでの個別サブリクエストの実際のタイムアウト。
 - **C-13** ボタン / Workers Builds が `package.json` の `deploy` スクリプトをどう実行するか。pnpm には組み込みの `pnpm deploy` コマンドがあり、`pnpm deploy` と書くとスクリプトではなく組み込みが動く。手動設定では `pnpm run deploy` と書く(README に記載)。
@@ -919,6 +975,9 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **C-18** Workers Logs(`observability.enabled`)の無料枠と保持期間。
 - **C-20** 本番の Workers での PBKDF2-SHA256 の CPU 時間(1 万回で何 ms か。ローカルの workerd では約 4.4 ms)と、無料プランの 10 ms の扱い(超過時に即 Error 1102 になるか、多少の超過が許されるか)。Workers の PBKDF2 が 100,000 回を超える値を拒否するか(ローカルの workerd では 100,001 回も通った)。Workers Logs の CPU 時間で確認し、余裕があれば `PASSWORD_HASH_ITERATIONS` を上げる(5.2)。
 - **C-21** D1 のダッシュボード(Storage & Databases → D1 → データベース)で、非エンジニアが `admins` の行を削除できる具体的な画面操作(テーブル表示から行を削除できるか、Console で `DELETE FROM admins;` を実行する必要があるか)。README 6 章の手順をこれで確定する。
+- **C-22** Cron Triggers の環境(`env.gmkz`)への引き継ぎの有無(引き継がない前提で両方に書いた)と、配送の性質(同じ分に 2 回起き得るか・取りこぼしがあるか。どちらでも壊れない設計。17.3)。設定の反映に最大 15 分かかる(公式)ため、デプロイ直後の数分は Cron が動かないことがある。
+- **C-23** 本番の D1 で `WITHOUT ROWID` の表・部分 UNIQUE 索引(`WHERE status = 'recording'`)・`INSERT ... ON CONFLICT DO UPDATE ... WHERE ... RETURNING` が使えること(ローカルでは確認済み)。`db.batch()` の各文が「Worker 呼び出し 1 回あたりのクエリ数 50」に 1 つずつ数えられるか(数えられる前提で上限を決めた。17.3)。
+- **C-24** 本番での Cron 1 回の CPU 時間(記録中 8 台で 10 ms に収まるか)と、受信 1 件の CPU 時間(64 KiB の JSON.parse を含む)。
 - **C-19** 本文を読まずに返した応答の直後、同じ接続の次のリクエストが 500 になる事象(開発サーバーで観測。`docs/API_TEST.md` 4 章)が本番の Workers でも起きるか。Astro 標準の origin 検査は無効化し、middleware と API は拒否前に本文を読み捨てる対策をしたが、他の早期応答(アダプタ・アセット等)で起きないかを含めて確認する。
 
 ### 多言語化(13 章)
@@ -940,13 +999,16 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **M-6** `audit_log.event` の CHECK により、第 2 段階で RCON の書き込み操作(kill・陣営変更など)を足すと audit_log に記録できない。そのときは CHECK の無い新しい操作ログ表への移行(旧表は読み取り専用で残す)を設計する。
 - **M-7** AES-256-GCM の復号コスト(1 行あたり)の実測。15.3 の見込み(十数マイクロ秒)を本番の Workers で確認する。初期設定の登録し直し(5.1.1)では全サーバー分(最大 20 行)を復号する。
 
-### キルフィード(9.6。将来の別タスク)
+### キルフィード・スコア記録(第 17 章)
 
-- **K-1** `WDServerFeed` の送信仕様(`Url + /api/ingest/events`、Bearer、約 2 秒ごとのバッチ、イベントは `killed` のみ)の真偽と本文の形式。接続・切断イベントが無いこと。
-- **K-2** 受信エンドポイントの認証(サーバーごとのトークンの発行・保存・差し替え)と、ログイン Cookie・Origin 検査の対象外にする範囲。
-- **K-3** 受信のリクエスト数(1 台で最大 43,200/日)と D1 の書き込みが無料枠に収まる方法(間引き・保存しない・集約)。
-- **K-4** ゲームサーバーの設定ファイルに URL とトークンを入れる手順(設定の編集は第 2 段階)と、サーバーの提供元が設定を許すか。
-- **K-5** 画面への届け方(30 秒ポーリング、または別の仕組み)と保持期間。
+- **K-1**(未検証のまま。観測モードで確かめる)`WDServerFeed` の送信仕様(`Url + /api/ingest/events`、Bearer、約 2 秒ごとのバッチ、イベントは `killed` のみ)の真偽と本文の形式(配列か `events` を持つオブジェクトか、各イベントの項目。17.10 の表)。接続・切断イベントが無いこと。`Content-Type` が `application/json` か(違えば 415 で拒否され、設定タブに `content_type` と出る。その場合は受け付ける形式を広げる)。
+- **K-2**(2026-10-17 に決定 → 17.6・5.8)サーバーごとのトークン(`wof1.<ServerId>.<乱数>`、SHA-256 のハッシュで保存、発行時に 1 回だけ表示、再発行・取り消し)。ログイン Cookie・CSRF 検査の対象外は `/api/ingest/events` の完全一致だけ。
+- **K-3**(方針は決定、量は要確認)空のバッチは D1 に書かず 204。1 日の保存の上限(サーバーごと 1,000 件・4 MiB、全体 4,000 件・16 MiB)と保持 7 日。**ゲームが「イベントが無いときも 2 秒ごとに送る」か**で Worker のリクエスト数が大きく変わる(送るなら 1 台 1 日約 4.3 万。17.8)。観測で確認し、送る場合は「観測は 1 台ずつ、確認が済んだら `Url` を消す」の案内を強める。
+- **K-4** ゲームサーバーの設定の書き方: セクション名(`[WDServerFeed]` そのものか、`[/Script/...]` 形式か)、キー名(`Url` / `Token`)、`Url` の末尾の `/` の扱い、変更の反映に再起動が要るか、サーバーの提供元が設定を許すか。
+- **K-5**(2026-10-17 に決定 → 17.9)生データは手動更新(最新 20 件)。スコアの推移は記録中の試合だけ 60 秒ごと。保持は生データ 7 日、試合は直近 5 試合・30 日。
+- **K-6** 受信に 4xx / 5xx を返したときのゲームの挙動(再送するか、間隔を空けるか、送信をやめるか)。設計は「上限・無効で捨てるときも 204」にしてある(17.6)。429(1 分 90 回超)・401(トークン違い)で再送が増えないかを確認する。
+- **K-7** ゲームの送信が HTTPS(workers.dev の証明書)に対応しているか。HTTP で送ってくる場合に workers.dev・カスタムドメインがどう応答するか(リダイレクトに従わない送信元だと届かない)。
+- **K-8** 1 回の送信の大きさ(64 KiB で足りるか)と頻度(約 2 秒か。1 分 90 回の上限で足りるか)。
 
 ### 設計上の判断(ユーザー確認事項)
 
@@ -971,6 +1033,15 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **U-16** サイドバーの縦ナビとヘッダータブは同じ行き先を重複して持つ。要望どおり両方置き、幅 1024px 未満では縦ナビを出さない。ラベルは両方 `tabs.*` で揃える(タブ「概要」とナビ「状態」のような呼び名の違いを作らない)。推奨: このまま。重複が気になれば縦ナビを外す(`nav.ts` の 1 か所)。
 - **U-17** モバイルのサイドバーはドロワーではなく、ヘッダー直下の折りたたみパネル(JS 無しでは常に開く)。キルフィードはタブだけ出し、押すと準備中の案内ページ(`/killfeed`)を開く。
 - **U-18** サイドバーの状態(30 秒ごと)は BAN・操作ログ・設定タブでも動く。そのため Worker のリクエスト数が最大で約 2 倍になる(9.3。無料枠内)。推奨: このまま(どのタブでも人数と接続状態が見える方を優先)。
+
+以下は 2026-10-17 のスコア記録とキルフィード(第 17 章)で architect が決めた点(ユーザー確認待ち。推奨どおりなら決定事項として扱う)。
+
+- **U-19** 記録の開始・停止・自動終了と受信用トークンの発行・取り消しは、操作ログの「**設定変更**」タブ(`settings_audit_log`)に出す。`audit_log.event` の CHECK に値を足せないため(M-6)。推奨: このまま(ゲームサーバーを変える操作ではなく、パネルの状態を変える操作として扱う)。タブ名が合わなければ「設定・記録」等に変える(カタログ 1 か所)。
+- **U-20** 試合が終わった後、次の試合を自動では記録しない(毎回「記録を開始」を押す)。推奨: このまま(無料枠と、意図しない記録を避けるため)。連続記録は要望があれば第 2 段階。
+- **U-21** 画面・グラフの「cash」の表記。RCON の項目名(ゲーム内の通貨)をそのまま使う想定だが、「金銭を連想させる表記を出さない」規則との関係を確認したい。推奨: ゲーム内の値であることが分かる表記(例「ゲーム内 cash」)にし、スポンサー等の意匠とは無関係であることを保つ。
+- **U-22** サイドバーの試合の要点に陣営ごとの人数を足すか(9.4 の注記。今回は実装しない)。
+- **U-23** サイドバーに「記録中」の印を出すか(出すと `/api/matches` の取得が 30 秒ごとに増える。今回は出さない。17.9)。
+- **U-24** 同時に記録できるのは 8 台まで(Cron 1 回の D1 クエリ数の上限から。17.3)。キルフィードの生データの保存上限(サーバーごと 1 日 1,000 件・4 MiB、全体 4,000 件・16 MiB、7 日)。
 
 以下は 2026-10-16 の Worker Secrets 廃止に関するもの。U-11 はユーザー決定、U-12 以降は architect が決めた点(ユーザー確認待ち。推奨どおりなら決定事項として扱う)。
 
@@ -1169,3 +1240,323 @@ D1 必須化(2026-10-16)で、登録サーバーが使えない段階は無く�
 
 - README の 1〜6 章の詳細(見出しと概要は済み)を、frontend の `/setup` 完成後に画面の文言に合わせて書く。
 - `AUDIT_REQUIRED` の削除(U-12 の確認後)。
+
+## 17. スコア記録とキルフィード(2026-10-17)
+
+2026-10-17 ユーザー決定。本章が正本で、5・8・9・11・14 章の該当箇所は本章を参照する。契約は `src/types/api.ts`(スコア記録・キルフィードの節)、`src/types/env.ts`(Cron の節)、`db/migrations/0003_recordings.sql`、`wrangler.jsonc` の `triggers`、`docs/API.md` 4.1・8〜10 章。
+
+### 17.0 決定の要約
+
+| 項目 | 決定 |
+|---|---|
+| スコア記録の開始 | 概要タブの「記録を開始」。**書き込み操作と同じ二段階**(`prepare` → `execute`、確認ダイアログ)。操作の種類は `RecordingAction`(`record_start` / `record_stop`。`WriteAction` とは別系列。17.2) |
+| 記録の中身 | 開始時に 1 回、以後 **Cron(1 分ごと)** が記録中のサーバーだけ `GET /v1/status` と `GET /v1/players` を取り、1 分 1 行(陣営スコア・人数・マップ・cash の合計・陣営別の人数と cash)を `match_samples` に保存 |
+| 終了 | いずれかの陣営スコアが上限に達したら自動終了。保険: 「記録を停止」、マップの変化、人数 0 が 10 分、開始から 3 時間、サーバーの削除・無効化(17.5) |
+| 保持 | サーバーごとに記録中 1 + 終了済み 5 試合。それより古い試合・30 日より古い試合はサンプルごと削除(17.7) |
+| 人数スナップショットとの関係 | **併存**(`server_snapshots` は変えない。17.1) |
+| Cron の置き場所 | **Astro の Worker に同居**(`src/worker.ts` を `main` にし、`fetch` は Astro の `handle` に委譲、`scheduled` を足す。17.4) |
+| キルフィード | **第 1 段階: 観測モード**。`POST /api/ingest/events`(サーバーごとのトークンで認証。ログイン・CSRF 検査の対象外)で受けた本文を、上限付きでそのまま `feed_raw_events` に 7 日保存し、キルフィードタブで最新の生データを見せる。集計(第 2 段階)は実サーバーで形式を確かめてから(17.10) |
+| 操作の記録先 | `record_start` / `record_stop` / 自動終了 / トークンの発行・取り消しは `settings_audit_log`(操作ログの「設定変更」タブ)。`audit_log.event` の CHECK に値を足せないため(8.1、M-6。要確認 U-19) |
+
+### 17.1 データモデル(0003)
+
+テーブル定義は `db/migrations/0003_recordings.sql`(8.9〜8.13 に要約)。外部キーは張らない(15.2 と同じ。サーバーを削除しても記録は保持期間まで残す)。
+
+| 変更 | 目的 |
+|---|---|
+| `servers.score_cap`(ALTER ADD COLUMN、NULL = 既定 100) | 設定タブで変えるスコア上限 |
+| `settings_audit_log.confirm_nonce`(ALTER ADD COLUMN + UNIQUE 索引) | `record_start` / `record_stop` の確認トークンを 1 回限りにする(`audit_log.confirm_nonce` と同じ役割) |
+| `match_recordings`(新規) | 試合 1 つ = 1 行。部分 UNIQUE 索引 `(server_id) WHERE status = 'recording'` で 1 サーバー 1 記録中を D1 が保証する |
+| `match_samples`(新規、`WITHOUT ROWID`) | 1 分 1 行。主キー `(recording_id, bucket_minute)` で `INSERT OR IGNORE`(Cron の二重実行でも 1 行) |
+| `server_feeds`(新規) | サーバーごとの受信用トークン(SHA-256 のハッシュ)・有効/無効・受信の状況 |
+| `feed_raw_events`(新規) | 受信した本文(JSON 文字列のまま)。7 日保存 |
+| `feed_daily`(新規、`WITHOUT ROWID`) | 1 日(UTC)の保存件数・バイト数。サーバーごとと全体(`server_id = 0`) |
+
+決定と根拠:
+
+1. **`server_snapshots` とは併存**。`server_snapshots` は「誰かがパネルを開いている間、5 分に 1 行・90 日」の人数の履歴で、Cron を使わずに長期の傾向を見るためのもの。`match_samples` は「記録を開始した試合の間だけ、1 分に 1 行・直近 5 試合」で、粒度・保持・始まり方が違う。統合すると (a) 人数の履歴のために Cron を常時動かすことになる(4.4 の判断が変わる)、(b) 保持の規則が混ざる。統合の利点(表が 1 つ減る)より分けておく方が単純。Cron が記録中のサーバーの `server_snapshots` も書く案は採らない(書き込みが増えるだけで、読む画面が無い)。
+2. **陣営ごとの値は列ではなく JSON**(`faction_scores_json`、`faction_stats_json`)。陣営の数・名前はマップやモードで変わり得る(実サーバーでは 3 陣営と聞いているが、資料上は未検証)。グラフは 1 試合分(最大 181 行)を読んで画面で描くだけなので、SQL での陣営別の集計は要らない。
+3. **`match_samples` は `WITHOUT ROWID`**。主キー以外の索引を持たない表で、通常の表だと「行 + 主キーの自動索引」の 2 つを書くことになるため(行数の数え方は C-17)。
+4. **スコア上限の設定値は `servers` の列**。サーバーごとに 1 つの値で、`servers` の 1 行の読み取り(15.6 のサーバーの解決)で一緒に取れる。
+5. **キルフィードの設定は別表 `server_feeds`**。受信は 2 秒ごとに来得るため、`servers` の行(暗号化した RCON パスワードを含む)に受信の状況を書き込まない。トークン未発行のサーバーは行が無い。
+6. **終了理由・受信の拒否理由には CHECK を付けない**(コードの `MATCH_END_REASONS` / `FEED_*_REASONS` で検証)。理由を足すときにマイグレーション(CHECK は変更不可。8 章)を要らなくするため。`match_recordings.status` は 2 値で増えない見込みのため CHECK を付けた。
+7. 実機確認(2026-10-17、wrangler 4.151 のローカル D1): 0001 → 0002 → 0003 の適用、部分 UNIQUE 索引による 2 件目の「記録中」の拒否、`INSERT OR IGNORE` の重複無視、`score_cap` の CHECK、Cron の一覧取得が部分索引を使うこと(`EXPLAIN QUERY PLAN` で `USING COVERING INDEX idx_match_recordings_active`)。本番の D1 での `WITHOUT ROWID`・部分索引は C-23。
+
+### 17.2 記録の開始・停止(二段階)
+
+既存の `POST /api/actions/prepare` / `execute`(4.3)に乗せる。確認トークンの形式・検証の順序(署名 → セッション → action と params のハッシュ → 対象サーバーと宛先 `sv` / `sh` → 期限)は同じで、`a` に `record_start` / `record_stop` を許す(`src/lib/confirm.ts` の `isWriteAction` を `ConfirmableAction` の判定に広げる)。`destructive` は常に false(ゲームサーバーに何も書き込まないため。通常の確認ダイアログ)。capabilities の判定はしない(`write` の対象外)。
+
+**prepare**
+
+| action | 処理 | 失敗 |
+|---|---|---|
+| `record_start`(params `{}`) | サーバーの解決(15.6)→ そのサーバーが記録中なら拒否 → 全体の記録中が `MAX_ACTIVE_RECORDINGS`(8)以上なら拒否 → RCON `GET /v1/status`(5 秒)で現在のマップと `scoreCap` を読み、上限を決める(17.5)→ 確認トークン | `RECORDING_ALREADY_ACTIVE` / `RECORDING_LIMIT_REACHED`(409)、`RCON_*`(届かないサーバーの記録は始めない) |
+| `record_stop`(params `{ recordingId }`) | サーバーの解決 → `recordingId` がそのサーバーの記録中の試合か確認 → 確認トークン(RCON は呼ばない) | `RECORDING_NOT_ACTIVE`(409)、形式不正は 400(`fields.recordingId`) |
+
+応答は `RecordingPrepareResponse`(マップ・上限・止める試合。確認ダイアログの文はカタログ `confirm.record_start` / `confirm.record_stop`)。
+
+**execute**
+
+- `record_start`: トークン検証 → RCON `GET /v1/status`(5 秒)→ 成功したら `GET /v1/players`(5 秒。失敗しても続ける。cash と陣営別の値が null / 空になるだけ)→ 次を **1 つの `db.batch()`** で書く(M-2):
+  1. `INSERT INTO match_recordings (...)`(status `recording`、`map` = 開始時の `status.map`、上限と出所)
+  2. `INSERT OR IGNORE INTO match_samples (...)`(`recording_id` は `(SELECT id FROM match_recordings WHERE server_id = ? AND status = 'recording')`、`bucket_minute = floor(実行時刻 / 60000)`)
+  3. `INSERT INTO settings_audit_log (event = 'record_start', confirm_nonce, params_json = json_object('recordingId', <1 の id>, 'map', ...))`
+  - 部分 UNIQUE 索引の違反 → `RECORDING_ALREADY_ACTIVE`、`confirm_nonce` の違反 → `ALREADY_EXECUTED`(どちらも batch 全体が取り消される)。D1 のエラーの区別は例外の文言に含まれる索引名・列名で行う(backend。文言は外に出さない)。
+  - RCON `status` が失敗したら記録を始めず `RCON_*` を返す。**失敗は記録しない**(ゲームに影響せず、`audit_log` の「実行前に pending を作る」理由〔実行されたか不明になる〕が無いため)。nonce は使われていないので、同じトークンで期限内にやり直せる。
+  - 全体の上限(`MAX_ACTIVE_RECORDINGS`)は prepare と execute で数えるが、並行した開始で 1〜2 件超えることは許す(Cron は古い順に上限件数だけ処理する。17.3)。
+- `record_stop`: トークン検証 → 1 つの `db.batch()` で
+  1. `INSERT INTO settings_audit_log (event = 'record_stop', confirm_nonce, ...) SELECT ... WHERE EXISTS (SELECT 1 FROM match_recordings WHERE id = ? AND server_id = ? AND status = 'recording')`
+  2. `UPDATE match_recordings SET status = 'ended', ended_at = ?, end_reason = 'manual', last_scores_json = (最後のサンプル), updated_at = ? WHERE id = ? AND server_id = ? AND status = 'recording'`
+  - 2 の変更行数が 0 → `RECORDING_NOT_ACTIVE`(既に終わっていた。1 も 0 行)。nonce の違反 → `ALREADY_EXECUTED`。成功後に 17.7 の「終了時の削除」。
+- 応答は `RecordingExecuteResponse`(`auditKind: 'settings'`、開始・停止した `MatchSummary`)。画面は応答を受け取れなかった場合も `GET /api/matches` を取り直せば状態が分かる(`audit_log` の「結果不明」の扱いは要らない)。
+- **このパネルの `map` / `match_end` の execute が成功したら**、そのサーバーの記録中の試合を `match_action` で終える(`src/lib/actions.ts`。17.5 の終了処理と同じ関数)。
+
+### 17.3 Cron(1 分ごと)
+
+`wrangler.jsonc` の `triggers.crons: ["* * * * *"]`(UTC。最上位と `env.gmkz` の両方。環境が `triggers` を引き継ぐかは C-22)。1 回の実行(`scheduledTime` = T)の手順:
+
+1. **記録中の一覧を 1 文で読む**: `SELECT r.*, s.name, s.host, s.port, s.scheme, s.rcon_password_enc, s.enabled, s.score_cap FROM match_recordings r LEFT JOIN servers s ON s.id = r.server_id WHERE r.status = 'recording' ORDER BY r.id LIMIT 8`。
+   - 例外(D1 が無い・0003 未適用)→ Workers Logs にコードだけ出して終える(何も書かない)。
+   - **0 行なら RCON を呼ばずに終える**(D1 の読み取り 1 回のみ。毎時 17 分だけ 17.7 の掃除を続けて行う)。
+2. 鍵(`instance_key` から `server-password` 鍵。5.1.2 の isolate 内キャッシュ)を用意し、各行の RCON パスワードを復号する(AAD は宛先。15.3)。
+3. 各記録を **同時に 3 台まで**(`CRON_RCON_CONCURRENCY`。同時接続 6 の内側)処理する。1 台の手順:
+   1. サーバーが無い(削除済み)・無効・復号できない → `server_unavailable` で終える(RCON は呼ばない)
+   2. `T - started_at >= 3 時間` → `max_duration` で終える(RCON は呼ばない)
+   3. RCON `GET /v1/status`(5 秒)。失敗 → この分は何もしない(次の分に任せる。再試行しない)
+   4. `status.map` が文字列で、記録の `map` と違う → `map_changed` で終える(**このサンプルは保存しない**。新しいマップの値で前の試合の推移を汚さないため)
+   5. RCON `GET /v1/players`(5 秒)。失敗しても続ける(cash・陣営別は null / 空)
+   6. サンプルを保存: `INSERT OR IGNORE INTO match_samples (...) SELECT ... WHERE EXISTS (SELECT 1 FROM match_recordings WHERE id = ? AND status = 'recording')`(`bucket_minute = floor(T / 60000)`。手動停止と同じ分に動いても終了後の行を作らない)
+   7. 上限の判定(17.5): いずれかの陣営スコア ≥ 実効の上限 → `score_cap` で終える
+   8. 人数の判定: `players.current === 0` で `empty_since` が NULL なら T を書く。0 のまま `T - empty_since >= 10 分` → `empty` で終える。1 以上で `empty_since` が NULL でなければ NULL に戻す(**書くのは変化したときだけ**。毎分の UPDATE はしない)
+4. **終える処理**(共通。`src/lib/recordings.ts` の 1 関数): `UPDATE match_recordings SET status = 'ended', ended_at = T, end_reason = ?, last_scores_json = ?, updated_at = ? WHERE id = ? AND status = 'recording' RETURNING id` → 行が返ったときだけ `settings_audit_log` に `record_end`(`operator` / `session_tag` は NULL、`params: { recordingId, reason }`)を INSERT → 17.7 の終了時の削除。
+5. 例外は投げない(1 台の失敗で他の台を止めない)。Workers Logs には `{ kind: 'cron', recordings, sampled, ended, failures: { <コード>: n } }` だけを出す(ホスト名・サーバー名・プレイヤー名は出さない。5.7)。
+
+**二重実行**(同じ分に 2 回、または前の実行が終わる前に次が始まる): サンプルは主キーで 1 行、終了は `status = 'recording'` 条件の UPDATE で 1 回、`record_end` は UPDATE が行を返したときだけ。`empty_since` の書き込みが前後しても、判定が 1 分遅れるだけ。Cron の配送が「少なくとも 1 回」か「最大 1 回」かは公式資料に記載が無い(C-22)が、どちらでも壊れない。
+
+**1 回の実行の上限**(Workers Free: 外部への fetch 50、D1 のクエリ 50/呼び出し、CPU 10 ms):
+
+| 項目 | 記録中 8 台(上限)の最悪 |
+|---|---|
+| RCON への fetch | 8 × 2 = 16(capabilities は呼ばない。`/v1/players` が無いビルドでは 404 を受けて null にするだけ) |
+| D1 のクエリ | 一覧 1 + `instance_key` 0〜1 + 1 台あたり最大 5(サンプル 1、`empty_since` 1、終了 3〔UPDATE・`record_end`・削除〕)× 8 = 最大 42。毎時 17 分の掃除 +5 で 47。`db.batch()` の 1 文を 1 クエリと数える(C-23) |
+| 経過時間 | タイムアウト 5 秒 × 2 × (8 / 3 の切り上げ = 3 巡) = 最悪 30 秒(上限 15 分) |
+| CPU | 復号 8 回・JSON の解析 16 回(各数十 KB 以内)。数 ms の見込み。本番で実測する(C-24) |
+
+`MAX_ACTIVE_RECORDINGS` を 8 にしたのは上の D1 クエリ数の上限から(10 にすると最悪 57 で超える)。
+
+### 17.4 Cron を Astro の Worker に同居させる方法
+
+**一次資料**: Astro 公式の `@astrojs/cloudflare` ガイド(<https://docs.astro.build/en/guides/integrations-guide/cloudflare/>、2026-10-17 閲覧。v13 以降の「Custom entrypoint API」)に、`wrangler.jsonc` の `"main": "./src/worker.ts"` と、`@astrojs/cloudflare/handler` の `handle` に `fetch` を委譲して `queue` などのハンドラを並べた Worker オブジェクトを default export する例がある。`scheduled` の例は無いが、`scheduled` は `queue` と同じく Workers の標準のハンドラ(`ExportedHandler`)の一員で、書き方は同じ。Cloudflare 公式の Cron Triggers の資料(<https://developers.cloudflare.com/workers/configuration/cron-triggers/>)で `triggers.crons` の書式・`* * * * *` が使えること・UTC・反映に最大 15 分かかることを確認した。無料プランの Cron はアカウントあたり 5 個まで、Cron 1 回の CPU は 10 ms(Workers の Limits の資料)。
+
+**採用**: `src/worker.ts`(architect が作成済み。中身は呼び出しだけ):
+
+```ts
+import { handle } from '@astrojs/cloudflare/handler';
+export default {
+  fetch: handle,
+  async scheduled(controller, env, ctx) { /* backend: ctx.waitUntil(runCron(env, controller.scheduledTime)) */ },
+} satisfies ExportedHandler<Cloudflare.Env>;
+```
+
+`wrangler.jsonc` の `main` を `@astrojs/cloudflare/entrypoints/server` から `./src/worker.ts` に変えた(既定のエントリも `{ fetch: handle }` だけなので、`fetch` の動作は変わらない)。
+
+**ローカルでの確認(2026-10-17、`@astrojs/cloudflare@14.3.4`、wrangler 4.151)**: `pnpm check` / `pnpm test` が通る。`pnpm build` が成功し、`dist/server/entry.mjs` が `scheduled` を含む Worker を export し、`dist/server/wrangler.json` に `triggers.crons` が入る。`wrangler dev --test-scheduled` で `/login` が 200(fetch が Astro に届く)、`/cdn-cgi/handler/scheduled` が `ok`(scheduled が呼ばれる)。**本番(Workers Builds・Deploy ボタン経由)での Cron の起動は未確認**(C-10)。
+
+**代替案**(本番で動かなかった場合): (a) Cron 専用の小さな Worker を同じリポジトリに置き、同じ D1 をバインドする(`wrangler.jsonc` が 2 つになり、Deploy ボタンで 2 つ目を作れるかが新たな要確認になるため第 2 候補)。(b) Cron Worker が本体の `/internal/cron` を叩く(秘密の共有が要り、Secrets を使わない方針と合わないため不採用)。(c) 外部の定期実行サービス(Cloudflare の外に設定が増えるため不採用)。
+
+### 17.5 終了条件
+
+判定の順は 17.3 の 3。理由のコードは `MATCH_END_REASONS`(カタログ `match.endReason.*`)。
+
+| 理由 | 条件 | 備考 |
+|---|---|---|
+| `score_cap` | 保存したサンプルの `factionScores` のいずれかの `score` ≥ 実効の上限 | 実効の上限 = `status.scoreCap`(正の数のとき)→ `servers.score_cap` → `SCORE_CAP_DEFAULT`(100)。Cron が `status.scoreCap` を読めて記録の値と違えば、記録の `score_cap` / `score_cap_source = 'status'` を更新する(変化したときだけ)。**スコアが「上限に向かって増える」前提**(減っていく方式なら判定が合わない。R-21) |
+| `manual` | 「記録を停止」(`record_stop`) | 17.2 |
+| `map_changed` | `status.map` が開始時のマップと違う | ゲーム内・ほかのツールでのマップ変更・試合終了・サーバーの再起動を含む。`status.map` が取れない分は判定しない |
+| `match_action` | このパネルの `map` / `match_end` の execute が成功 | 次の Cron を待たずに終える |
+| `empty` | 人数 0 が 10 分(`RECORDING_EMPTY_END_MS`)続いた | 人数は `status.players.current` |
+| `max_duration` | 開始から 3 時間(`RECORDING_MAX_DURATION_MS`) | RCON に届かない状態が続いた場合の保険も兼ねる |
+| `server_unavailable` | サーバーの削除・無効化・パスワードを読み出せない | Cron が検出(削除の API では終えない。17.7) |
+
+- 試合が終わっても**次の試合を自動では記録しない**(ユーザー決定の範囲外。必要なら「連続記録」を第 2 段階で検討する。要確認 U-20)。
+- 開始時点で既に上限に達していても開始は拒否しない(次の Cron で `score_cap` になる)。
+
+### 17.6 キルフィード受信(第 1 段階: 観測モード)
+
+資料(`docs/research/wardogs-rcon.md` 2.4、未検証)では、ゲームサーバーの `[WDServerFeed]` に `Url` と `Token` を書くと、ゲームが `Url + /api/ingest/events` に `Authorization: Bearer <Token>` で `killed` イベントを約 2 秒ごとにバッチ POST する。第 1 段階は**形式を確かめるための受け皿**で、受けた本文を解釈せずに保存して見せるだけにする。
+
+**エンドポイント**: `POST /api/ingest/events`(`src/pages/api/ingest/events.ts`)。認証はログイン Cookie ではなく受信用トークン。middleware の扱いは 5.5・5.8。
+
+**処理の順序と応答**(本文を読まずに返すときは 64 KiB まで読み捨てる。`discardBody`):
+
+| 順 | 確認 | 失敗時 |
+|---|---|---|
+| 1 | メソッドが POST | 405 `METHOD_NOT_ALLOWED` |
+| 2 | D1 の判定(middleware) | 503 `NOT_CONFIGURED` |
+| 3 | `Authorization: Bearer <token>` があり、`FEED_TOKEN_PATTERN`(`wof1.<ServerId>.<43 文字>`)に合う | 401 `FEED_TOKEN_INVALID`(`WWW-Authenticate: Bearer`。D1 を読まない) |
+| 4 | `server_feeds` の `<ServerId>` の行(isolate 内に 60 秒キャッシュ)の `token_hash` と `SHA-256(token)` を **定数時間で比較**(32 バイト同士、`crypto.subtle.timingSafeEqual`)| 行が無い・不一致 → 401 `FEED_TOKEN_INVALID`(不一致は `last_rejected_reason = token_invalid`) |
+| 5 | そのサーバーの 1 分の回数 ≤ 90(`FEED_RATE_PER_MIN`。isolate 内の固定窓) | 429 `RATE_LIMITED`(`Retry-After`) |
+| 6 | `Content-Type` が `application/json`(`; charset=...` 可) | 415 `UNSUPPORTED_MEDIA_TYPE` |
+| 7 | 本文 ≤ 64 KiB(`FEED_MAX_BODY_BYTES`。`Content-Length` と実際に読んだ量の両方) | 413 `PAYLOAD_TOO_LARGE` |
+| 8 | UTF-8 の JSON として読める | 400 `BAD_REQUEST`(`bad_json`) |
+| 9 | 空のバッチ(本文が空、`[]`、または `events` が空配列のオブジェクト)| **204 で返し、D1 に書かない**(受信の状況の更新を除く) |
+| 10 | 保存してよいか: `server_feeds.enabled = 1`、サーバーがあり有効 | 204(保存せずに捨てる。`last_dropped_reason = disabled / server_unusable`) |
+| 11 | 1 日の上限(17.8): サーバーごと 1,000 件・4 MiB、全体 4,000 件・16 MiB | 204(捨てる。`daily_limit` / `global_limit`) |
+| 12 | `feed_raw_events` に INSERT(本文は受けた文字列のまま。`event_count`、受信時に記録中の試合 `recording_id`) | 成功 204。D1 の失敗は 500 `INTERNAL_ERROR` |
+
+- **既知外の JSON でも保存する**(観測が目的)。配列でもオブジェクトでも、`killed` 以外のイベントが混ざっていても、そのまま 1 行に入れる。`event_count` は「配列ならその長さ、`events` 配列を持つオブジェクトならその長さ、それ以外は NULL」。
+- 1 日の上限の判定と加算は 1 文の UPSERT で行う: `INSERT INTO feed_daily (server_id, day, batches, bytes) VALUES (?, ?, 1, ?) ON CONFLICT (server_id, day) DO UPDATE SET batches = batches + 1, bytes = bytes + excluded.bytes WHERE batches < ?上限 AND bytes + excluded.bytes <= ?上限 RETURNING batches`。行が返らなければ上限で捨てる。サーバーごと → 全体(`server_id = 0`)の順に行い、全体で断られた場合はサーバーの分が 1 件多く数えられたまま残る(上限の判定が少し早まるだけで、害は無い)。
+- **上限・無効で捨てるときも 204** を返す(4xx / 5xx を返すと、ゲームが再送して回数が増える可能性があるため。ゲームの再送の挙動は K-6)。
+- **受信の状況**(`last_received_at` 等)は isolate ごとにサーバーあたり 1 分に 1 回までしか D1 に書かない(空のバッチを含めて「届いている」ことを設定タブで確かめられるようにしつつ、書き込みを 1,440 行/日・台に抑える)。
+- 応答は 204 か `ApiFailure` の JSON(セキュリティヘッダ付き)。本文・トークン・`Authorization`・接続元 IP はログに出さない。Workers Logs には `{ kind: 'ingest', server, result: <204 の種類 or コード>, bytes }` だけ。
+
+**トークン**
+
+| 項目 | 決定 |
+|---|---|
+| 形式 | `wof1.<ServerId>.<32 バイトの乱数の base64url>`(`FEED_TOKEN_PATTERN`。ini に書いても困る記号を含まない) |
+| 保存 | **SHA-256 のハッシュだけ**(`server_feeds.token_hash = 'sha256$<base64url>'`)と末尾 4 文字(`token_hint`)。平文は発行の応答で 1 回だけ返し、二度と表示しない。失くしたら再発行 |
+| 発行・再発行 | `POST /api/servers/:id/feed-token`(ログイン必須・CSRF 検査あり)。再発行すると古いトークンは使えなくなる(他の isolate のキャッシュが切れるまで最大 60 秒)。`settings_audit_log` に `feed_token_issue`(`params: { reissued }`。値・ハッシュは入れない) |
+| 取り消し | `DELETE /api/servers/:id/feed-token`(本文 `{}`)で行を消す(受信の状況も消える)。`feed_token_revoke`。サーバーの削除(`DELETE /api/servers/:id`)でも同じ batch で消す |
+| 比較 | ServerId で 1 行を主キーで引き、ハッシュ同士を定数時間で比較(4 の行) |
+
+根拠(ハッシュ保存で 1 回だけ表示、を選んだ理由): (1) 漏れた場合の影響は「観測データに偽の行を入れられる」だけで、平文を後から見せる必要性が低い。(2) 暗号化保存(再表示可)にすると、ログインできる人(Cookie を盗んだ人を含む)がいつでも取り出せる。(3) 乱数 32 バイトなので、ハッシュに遅い方式(PBKDF2 等)は要らない(総当たりできない)。不便さ(再表示できない)は「再発行してゲーム側を書き換える」で解消できる。ServerId をトークンに含めるのは、ハッシュの一致探索ではなく主キーで 1 行を引いて定数時間で比較するため(ServerId は秘密ではない)。
+
+**ゲーム側の設定の案内**(設定タブ。値は例):
+
+```ini
+[WDServerFeed]
+Url=https://<パネルのホスト名>
+Token=<発行したトークン>
+```
+
+- `Url` には**パネルの URL だけ**(末尾の `/` なし。`/api/ingest/events` はゲームが付ける)を書く。画面は自分のオリジン(`Astro.url.origin`)を表示してコピーできるようにする。
+- セクション名・キー名・`Url` の後ろへの付け方・HTTPS に対応しているかは未検証(K-1、K-4、K-7)。設定ファイルの場所と編集の手順はサーバーの提供元によって違う(README では一般的な説明だけにする)。
+- 「受信を止める」スイッチ(`enabled = 0`)は**保存を止めるだけで、ゲームからの送信(Worker のリクエスト数)は止まらない**。止めるには ini から `Url` を消す(または空にする)ことを画面と README に明記する。
+
+**脅威と対策**: 受信エンドポイントは誰でも叩ける(ログイン画面と同じ)。トークンが無ければ D1 を読まずに 401。トークンが漏れても RCON・パネルの操作には使えない(RCON パスワードとは別の値。サーバーごと)。偽の本文は観測データを汚すだけで、第 2 段階で集計に使う前に再発行できる。CPU を使わせる攻撃(大きな本文)は 64 KiB とレート制限で抑える。リクエスト数の消費(無料枠)はログイン画面と同じく防げない(11.1)。
+
+### 17.7 保持と掃除
+
+| 対象 | いつ | 規則 |
+|---|---|---|
+| 試合とサンプル(終了時) | 試合を終えたとき(17.3 の 4、17.2) | そのサーバーの終了済みの試合のうち、新しい順で 6 番目以降と、`ended_at` が 30 日より古いものを `match_samples` ごと削除(1 回の削除は最大 5 試合 × 181 行程度) |
+| 試合とサンプル(定期) | Cron の毎時 17 分(UTC。`CLEANUP_MINUTE_UTC`) | 30 日より古い終了済みの試合、所属する試合が無いサンプル(`CLEANUP_BATCH_ROWS` = 2,000 行まで) |
+| `feed_raw_events` | 毎時 17 分 | `received_at` が 7 日より古い行を 2,000 行まで(1 時間の最大の保存件数 4,000 / 24 ≒ 170 件より十分多い) |
+| `feed_daily` | 毎時 17 分 | `day` が 8 日より前の行 |
+| `server_feeds` | サーバーの削除時(同じ batch)/ 毎時 17 分 | サーバーが無い行 |
+| 記録中の試合 | サーバーの削除時は消さない | 次の Cron が `server_unavailable` で終え、以後は通常の保持に従う |
+
+既存のログイン時の掃除(8.4)は変えない。
+
+### 17.8 無料枠の見積り(11 章への追加)
+
+**Workers リクエスト(10 万/日)**
+
+| 発生源 | 1 日の最大 | 備考 |
+|---|---|---|
+| Cron | 1,440 | リクエスト数に数えられるかは未確認(C-9)。数えられても 1.4% |
+| 受信(1 台が約 2 秒ごとに送る場合) | 約 43,200 | 空のバッチも数える。空のときも送るかは未検証(K-3) |
+| パネルの画面(11.1) | 約 2,100〜17,800 | サイドバー込み |
+| キルフィードタブ(記録中の試合を 60 秒ごと) | 1 タブ 1,440 | 開いている間だけ |
+
+- 受信を **1 台**で常時続けても、パネルの多めの利用と合わせて約 6.3 万/日で収まる。**2 台以上で常時受信すると無料枠を超え得る**(超えると当日 UTC 0 時〔JST 9 時〕まで Worker 全体が止まり、パネルも使えなくなる)。Worker 側で受信を止めても、ゲームが送る限りリクエストは数えられる(17.6)。
+- 方針: README と設定タブで「観測は 1 台ずつ」「形式を確かめたら ini から `Url` を消す」と案内する。受信の回数は D1 に数えない(書き込みが増えるため)ので、正確な回数は Cloudflare のダッシュボード(Workers の Metrics)で見るよう案内する。
+
+**D1 の書き込み(10 万行/日)**
+
+| 発生源 | 計算 | 1 日の最大 |
+|---|---|---|
+| スコア記録 | 1 台が 24 時間記録し続けて 1,440 行 + 開始・終了・`empty_since` 数十行。`WITHOUT ROWID` で 1 行 1 書き込みの見込み(C-17)| 1 台 約 1,500、上限 8 台で約 1.2 万(12%) |
+| 受信の保存 | 1 件 = 本文の行 + 索引 2 + 日次カウンタ 2 ≒ 5 行。全体の上限 4,000 件 | 約 2 万(20%) |
+| 受信の状況 | 1 台 1 分 1 回 | 1 台 1,440 |
+| 既存(11.3、15.9) | | 約 1,500(通常)〜 約 1.2 万(最悪) |
+
+最悪をすべて足しても約 4.7 万行(上限の半分弱)。通常(1 台を数試合記録、受信なし)は数千行。
+
+**D1 の読み取り(500 万行/日)**: Cron は 1 分 1 回の一覧(記録中の行数分)と、記録中なら 1 台数行。受信は 1 件ごとにトークンの 1 行(60 秒キャッシュで減る)+ 記録中の試合の 1 行。グラフは 1 試合 181 行 × 表示回数。いずれも 500 万に遠い。
+
+**ストレージ(1 データベース 500 MB)**: 生データは全体で 16 MiB/日 × 7 日 = 最大約 112 MiB。サンプルは 1 行 300 バイト程度 × 181 行 × 6 試合 × 20 台 ≒ 6.5 MB。
+
+**CPU(10 ms)**: 受信 1 件 = SHA-256 1 回 + 64 KiB までの JSON.parse 1 回(1 ms 未満の見込み)。グラフの API は 181 行の JSON の解析。Cron は 17.3。
+
+### 17.9 画面
+
+**概要タブ(`/`)**: 「よく使う操作」の近くに「スコア記録」の節を足す。
+
+- 記録していないとき: 「記録を開始」ボタン(`action.help.record_start` を直下に。押すと確認ダイアログ〔`confirm.record_start`、prepare が返したマップと上限を表示〕)。
+- 記録中: 開始時刻・経過時間・上限(と出所: サーバーの値 / 設定 / 既定)・最後のサンプルの時刻、「記録を停止」ボタン(`confirm.record_stop`)、キルフィードタブへのリンク(「推移を見る」)。
+- 上限に達していない・RCON に届かない等で Cron がサンプルを取れていない場合は、最後のサンプルの時刻で分かるようにする(エラーは出さない)。
+- データ源は `GET /api/matches?server=`(表示時に 1 回、操作の後、記録中は 60 秒ごと)。`RECORDING_LIMIT_REACHED` などのエラーはカタログの `error.*`。
+
+**キルフィードタブ(`/killfeed`)**: 「準備中」をやめ、アイランド(`src/components/KillfeedPanel.tsx`)にする。上から:
+
+1. **試合の選択**: 「現在の試合(記録中)」+ 直近 5 試合(開始時刻・マップ・終了理由)。記録が 1 つも無ければ「概要タブで記録を開始してください」の案内。
+2. **グラフ**(`src/components/ScoreChart.tsx`。外部ライブラリ無しの SVG):
+   - 表示の切り替え: **スコア** / **cash**(ボタン 2 つ。`aria-pressed`)。スコア: 陣営ごとの折れ線と上限の横線。cash: 全員の合計の折れ線 + 陣営ごとの合計の折れ線(17.1 の `cashTotal` / `factions[].cash`)。
+   - 横軸は開始からの経過分、縦軸は 0〜最大値(スコアは上限と最大値の大きい方)。目盛りは 4〜5 本。数値は `formatNumber`、時刻は `formatDateTime`(13.4)。
+   - 陣営名は RCON の生データ(翻訳しない)。色は最大 3 陣営 + その他の固定の配色(`ops.css` のトークン)に**線の種類(実線・破線・点線)**を組み合わせ、凡例に名前を書く(色だけで区別させない)。
+   - SVG は `viewBox` で幅に追従させ、`role="img"` と `aria-label`(例「スコアの推移。{faction}: {score} …」)。グラフの下に最後のサンプルの値の表と、全サンプルの表(折りたたみ)を置く(読み上げ・コピー用)。
+   - 375px でも横スクロールを出さない(SVG は `width: 100%`、凡例は折り返す)。
+   - データ源: `GET /api/matches/:id/samples`。記録中の試合を表示している間だけ 60 秒ごとに取り直す(終了済みは 1 回)。
+3. **試合の要約**: 開始・終了・理由(`match.endReason.*`)・上限と出所・サンプル数・最後の陣営スコア。
+4. **受信した生データ(観測モード)**: 「キルフィードは準備中です。ゲームサーバーから届いたデータをそのまま表示しています」の趣旨。トークン未発行なら設定タブへの案内。発行済みなら最新 20 件(受信時刻・バイト数・イベント数・本文)。本文は `<pre>` に**テキストとして**出し(HTML として解釈しない)、既定は折りたたみ。「更新」ボタン(手動)と「さらに読み込む」(`before`)。データ源は `GET /api/feed/raw?server=`。
+
+**設定タブ(`/servers`)**: サイドバーで選んでいるサーバーについて、「サーバー」の節の下に 2 節を足す(全サーバー分を並べない。長くなるため)。
+
+- **スコア記録**: 上限(数値の入力、空欄で既定 100)。「サーバーが上限を返す場合はそちらを使います」の注記。保存は `PUT /api/servers/:id`(`scoreCap`)。
+- **キルフィード(観測モード)**: 受信の状況(`GET /api/servers/:id/feed`: 最後に受信・保存・拒否〔理由 `feed.reject.*`〕・捨てた〔`feed.drop.*`〕時刻、今日の件数とバイト数、上限)、トークンの発行 / 再発行 / 取り消し、保存の有効・無効、17.6 の ini の案内。トークンは発行直後に 1 回だけ表示し(コピーボタン)、「この画面を閉じると二度と表示されません」と書く。注意書き: 2 秒ごとの送信は 1 台で 1 日約 4.3 万リクエストになり得ること、2 台以上での常時受信は無料枠を超え得ること、止めるには ini の `Url` を消すこと。
+
+**ナビゲーション**: `src/layouts/nav.ts` のキルフィードの `comingSoon` を false にし、縦ナビにも出す(`inSidebar: true`)。
+
+**サイドバー**: 記録中なら試合の要点に「記録中」の印を出してよい(任意。`/api/status` には含めないので、出すなら概要タブと同じ `GET /api/matches` を引くことになる。リクエストが増えるため今回は出さない。要確認 U-23)。
+
+**カタログ**(frontend-pages が足すもの。architect が足したものは 17.11): `recording.*`(概要タブの節)、`killfeed.*`(タブ。`killfeed.comingSoon` / `killfeed.why` は観測モードの説明に書き換え)、`chart.*`(切り替え・軸・凡例・表)、`feed.*`(設定タブの節と生データ)、`settings.recording.*`。
+
+### 17.10 第 2 段階(集計)の想定 — 実サーバーで形式を確かめた後
+
+**想定するイベントの項目**(資料に形式の記載は無い。**すべて要確認 K-1**。観測モードで集めた生データで確定させる):
+
+| 項目 | 想定 | 使い道 |
+|---|---|---|
+| 種類 | `killed`(資料ではこれのみ) | 種類ごとに振り分け |
+| 時刻 | UTC の ISO 8601 か epoch | 時間帯別、試合への割り当て(無ければ受信時刻で代用) |
+| 倒した人 | 名前・Steam ID・陣営 | キル数、キルログ |
+| 倒された人 | 名前・Steam ID・陣営 | デス数、キルログ |
+| 武器 | id または名前 | 武器別 |
+| 距離 | m などの数値 | 最長キル、距離分布 |
+| ヘッドショット | 真偽 | ヘッドショット率 |
+| 同じ陣営か(フレンドリーファイア) | 真偽、または陣営の比較 | 除外・別集計 |
+
+**集計の方針**(案):
+
+- 受信時に本文を解釈し、1 キル 1 行の `feed_kills`(0004 で追加。`recording_id`、時刻、倒した人・倒された人の Steam ID と名前と陣営、武器、距離、ヘッドショット)に入れる。生データの保存(`feed_raw_events`)は観測が終わったら止められるようにする。
+- 集計(キル数・ヘッドショット率・最長キル・時間帯別・武器別・距離分布)は**読み取り時に SQL で**行う(試合 1 つ分。事前集計の表は作らない)。キルログは新しい順のページ送り。JSON 出力は `GET /api/matches/:id/kills.json`(ログイン必須。ダウンロード用の `Content-Disposition`)。
+- 書き込みの見積り: 64 人の試合で 3 時間に数千キル → 1 試合数千〜1 万行(索引込み)。上限 8 台が同時に記録すると D1 の書き込み枠の大半を使うため、「キルを保存するのは記録中の試合だけ」「1 日の上限」を設ける。
+- Steam ID・プレイヤー名を保存するため、保持期間は試合と同じ(直近 5 試合・30 日)にする。
+
+### 17.11 実装の分担(ファイル単位)
+
+**architect(済み)**: `docs/ARCHITECTURE.md`(本章・5・8・9・11・14 章)、`docs/API.md`(4.1・8〜10 章、5 章のコード、7 章の追加)、`src/types/api.ts`、`src/types/env.ts`、`db/migrations/0003_recordings.sql`、`db/schema.sql`、`wrangler.jsonc`(`main`・`triggers`)、`src/worker.ts`(呼び出しの枠だけ)、`src/i18n/ja.ts`(`error.*` 5 つ、`audit.event.*` 6 つ、`action.*` / `confirm.*` / `action.help.*` の `record_start` / `record_stop`、`match.endReason.*`、`feed.reject.*`、`feed.drop.*`。いずれも型で全コード必須)、`src/lib/http.ts` の `DEV_MESSAGES`(5 つ)。
+
+**backend**
+
+| ファイル | 作業 |
+|---|---|
+| `src/worker.ts` | `scheduled` から `ctx.waitUntil(runCron(env, controller.scheduledTime))` を呼ぶ(1 行) |
+| `src/lib/cron.ts`(新規) | 17.3 の手順と 17.7 の毎時の掃除。D1・fetch・時刻を引数で受けて単体テストできる形に |
+| `src/lib/recordings.ts`(新規) | 記録の開始・停止・終了(共通の終了関数)・サンプルの組み立て(`status` と `players` からの陣営別の集計、cash の合計)・終了時の削除・一覧と推移の読み取り |
+| `src/lib/feed.ts`(新規) | トークンの生成・ハッシュ・検証(定数時間、60 秒キャッシュ)、レート制限、空のバッチの判定、日次の上限、保存、受信の状況の間引き更新、生データの一覧 |
+| `src/lib/actions.ts` / `src/lib/confirm.ts` / `src/lib/validate.ts` | `RecordingAction` の prepare / execute(17.2)。`isWriteAction` と並べて `isRecordingAction` / `isConfirmableAction`。`map` / `match_end` の成功時に `match_action` で終える |
+| `src/lib/rcon/normalize.ts` | `StatusResponse.scoreCap` / `matchSeconds`。記録用に `players[].cash` と `faction` を読む関数(画面用の `PlayersResponse` には cash を出さない) |
+| `src/lib/servers.ts` | `score_cap` の読み書き(`UpdateServerRequest.scoreCap`、`ServerSummary.scoreCap` / `feedConfigured`)、削除時に `server_feeds` も消す |
+| `src/lib/config.ts` | `probeD1` に 0003 の表・列(`servers.score_cap`、`settings_audit_log.confirm_nonce`、`match_recordings`、`match_samples`、`server_feeds`、`feed_raw_events`、`feed_daily`)を足す |
+| `src/lib/audit.ts` | 新しい `SETTINGS_EVENTS` の `status`(すべて succeeded)。`params` からトークンの値を出さない(入れていないことのテスト) |
+| `src/middleware.ts` | `/api/ingest/events` の例外(5.5・5.8) |
+| `src/pages/api/ingest/events.ts`、`src/pages/api/matches/index.ts`、`src/pages/api/matches/[id]/samples.ts`、`src/pages/api/feed/raw.ts`、`src/pages/api/servers/[id]/feed.ts`(GET・PUT)、`src/pages/api/servers/[id]/feed-token.ts`(POST・DELETE) | API.md 8〜10 章、7 章 |
+| `scripts/mock-rcon.mjs` | `status` に `scoreCap`(任意)とスコアの増加、`players` に `cash`。`MOCK_FEED_URL` / `MOCK_FEED_TOKEN` を与えたら 2 秒ごとに `/api/ingest/events` へダミーの `killed` バッチ(と空のバッチ)を送るモード(形は資料からの推測と明記) |
+| テスト | 二重実行(同じ分の 2 回の Cron)、各終了条件、上限の優先順位、トークンの不一致・形式不正・取り消し後、空のバッチで D1 に書かないこと、1 日の上限、nonce の 1 回限り |
+
+**frontend-pages**: `src/pages/killfeed.astro`(アイランド化)、`src/components/KillfeedPanel.tsx`・`ScoreChart.tsx`・`FeedRawList.tsx`(新規)、`src/components/StatusPanel.tsx`(スコア記録の節)、`src/components/ServersPanel.tsx`(スコア記録・キルフィードの節)、`src/components/ConfirmDialog.tsx`(`RecordingAction` の確認。`AnyPrepareResponse` / `AnyExecuteResponse`)、`src/layouts/nav.ts`、`src/styles/ops.css`(グラフの配色・線種のトークン)、`src/i18n/ja.ts`(17.9 のカタログ)、README の手順(architect と相談。17.6 の ini の案内と 17.8 の注意)。
+
+**qa-reviewer**: 受信エンドポイントが middleware の例外の範囲を超えないこと(パスの完全一致)、トークン・本文がログ・応答に出ないこと、生データをテキストとして表示していること、375px のグラフ、Cron の二重実行。

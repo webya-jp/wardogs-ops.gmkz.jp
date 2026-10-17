@@ -1,12 +1,13 @@
 # Worker 内部 API 契約
 
-作成日: 2026-10-15(JST)/ 更新: 2026-10-17(`/api/status` に `experiences`・次のマップを追加。3 章)、2026-10-16(複数サーバー対応: 1.2、3・4 章の `server`、5 章のコード、7 章。Worker Secrets の廃止: 1 章、2 章の `/setup`、5 章、既定サーバーの削除)/ 担当: architect。型の正本は `src/types/api.ts`(本書と食い違ったら司令塔に報告)。
+作成日: 2026-10-15(JST)/ 更新: 2026-10-17(スコア記録とキルフィードの観測モード: 1 章の例外、4.1、7.2〜7.4、8〜10 章、5 章のコード。ARCHITECTURE 第 17 章)、2026-10-17(`/api/status` に `experiences`・次のマップを追加。3 章)、2026-10-16(複数サーバー対応: 1.2、3・4 章の `server`、5 章のコード、7 章。Worker Secrets の廃止: 1 章、2 章の `/setup`、5 章、既定サーバーの削除)/ 担当: architect。型の正本は `src/types/api.ts`(本書と食い違ったら司令塔に報告)。
 構成・認証の詳細は `docs/ARCHITECTURE.md`。RCON の確度は第 6 章と `docs/research/wardogs-rcon.md`。
 
 ## 1. 共通
 
 - ベース: Worker と同じオリジン(`https://<worker>.<account>.workers.dev` またはカスタムドメイン)。
 - 認証: すべての `/api/*` はログイン Cookie(`__Host-wo_session`)が必要。無い・不正・期限切れは 401 `UNAUTHENTICATED`。
+  - **例外: `POST /api/ingest/events`**(10 章。ゲームサーバーからのキルフィードの受信)。ログイン Cookie・Origin 検査・管理者の有無を見ず、サーバーごとの受信用トークン(`Authorization: Bearer`)で認証する。本文の上限は 64 KiB(下の 8 KiB ではない)。パスの完全一致だけが対象(ARCHITECTURE 5.8)。
 - D1 が無い・マイグレーション未適用のときは、すべての `/api/*` が 503 `NOT_CONFIGURED`。管理者が未登録(`/setup` で管理パスワードを登録する前)のときは 503 `SETUP_REQUIRED`(ARCHITECTURE 5.1.1)。いずれも認証より先に判定する。
 - Worker Secrets は使わない(2026-10-16)。管理パスワード・鍵・RCON の接続先とパスワードはすべて D1 にある(ARCHITECTURE 第 5 章)。
 - POST / PUT / DELETE: `Content-Type: application/json` 必須(415)、本文 8 KiB まで(413)、Origin 検査(403 `FORBIDDEN_ORIGIN`。ARCHITECTURE 5.5)。本文の無い DELETE は受け付けない(7 章の DELETE は本文必須)。
@@ -41,6 +42,8 @@
 | `GET /api/status` `players` `bans` `maps` `capabilities` | クエリ `?server=<id>` | Cookie(`__Host-wo_server`)→ 表示順で最初に使えるサーバー(更新前から開いていたタブとの互換用。画面は常に明示して送る) |
 | `POST /api/actions/prepare` `execute` | 本文 `server` | **不可**(400 `VALIDATION_FAILED`、`fields.server = required`) |
 | `GET /api/audit` | クエリ `?server=<id>` または `all` | `all`(全サーバー) |
+| `GET /api/matches`、`GET /api/feed/raw` | クエリ `?server=<id>`(必須) | **不可**(400 `VALIDATION_FAILED`、`fields.server = required`)。RCON は呼ばない。削除済みのサーバーの id でもエラーにせず 0 件を返す(`/api/audit` と同じ) |
+| `GET /api/matches/:id/samples` | パスの試合 id(`server` は任意。指定して試合のサーバーと違えば 404 `MATCH_NOT_FOUND`) | − |
 | `/api/servers/*` | パスの `:id` | − |
 
 サーバーを解決できないときのエラー(すべての RCON を呼ぶ API で共通):
@@ -107,6 +110,7 @@ RCON `GET /v1/status`。成功時は人数スナップショットを記録(サ�
 - `/v1/rotation` が capabilities で `missing`、または失敗(タイムアウト・形式不正・`enabled: false`)した場合は 3 項目とも null にし、**`/api/status` 自体は失敗にしない**(状態の表示を優先)。失敗は 60 秒間キャッシュし、毎回呼び直さない。
 - `/v1/rotation` の呼び出しは `/v1/status` の成功後に行い、そのタイムアウトは 3 秒(`/api/status` 全体の応答を遅らせすぎないため)。
 - backend の実装が済むまで 3 項目は省略され得る(型は `?`)。画面は省略を null と同じに扱う。
+- `scoreCap` / `matchSeconds`(2026-10-17 追加): `/v1/status` の同名の項目(ビルドによって無い。R-21)。正の数(`matchSeconds` は 0 以上)でなければ null。概要タブのスコア記録の節で上限の表示に使う。省略の扱いは上と同じ。
 
 ### `GET /api/players?server=<id>` → `PlayersResponse`
 
@@ -218,6 +222,33 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 
 注意: `RCON_TIMEOUT` は「RCON 側で実行されたかどうか不明」を意味する。画面は「結果不明。状態を再読み込みして確認してください」と表示し、自動で再実行しない。
 
+- `map` / `match_end` が成功したとき、そのサーバーで記録中の試合があれば `match_action` で終える(8 章。ARCHITECTURE 17.5)。
+- `ExecuteResponse.auditKind`(2026-10-17 追加): 省略時は `operations`(`audit_log` の id)。
+
+### 4.1 スコア記録の開始・停止(`record_start` / `record_stop`。2026-10-17)
+
+同じ `prepare` / `execute` に乗せる(確認ダイアログを通す)。ゲームサーバーには何も書き込まない操作で、`action` は `RecordingAction`(`WriteAction` とは別系列)。型は `RecordingActionRequest` / `RecordingPrepareResponse` / `RecordingExecuteResponse`(`src/types/api.ts`)。詳細は ARCHITECTURE 17.2。
+
+| action | params | prepare | execute |
+|---|---|---|---|
+| `record_start` | `{}` | サーバーの解決 → 記録中なら 409 `RECORDING_ALREADY_ACTIVE` → 全体の記録中が `MAX_ACTIVE_RECORDINGS`(8)以上なら 409 `RECORDING_LIMIT_REACHED` → RCON `GET /v1/status`(失敗は `RCON_*`)→ マップと上限を返す | RCON `GET /v1/status`(失敗は `RCON_*`。記録しない)→ `GET /v1/players`(失敗しても続ける)→ 記録・最初のサンプル・`settings_audit_log`(`record_start`)を 1 つの batch で作る |
+| `record_stop` | `{ "recordingId": "<MatchId>" }` | そのサーバーの記録中の試合でなければ 409 `RECORDING_NOT_ACTIVE`(形式不正は 400、`fields.recordingId`) | 記録を `manual` で終え、`settings_audit_log`(`record_stop`)を書く。既に終わっていれば 409 `RECORDING_NOT_ACTIVE` |
+
+- 確認トークンの中身・検証の順序は 4 章と同じ(`a` が `record_start` / `record_stop` になる。`sv` / `sh` も同じ)。capabilities は見ない。`destructive` は常に false。
+- 1 回限りの保証は `settings_audit_log.confirm_nonce`(UNIQUE)。重複は 409 `ALREADY_EXECUTED`。
+- 失敗(`RCON_*`、`RECORDING_*`、トークンの検証失敗)は記録しない(ゲームに影響せず、実行されたか不明になることも無いため。4 章の `audit_log` の規則とは違う)。
+- 応答 `RecordingPrepareResponse` の例(値はダミー):
+
+```jsonc
+{
+  "confirmToken": "v1.<payload>.<sig>", "action": "record_start", "params": {},
+  "destructive": false, "expiresAt": 1792050000000, "server": "3",
+  "map": "<マップ id>", "scoreCap": 100, "scoreCapSource": "default", "match": null
+}
+```
+
+- 応答 `RecordingExecuteResponse`: `{ auditId, auditKind: "settings", action, executedAt, server, match: MatchSummary }`。
+
 ## 5. エラーコード
 
 表示文言は `src/i18n/<言語コード>.ts` の `error.<code>` にある(全コード必須。型で強制)。下表の「意味」は開発者向けの説明。
@@ -230,7 +261,7 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 | `FORBIDDEN_ORIGIN` | 403 | Origin / Sec-Fetch-Site 検査に失敗 |
 | `NOT_FOUND` | 404 | 該当 API が無い |
 | `METHOD_NOT_ALLOWED` | 405 | |
-| `PAYLOAD_TOO_LARGE` | 413 | 本文 8 KiB 超 |
+| `PAYLOAD_TOO_LARGE` | 413 | 本文 8 KiB 超(`/api/ingest/events` は 64 KiB 超) |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | JSON 以外 |
 | `RATE_LIMITED` | 429 | `/api/capabilities?refresh=1` の連打など。`retryAfterSec` 付き |
 | `CONFIRM_INVALID` | 400 | 確認トークンが不正・別セッション・内容不一致 |
@@ -245,6 +276,11 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 | `SERVER_NEEDS_PASSWORD` | 409 | 保存済みの RCON パスワードを復号できない(D1 の `instance_key` を手で消した・データ破損。通常は起きない。7 章の PUT で入れ直す) |
 | `SERVER_LIMIT_REACHED` | 409 | 登録できる上限(`MAX_SERVERS` = 20)に達した |
 | `NO_SERVERS` | 409 | サーバーが 1 台も無い(画面は `/servers` への案内を出す) |
+| `FEED_TOKEN_INVALID` | 401 | `POST /api/ingest/events` の受信用トークンが無い・形式不正・一致しない・取り消し済み(`WWW-Authenticate: Bearer` 付き) |
+| `RECORDING_ALREADY_ACTIVE` | 409 | `record_start`: そのサーバーは既に記録中 |
+| `RECORDING_NOT_ACTIVE` | 409 | `record_stop`: 指定した試合が記録中でない |
+| `RECORDING_LIMIT_REACHED` | 409 | `record_start`: 同時に記録できるサーバー数(8)に達した |
+| `MATCH_NOT_FOUND` | 404 | 指定した試合の記録が無い(保持期間を過ぎて削除された・別サーバー) |
 | `RCON_UNREACHABLE` | 502 | RCON に接続できない |
 | `RCON_TIMEOUT` | 504 | RCON の応答なし(読み取り 5 秒 / 書き込み 8 秒) |
 | `RCON_AUTH_FAILED` | 502 | RCON が 401 / 403 |
@@ -281,6 +317,13 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 | `message` | `POST /v1/players/{steamId}/message` | `{ "message": "…" }` | 未検証(A, B) | R-2, R-6 |
 | `map` | `POST /v1/match/map` | `{ "map": "<id>" }`(experiences 等は送らない) | 未検証(A, B) | R-2, R-11 |
 | `match_end` | `POST /v1/match/end` | `{}`(要否未確認) | 未検証(A, B, C) | R-2, R-12 |
+
+### 6.2.1 Cron(スコア記録。2026-10-17)
+
+| 呼び出し元 | RCON ルート | 使う項目 | 確度 | 要確認 |
+|---|---|---|---|---|
+| `record_start` の prepare / execute、Cron(記録中のサーバーだけ 1 分に 1 回) | `GET /v1/status` | `map`, `players.current/max`, `factionScores[]`, `scoreCap`(ビルド依存) | 未検証(A, B) | R-8, R-21 |
+| `record_start` の execute、Cron | `GET /v1/players` | `players[].faction`, `players[].cash`(人数と cash の陣営別・全体の合計だけを保存。名前・Steam ID は保存しない) | 未検証(A, B) | R-22 |
 
 ### 6.3 使わないルート(第 2 段階以降)
 
@@ -366,8 +409,110 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 { "ok": false, "code": "RCON_AUTH_FAILED", "testedAt": 1792050000000, "serverName": null, "players": { "current": null, "max": null } }
 ```
 
-### 7.1 RCON ルートとの対応
+### 7.2 スコア上限(`PUT /api/servers/:id` の `scoreCap`。2026-10-17)
+
+- `UpdateServerRequest.scoreCap`: 整数 1〜100,000(整数でなければ `invalid_format`、範囲外は `out_of_range`)、`null` で既定(100)に戻す。接続テストはしない。変更ログ `server_update` の `params` に `scoreCap` を含める。
+- `ServerSummary.scoreCap`(null = 既定)と `feedConfigured`(受信用トークンを発行済みか)を返す(backend の実装までは省略され得る)。
+- `DELETE /api/servers/:id` は、受信用トークン(`server_feeds` の行)も同じ batch で消す。記録中の試合は消さない(次の Cron が `server_unavailable` で終える)。
+
+### 7.3 キルフィードの受信設定(2026-10-17)
+
+ログイン必須・Origin 検査あり・本文 8 KiB(1 章の共通の規則)。`:id` の規則は 7 章と同じ。トークンの値・ハッシュはここで述べる発行の応答以外のどこにも返さない。
+
+| メソッド・パス | 本文 | 応答 | 記録 |
+|---|---|---|---|
+| `GET /api/servers/:id/feed` | − | `ServerFeedStatus`(未発行なら `configured: false`、時刻は null、`today` は 0) | − |
+| `PUT /api/servers/:id/feed` | `UpdateFeedRequest` `{ "enabled": false }` | `ServerFeedStatus`。トークンが未発行なら 404 `NOT_FOUND`(受信設定が無い)。`enabled` が真偽でなければ 400(`fields.enabled = invalid_format`) | `feed_settings_update`(`params: { enabled }`)。値が変わらなければ書かない |
+| `POST /api/servers/:id/feed-token` | `{}` | `FeedTokenResponse`(**`token` はこの応答でだけ返す**)。既にあれば置き換える(`reissued: true`) | `feed_token_issue`(`params: { reissued }`) |
+| `DELETE /api/servers/:id/feed-token` | `{}` | `ServerFeedStatus`(`configured: false`)。未発行でも 200(冪等) | 行があったときだけ `feed_token_revoke` |
+
+- 無効(`enabled: false`)のサーバー・`needsPassword` のサーバーでもトークンを発行できる(受信しても ARCHITECTURE 17.6 の 10 で捨てる)。
+- 再発行・取り消しの後、古いトークンは他の isolate のキャッシュが切れるまで最大 60 秒(`FEED_TOKEN_CACHE_SEC`)通る。
+- `FeedTokenResponse` の例(値はダミー。実際のトークンは 43 文字の乱数):
+
+```jsonc
+{ "token": "wof1.3.<43 文字>", "tokenHint": "<末尾 4 文字>", "createdAt": 1792050000000, "reissued": false, "status": { /* ServerFeedStatus */ } }
+```
+
+### 7.4 RCON ルートとの対応
 
 | Worker API | RCON ルート | 確度 |
 |---|---|---|
 | `POST /api/servers`、`PUT /api/servers/:id`、`POST /api/servers/:id/test` の接続テスト | `GET /v1/status` | 未検証(A, B)。R-8 |
+
+## 8. スコア記録の読み取り API(2026-10-17)
+
+ログイン必須。RCON は呼ばない(D1 だけ)。詳細は ARCHITECTURE 第 17 章。
+
+### `GET /api/matches?server=<id>` → `MatchesResponse`
+
+そのサーバーの試合を、記録中(あれば先頭)→ 終了済みの新しい順(最大 5 件)で返す。`activeLimit`(8)と `activeCount`(全サーバーで記録中の数)も返す。
+
+- `server` は必須(1.2)。形式不正は 400、削除済みの id は 0 件で 200。
+- `MatchSummary.lastScores` は、記録中なら最後のサンプルの陣営スコア、終了済みなら終了時の値。`sampleCount` / `lastSampleAt` はサンプルから数える。
+- 画面は概要タブ(記録中なら 60 秒ごと)とキルフィードタブ(表示時と操作の後)で使う。
+
+### `GET /api/matches/:id/samples?server=<id>` → `MatchSamplesResponse`
+
+試合の要約と、1 分ごとのサンプル(古い順、最大 200 件)。
+
+- `:id` は `MATCH_ID_PATTERN`。形式不正は 400(`fields.id = invalid_format`)、無い・`server` と違う → 404 `MATCH_NOT_FOUND`。
+- `MatchSample`: `at`、`map`、`players`、`factionScores`(陣営名は RCON の生データ)、`cashTotal`(取れなければ null)、`factions`(陣営ごとの人数と cash。`/v1/players` が取れなければ空)。
+- 記録中の試合は Cron が 1 分に 1 行足すので、画面は 60 秒ごとに取り直す(`POLL_MIN_INTERVAL_SEC` より長い)。
+
+## 9. キルフィードの生データ(観測モード。2026-10-17)
+
+### `GET /api/feed/raw?server=<id>&limit=20&before=<id>` → `FeedRawResponse`
+
+受信した本文を新しい順に返す。ログイン必須。
+
+| クエリ | 値 | 既定 |
+|---|---|---|
+| `server` | `ServerId`(必須) | − |
+| `limit` | 1〜50(`FEED_RAW_PAGE_MAX`) | 20 |
+| `before` | 前ページの `nextBefore` | − |
+
+- `configured`: そのサーバーに受信用トークンがあるか(無ければ `entries` は空)。トークンを取り消した後も、保持期間内の生データは返す(`configured: false` でも `entries` があり得る)。
+- `entries[].body` は受けた JSON 文字列のまま(最大 64 KiB)。**Steam ID・プレイヤー名を含み得る**。画面はテキストとして表示する(HTML として解釈しない)。
+- 1 回の応答は最大 50 × 64 KiB ≒ 3.2 MB になり得る。画面の既定は 20 件。
+
+## 10. キルフィードの受信(`POST /api/ingest/events`。2026-10-17)
+
+ゲームサーバー(`[WDServerFeed]`)が送ってくる先。**ブラウザからは使わない**。仕様の出典は非公式資料で未検証(`docs/research/wardogs-rcon.md` 2.4、K-1)。処理の順序の正本は ARCHITECTURE 17.6。
+
+| 項目 | 値 |
+|---|---|
+| 認証 | `Authorization: Bearer <受信用トークン>`(`wof1.<ServerId>.<43 文字>`。7.3 で発行)。ログイン Cookie・Origin 検査・管理者の有無は見ない |
+| 本文 | `Content-Type: application/json`(`; charset=` 可)。64 KiB(`FEED_MAX_BODY_BYTES`)まで。JSON なら形を問わない(配列・オブジェクト。既知外の項目も保存する) |
+| レート制限 | サーバーごとに 1 分 90 回(`FEED_RATE_PER_MIN`。isolate 内) |
+| 保存 | 空でないバッチを `feed_raw_events` に 1 行。1 日の上限: サーバーごと 1,000 件・4 MiB、全体 4,000 件・16 MiB。保持 7 日 |
+
+応答:
+
+| 状況 | HTTP | 本文 |
+|---|---|---|
+| 保存した | 204 | なし |
+| 空のバッチ(本文が空、`[]`、`events` が空配列) | 204 | なし(D1 に書かない) |
+| 受信の保存を止めている・サーバーが無効・1 日の上限 | 204 | なし(捨てる。理由は `ServerFeedStatus.lastDroppedReason`) |
+| POST 以外 | 405 | `METHOD_NOT_ALLOWED` |
+| D1 が使えない | 503 | `NOT_CONFIGURED` |
+| トークンが無い・形式不正・一致しない・取り消し済み | 401 | `FEED_TOKEN_INVALID`(`WWW-Authenticate: Bearer`) |
+| 回数の上限 | 429 | `RATE_LIMITED`(`retryAfterSec`、`Retry-After`) |
+| JSON 以外の `Content-Type` | 415 | `UNSUPPORTED_MEDIA_TYPE` |
+| 64 KiB 超 | 413 | `PAYLOAD_TOO_LARGE` |
+| JSON として読めない | 400 | `BAD_REQUEST` |
+| D1 の書き込みに失敗 | 500 | `INTERNAL_ERROR` |
+
+- 失敗の本文は 1 章の `ApiFailure`(英語の `message` 付き)。ゲーム側で読まれる前提ではない。
+- 上限・無効でも 204 にするのは、ゲームの再送で回数が増えるのを避けるため(再送の挙動は K-6)。
+- トークン・本文・`Authorization`・接続元 IP はログに出さない。
+- 例(値はダミー。本文の形は資料からの推測で、実際の形は観測で確かめる):
+
+```http
+POST /api/ingest/events HTTP/1.1
+Host: <パネルのホスト名>
+Authorization: Bearer wof1.3.<43 文字>
+Content-Type: application/json
+
+[{"type":"killed", "...": "..."}]
+```

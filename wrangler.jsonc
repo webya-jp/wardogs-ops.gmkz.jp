@@ -6,8 +6,9 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   // Workers Builds はダッシュボード上の Worker 名とこの値の一致を要求する(docs/research/cloudflare-deploy-button.md E)
   "name": "wardogs-ops",
-  // Astro 7 + @astrojs/cloudflare v14 のサーバーエントリ
-  "main": "@astrojs/cloudflare/entrypoints/server",
+  // Worker のエントリ。fetch は Astro(@astrojs/cloudflare の handle)に委譲し、scheduled(Cron)を同居させる
+  // (Astro 公式ガイドのカスタムエントリの形。docs/ARCHITECTURE.md 17.4)。以前は "@astrojs/cloudflare/entrypoints/server"
+  "main": "./src/worker.ts",
   // 2024-09-02 以降にする(allow_custom_ports が既定で有効になり、RCON の 7776 番などを fetch できる)
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -22,6 +23,11 @@
   // カスタムドメインを使う場合は、下の "env" に環境を定義して `pnpm run deploy:env <名前>` でデプロイする(任意)
   "observability": {
     "enabled": true
+  },
+  // Cron Trigger(UTC。1 分ごと)。スコア記録のサンプル取得と古い行の掃除(docs/ARCHITECTURE.md 17.3・17.7)。
+  // 記録中のサーバーが無ければ D1 を 1 回読むだけで RCON は呼ばない。Cron はアカウントあたり 5 個まで(無料プラン)で、これは 1 個を使う
+  "triggers": {
+    "crons": ["* * * * *"]
   },
   // D1 は自動プロビジョニング(database_id を省略。wrangler 4.45.0 以上、open beta)。
   // 初回の `wrangler deploy` で database_name の名前で作成され、以後のデプロイでも紐づけが維持される。
@@ -54,6 +60,10 @@
       "routes": [
         { "pattern": "wardogs-ops.gmkz.jp", "custom_domain": true }
       ],
+      // 環境では triggers が引き継がれるか資料で確認できないため(要確認 C-22)、上と同じものを書く
+      "triggers": {
+        "crons": ["* * * * *"]
+      },
       "d1_databases": [
         {
           "binding": "DB",

@@ -10,6 +10,8 @@
  *   `server`(ServerId。GET はクエリ、POST は本文)で受け取る。RCON パスワードはどの応答にも含めない
  * - Worker Secrets は使わない(2026-10-16。docs/ARCHITECTURE.md 第 5 章): 管理パスワードは /setup で登録し
  *   D1 admins に PBKDF2 のハッシュで保存、鍵は D1 settings の instance_key から HKDF で派生する
+ * - スコア記録とキルフィード(2026-10-17。docs/ARCHITECTURE.md 第 17 章、docs/API.md 8〜10 章): 記録の開始・停止は
+ *   prepare / execute の二段階(RecordingAction)、試合と推移は /api/matches、受信は POST /api/ingest/events(トークン認証のみ)
  */
 
 // ============================================================
@@ -64,6 +66,17 @@ export const API_ERROR_CODES = [
   'SERVER_NEEDS_PASSWORD',
   'SERVER_LIMIT_REACHED',
   'NO_SERVERS',
+  // スコア記録・キルフィード(docs/ARCHITECTURE.md 第 17 章)
+  /** POST /api/ingest/events のトークンが無い・形式不正・一致しない・取り消し済み(401。WWW-Authenticate: Bearer 付き) */
+  'FEED_TOKEN_INVALID',
+  /** record_start: そのサーバーは既に記録中 */
+  'RECORDING_ALREADY_ACTIVE',
+  /** record_stop: 指定した記録が記録中でない(既に終了・存在しない・別サーバー) */
+  'RECORDING_NOT_ACTIVE',
+  /** record_start: 同時に記録できるサーバー数(MAX_ACTIVE_RECORDINGS)に達した */
+  'RECORDING_LIMIT_REACHED',
+  /** /api/matches/:id/samples: 試合が無い(削除済み・別サーバー) */
+  'MATCH_NOT_FOUND',
   // RCON
   'RCON_UNREACHABLE',
   'RCON_TIMEOUT',
@@ -100,6 +113,11 @@ export const API_ERROR_STATUS: Record<ApiErrorCode, number> = {
   SERVER_NEEDS_PASSWORD: 409,
   SERVER_LIMIT_REACHED: 409,
   NO_SERVERS: 409,
+  FEED_TOKEN_INVALID: 401,
+  RECORDING_ALREADY_ACTIVE: 409,
+  RECORDING_NOT_ACTIVE: 409,
+  RECORDING_LIMIT_REACHED: 409,
+  MATCH_NOT_FOUND: 404,
   RCON_UNREACHABLE: 502,
   RCON_TIMEOUT: 504,
   RCON_AUTH_FAILED: 502,
@@ -318,6 +336,13 @@ export interface StatusResponse {
    * 2026-10-17 追加。backend の実装後に `?` を外す
    */
   experiences?: string[];
+  /**
+   * RCON /v1/status の `scoreCap`(陣営スコアの上限)。ビルドによって無い(docs/research/wardogs-rcon.md 2.1。要確認 R-21)。
+   * 正の数でなければ null。スコア記録の自動終了に使う(docs/ARCHITECTURE.md 17.5)。2026-10-17 追加。backend の実装後に `?` を外す
+   */
+  scoreCap?: number | null;
+  /** RCON /v1/status の `matchSeconds`(試合の経過秒と見られるが意味は未検証。R-21)。ビルドによって無い。0 以上の数でなければ null。同上 */
+  matchSeconds?: number | null;
   fetchedAt: number;
 }
 
@@ -424,6 +449,20 @@ export const SETTINGS_EVENTS = [
   'server_delete_rejected',
   'server_test',
   'admin_register',
+  // スコア記録(docs/ARCHITECTURE.md 17.2。audit_log の event CHECK に足せないためこちらに記録する。要確認 U-19)
+  /** 記録の開始(二段階の execute。params: { recordingId, map }) */
+  'record_start',
+  /** 記録の停止(二段階の execute。params: { recordingId }) */
+  'record_stop',
+  /** 記録の自動終了(Cron、またはこのパネルの map / match_end。operator / session_tag は NULL。params: { recordingId, reason: MatchEndReason }) */
+  'record_end',
+  // キルフィード(docs/ARCHITECTURE.md 17.6。トークンの値・ハッシュは params に入れない)
+  /** 受信用トークンの発行・再発行(params: { reissued: boolean }) */
+  'feed_token_issue',
+  /** 受信用トークンの取り消し(params: {}) */
+  'feed_token_revoke',
+  /** 受信の保存の有効・無効の切り替え(params: { enabled }) */
+  'feed_settings_update',
 ] as const;
 export type SettingsEvent = (typeof SETTINGS_EVENTS)[number];
 
@@ -513,10 +552,34 @@ export type ActionRequest = {
 }[WriteAction];
 
 /**
+ * パネル内の操作で、RCON の書き込みを伴わないが確認ダイアログ(prepare / execute)と記録を通すもの(docs/ARCHITECTURE.md 17.2)。
+ * WriteAction とは別の系列にする(capabilities の write・audit_log の event CHECK の対象外のため)。
+ * 記録先は settings_audit_log(event = record_start / record_stop。要確認 U-19)
+ */
+export const RECORDING_ACTIONS = ['record_start', 'record_stop'] as const;
+export type RecordingAction = (typeof RECORDING_ACTIONS)[number];
+/** prepare / execute が受け付ける操作の全体 */
+export type ConfirmableAction = WriteAction | RecordingAction;
+
+/** record_start: params は空(対象は `server`) */
+export type RecordStartParams = Record<string, never>;
+/** record_stop: 止める記録(画面に表示している記録中の試合)。別の記録を止めないよう id で指定する */
+export interface RecordStopParams {
+  recordingId: MatchId;
+}
+export interface RecordingParamsMap {
+  record_start: RecordStartParams;
+  record_stop: RecordStopParams;
+}
+export type RecordingActionRequest = {
+  [A in RecordingAction]: { action: A; params: RecordingParamsMap[A] };
+}[RecordingAction];
+
+/**
  * POST /api/actions/prepare の本文。`server` は対象サーバー(docs/API.md 4 章)。
  * 必須(未指定は 400 VALIDATION_FAILED、fields.server = required)
  */
-export type PrepareRequest = ActionRequest & { server: ServerId };
+export type PrepareRequest = (ActionRequest | RecordingActionRequest) & { server: ServerId };
 
 /** POST /api/actions/prepare の応答 */
 export interface PrepareResponse {
@@ -536,18 +599,57 @@ export interface PrepareResponse {
   server: ServerId;
 }
 
-/** POST /api/actions/execute の本文。action・params・server は prepare と同一であること(server は確認トークンで照合) */
-export type ExecuteRequest = ActionRequest & { confirmToken: string; server: ServerId };
+/**
+ * POST /api/actions/prepare の応答(RecordingAction のとき)。docs/API.md 4.1。
+ * record_start の prepare は RCON GET /v1/status を 1 回呼び、現在のマップと上限を確認ダイアログ用に返す
+ */
+export interface RecordingPrepareResponse {
+  confirmToken: string;
+  action: RecordingAction;
+  params: RecordingParamsMap[RecordingAction];
+  /** 常に false(ゲームサーバーには何も書き込まない) */
+  destructive: false;
+  expiresAt: number;
+  server: ServerId;
+  /** record_start: 現在のマップ(RCON の生データ)。record_stop: 止める試合の開始時のマップ。不明なら null */
+  map: string | null;
+  /** record_start: この記録で使う上限と出所。record_stop: 止める試合の値 */
+  scoreCap: number;
+  scoreCapSource: ScoreCapSource;
+  /** record_stop: 止める試合(record_start は null) */
+  match: MatchSummary | null;
+}
+/** prepare の応答の全体(action で判別する) */
+export type AnyPrepareResponse = PrepareResponse | RecordingPrepareResponse;
 
-/** POST /api/actions/execute の応答 */
+/** POST /api/actions/execute の本文。action・params・server は prepare と同一であること(server は確認トークンで照合) */
+export type ExecuteRequest = (ActionRequest | RecordingActionRequest) & { confirmToken: string; server: ServerId };
+
+/** POST /api/actions/execute の応答(WriteAction のとき) */
 export interface ExecuteResponse {
   /** 監査ログの id(D1 必須化により常に値がある) */
   auditId: number;
+  /** auditId の系列(operations = audit_log)。省略時は operations。2026-10-17 追加 */
+  auditKind?: AuditKind;
   action: WriteAction;
   executedAt: number;
   /** 実行したサーバー */
   server: ServerId;
 }
+
+/** POST /api/actions/execute の応答(RecordingAction のとき。記録先は settings_audit_log) */
+export interface RecordingExecuteResponse {
+  /** settings_audit_log の id */
+  auditId: number;
+  auditKind: 'settings';
+  action: RecordingAction;
+  executedAt: number;
+  server: ServerId;
+  /** 開始した・停止した試合(停止後は status = ended、endReason = manual) */
+  match: MatchSummary;
+}
+/** execute の応答の全体(action で判別する) */
+export type AnyExecuteResponse = ExecuteResponse | RecordingExecuteResponse;
 
 // ============================================================
 // サーバー(複数サーバー対応。docs/ARCHITECTURE.md 第 15 章、docs/API.md 7 章)
@@ -588,6 +690,13 @@ export interface ServerSummary {
   lastTest: ServerLastTest | null;
   createdAt: number;
   updatedAt: number;
+  /**
+   * スコア記録の上限の設定値(D1 servers.score_cap)。null = 既定(SCORE_CAP_DEFAULT)。
+   * RCON の status.scoreCap があればそちらを優先する(docs/ARCHITECTURE.md 17.5)。2026-10-17 追加。backend の実装後に `?` を外す
+   */
+  scoreCap?: number | null;
+  /** キルフィードの受信用トークンを発行済みか(値は返さない)。同上 */
+  feedConfigured?: boolean;
 }
 
 /** GET /api/servers */
@@ -623,6 +732,11 @@ export interface UpdateServerRequest {
   enabled?: boolean;
   /** 並び順(整数 -1000〜1000。範囲外は out_of_range) */
   sortOrder?: number;
+  /**
+   * スコア記録の上限(整数 SCORE_CAP_MIN〜SCORE_CAP_MAX。整数でなければ invalid_format、範囲外は out_of_range)。
+   * null で既定(SCORE_CAP_DEFAULT)に戻す。変えても接続テストはしない。記録中の試合には次のサンプルから効く(docs/ARCHITECTURE.md 17.5)
+   */
+  scoreCap?: number | null;
 }
 
 /** DELETE /api/servers/:id の本文。誤削除防止のため、現在の表示名を入力させて送る */
@@ -656,4 +770,239 @@ export interface ServerMutationResponse {
 /** DELETE /api/servers/:id の応答 */
 export interface DeleteServerResponse {
   deletedId: ServerId;
+}
+
+// ============================================================
+// スコア記録(docs/ARCHITECTURE.md 第 17 章、docs/API.md 8 章)
+// ============================================================
+
+/** 試合(記録)の識別子。D1 match_recordings.id の 10 進文字列 */
+export type MatchId = string;
+/** MatchId の形式(SERVER_ID_PATTERN と同じ規則) */
+export const MATCH_ID_PATTERN = /^[1-9][0-9]{0,9}$/;
+
+/** スコア上限の既定値(status.scoreCap が無く、サーバーの設定値も無いとき) */
+export const SCORE_CAP_DEFAULT = 100;
+export const SCORE_CAP_MIN = 1;
+export const SCORE_CAP_MAX = 100_000;
+/** 上限の出所。status = RCON /v1/status の scoreCap、setting = サーバーの設定値(servers.score_cap)、default = SCORE_CAP_DEFAULT */
+export type ScoreCapSource = 'status' | 'setting' | 'default';
+
+/** Cron のサンプル間隔(秒)。wrangler.jsonc の triggers.crons(1 分ごと)と一致させる */
+export const RECORDING_SAMPLE_INTERVAL_SEC = 60;
+/** 開始からこの時間が経ったら自動終了(max_duration) */
+export const RECORDING_MAX_DURATION_MS = 3 * 60 * 60 * 1000;
+/** 人数 0 がこの時間続いたら自動終了(empty) */
+export const RECORDING_EMPTY_END_MS = 10 * 60 * 1000;
+/** サーバーごとに残す終了済みの試合の数(これより古いものは試合とサンプルを削除) */
+export const RECORDING_KEEP_ENDED = 5;
+/** 終了済みの試合をこの日数より長く残さない(RECORDING_KEEP_ENDED 以内でも削除) */
+export const RECORDING_RETENTION_DAYS = 30;
+/** 同時に記録できるサーバー数(Cron 1 回の D1 クエリ 50・サブリクエスト 50 の上限から決めた値。docs/ARCHITECTURE.md 17.3) */
+export const MAX_ACTIVE_RECORDINGS = 8;
+/** 1 サンプルに残す陣営の数の上限(スコア・人数・cash それぞれ) */
+export const MATCH_FACTIONS_MAX = 8;
+/** /api/matches/:id/samples が返すサンプルの上限(3 時間 = 180 + 開始時の 1 + 余裕) */
+export const MATCH_SAMPLES_MAX = 200;
+
+export const MATCH_STATUSES = ['recording', 'ended'] as const;
+export type MatchStatus = (typeof MATCH_STATUSES)[number];
+
+/**
+ * 記録の終了理由(D1 match_recordings.end_reason。CHECK は付けずコードで検証)。画面はカタログ `match.endReason.<reason>` で引く。
+ * - score_cap: いずれかの陣営スコアが上限に達した
+ * - manual: 「記録を停止」(record_stop)
+ * - map_changed: Cron が status.map の変化を検出した(ゲーム内・他のツールでのマップ変更・試合終了を含む)
+ * - match_action: このパネルの map / match_end の execute が成功した
+ * - empty: 人数 0 が RECORDING_EMPTY_END_MS 続いた
+ * - max_duration: 開始から RECORDING_MAX_DURATION_MS が経った
+ * - server_unavailable: サーバーが削除・無効化された、またはパスワードを読み出せない
+ */
+export const MATCH_END_REASONS = [
+  'score_cap',
+  'manual',
+  'map_changed',
+  'match_action',
+  'empty',
+  'max_duration',
+  'server_unavailable',
+] as const;
+export type MatchEndReason = (typeof MATCH_END_REASONS)[number];
+
+/** 試合の一覧の 1 行 */
+export interface MatchSummary {
+  id: MatchId;
+  serverId: ServerId;
+  /** 開始時点のサーバーの表示名 */
+  serverName: string | null;
+  status: MatchStatus;
+  startedAt: number;
+  /** 記録中は null */
+  endedAt: number | null;
+  /** 記録中は null */
+  endReason: MatchEndReason | null;
+  /** 開始時点のマップ(RCON の生データ。翻訳しない)。不明なら null */
+  map: string | null;
+  /** 判定に使う(使った)上限と出所 */
+  scoreCap: number;
+  scoreCapSource: ScoreCapSource;
+  sampleCount: number;
+  /** 最後のサンプルの時刻。サンプルが無ければ null */
+  lastSampleAt: number | null;
+  /** 最後のサンプルの陣営スコア(一覧で結果を見せる用。陣営名は RCON の生データ) */
+  lastScores: FactionScore[];
+}
+
+/** GET /api/matches?server= */
+export interface MatchesResponse {
+  server: ServerId;
+  /** 記録中の試合(あれば先頭)→ 終了済みの新しい順(最大 RECORDING_KEEP_ENDED 件) */
+  matches: MatchSummary[];
+  /** 同時に記録できるサーバー数(MAX_ACTIVE_RECORDINGS) */
+  activeLimit: number;
+  /** いま記録中のサーバー数(全サーバー) */
+  activeCount: number;
+}
+
+/**
+ * 陣営ごとの人数と cash の合計(GET /v1/players の players[].faction で集計。陣営名は RCON の生データ)。
+ * status.factionScores[].faction と同じ表記かは未検証(要確認 R-22)
+ */
+export interface FactionStat {
+  /** players[].faction(文字列でなければ null = 不明の陣営) */
+  faction: string | null;
+  players: number;
+  /** その陣営の players[].cash の合計。数値の cash を持つプレイヤーが 1 人もいなければ null */
+  cash: number | null;
+}
+
+/** 試合の 1 分ごとのサンプル */
+export interface MatchSample {
+  /** 取得時刻(Cron は scheduledTime、開始時は実行時刻) */
+  at: number;
+  map: string | null;
+  players: { current: number | null; max: number | null };
+  /** status.factionScores(最大 MATCH_FACTIONS_MAX 件) */
+  factionScores: FactionScore[];
+  /** players[].cash の全員の合計(cash の意味は未検証 R-22)。/v1/players が取れない・cash が無ければ null */
+  cashTotal: number | null;
+  /** 陣営ごとの人数と cash(最大 MATCH_FACTIONS_MAX 件)。/v1/players が取れなければ空 */
+  factions: FactionStat[];
+}
+
+/** GET /api/matches/:id/samples */
+export interface MatchSamplesResponse {
+  match: MatchSummary;
+  /** 古い順。最大 MATCH_SAMPLES_MAX 件 */
+  samples: MatchSample[];
+}
+
+// ============================================================
+// キルフィード 第 1 段階: 観測モード(docs/ARCHITECTURE.md 17.6、docs/API.md 9・10 章)
+// ============================================================
+
+/** ゲームサーバー(WDServerFeed)が POST する先のパス。ゲームが Url の後ろに付ける(要確認 K-1) */
+export const FEED_INGEST_PATH = '/api/ingest/events';
+/** 受信する本文の上限(バイト)。超えたら 413 */
+export const FEED_MAX_BODY_BYTES = 64 * 1024;
+/** 1 サーバーあたり 1 分の受信回数の上限(isolate 内で判定。約 2 秒ごと = 30 回/分の 3 倍)。超えたら 429 */
+export const FEED_RATE_PER_MIN = 90;
+/** 1 サーバーあたり 1 日(UTC)に保存する空でないバッチの上限。超えたら 204 で受けて捨てる */
+export const FEED_DAILY_MAX_BATCHES = 1000;
+/** 1 サーバーあたり 1 日に保存する本文の合計の上限(バイト) */
+export const FEED_DAILY_MAX_BYTES = 4 * 1024 * 1024;
+/** 全サーバー合計の 1 日の上限(D1 の書き込み 10 万行/日・1 データベース 500 MB の保護) */
+export const FEED_GLOBAL_DAILY_MAX_BATCHES = 4000;
+export const FEED_GLOBAL_DAILY_MAX_BYTES = 16 * 1024 * 1024;
+/** 受信した生データの保持日数 */
+export const FEED_RETENTION_DAYS = 7;
+/** GET /api/feed/raw の既定件数と上限 */
+export const FEED_RAW_PAGE_DEFAULT = 20;
+export const FEED_RAW_PAGE_MAX = 50;
+/** トークンの検証結果を isolate 内に保持する秒数(再発行・取り消しが他の isolate に効くまでの最大の遅れ) */
+export const FEED_TOKEN_CACHE_SEC = 60;
+/**
+ * 受信用トークンの形式: `wof1.<ServerId>.<32 バイトの乱数の base64url(43 文字)>`。
+ * D1 には SHA-256 のハッシュだけを保存し、平文は発行時の応答で 1 回だけ返す(docs/ARCHITECTURE.md 17.6)
+ */
+export const FEED_TOKEN_PREFIX = 'wof1';
+export const FEED_TOKEN_PATTERN = /^wof1\.([1-9][0-9]{0,9})\.([A-Za-z0-9_-]{43})$/;
+
+/** 受信を拒否した理由(4xx を返したもの。server_feeds.last_rejected_reason)。画面はカタログ `feed.reject.<reason>` */
+export const FEED_REJECT_REASONS = ['token_invalid', 'content_type', 'too_large', 'bad_json', 'rate_limited'] as const;
+export type FeedRejectReason = (typeof FEED_REJECT_REASONS)[number];
+/** 受けて保存しなかった理由(204 を返したもの。server_feeds.last_dropped_reason)。画面はカタログ `feed.drop.<reason>` */
+export const FEED_DROP_REASONS = ['disabled', 'server_unusable', 'daily_limit', 'global_limit'] as const;
+export type FeedDropReason = (typeof FEED_DROP_REASONS)[number];
+
+/** GET /api/servers/:id/feed(受信の状況。トークンの値・ハッシュは返さない) */
+export interface ServerFeedStatus {
+  server: ServerId;
+  /** トークンを発行済み */
+  configured: boolean;
+  /** 受信したものを保存する(false でも 204 で受けて捨てる。ゲーム側の送信は止まらない) */
+  enabled: boolean;
+  /** トークンの末尾 4 文字(どのトークンを設定したかの見分け用)。未発行は null */
+  tokenHint: string | null;
+  tokenCreatedAt: number | null;
+  /** 最後に受信した時刻(空のバッチを含む。D1 への反映は 1 分に 1 回まで) */
+  lastReceivedAt: number | null;
+  /** 最後に保存した時刻 */
+  lastStoredAt: number | null;
+  lastRejectedAt: number | null;
+  lastRejectedReason: FeedRejectReason | null;
+  lastDroppedAt: number | null;
+  lastDroppedReason: FeedDropReason | null;
+  /** 今日(UTC)保存した件数と本文の合計 */
+  today: { batches: number; bytes: number };
+  limits: {
+    dailyBatches: number;
+    dailyBytes: number;
+    globalDailyBatches: number;
+    globalDailyBytes: number;
+    retentionDays: number;
+    maxBodyBytes: number;
+    ratePerMin: number;
+  };
+  /** FEED_INGEST_PATH(ゲームが Url の後ろに自分で付けるため、画面は Url にパネルの URL だけを書かせる。参考表示用) */
+  ingestPath: string;
+}
+
+/** PUT /api/servers/:id/feed の本文 */
+export interface UpdateFeedRequest {
+  enabled: boolean;
+}
+
+/** POST /api/servers/:id/feed-token の応答。**token はこの応答でだけ返す**(再表示はできない。失くしたら再発行) */
+export interface FeedTokenResponse {
+  token: string;
+  tokenHint: string;
+  createdAt: number;
+  /** 既存のトークンを置き換えた(古いトークンは最大 FEED_TOKEN_CACHE_SEC 秒以内に使えなくなる) */
+  reissued: boolean;
+  status: ServerFeedStatus;
+}
+
+/** 受信した生データの 1 件 */
+export interface FeedRawEntry {
+  id: number;
+  receivedAt: number;
+  /** 本文のバイト数 */
+  bytes: number;
+  /** 本文が配列ならその長さ、`events` 配列を持つオブジェクトならその長さ、それ以外は null */
+  eventCount: number | null;
+  /** 受信時に記録中だった試合(無ければ null。第 2 段階の試合ごとの集計に使う) */
+  matchId: MatchId | null;
+  /** 受信した本文(UTF-8 の JSON 文字列のまま。画面は**テキストとして**表示し、HTML として解釈しない) */
+  body: string;
+}
+
+/** GET /api/feed/raw?server=&limit=&before= */
+export interface FeedRawResponse {
+  server: ServerId;
+  /** トークンを発行済みか(未発行なら entries は空で、画面は設定タブへの案内を出す) */
+  configured: boolean;
+  /** 新しい順 */
+  entries: FeedRawEntry[];
+  nextBefore: number | null;
 }

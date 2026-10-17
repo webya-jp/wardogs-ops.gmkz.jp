@@ -1,6 +1,6 @@
 -- wardogs-ops の現行スキーマ(参照用のまとめ)。docs/ARCHITECTURE.md 第 5 章・第 8 章・第 15 章。
 -- 本番への適用は db/migrations/ を `wrangler d1 migrations apply DB --remote` で行う。
--- このファイルは migrations をすべて適用した後の状態と一致させること(0001_init.sql + 0002_servers.sql)。
+-- このファイルは migrations をすべて適用した後の状態と一致させること(0001_init.sql + 0002_servers.sql + 0003_recordings.sql)。
 -- 列の順序は ALTER TABLE ADD COLUMN の結果(末尾に追加)に合わせてある。
 -- 時刻はすべて UTC epoch ミリ秒(INTEGER)。
 
@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS servers (
   last_test_at      INTEGER,
   last_test_result  TEXT,
   created_at        INTEGER NOT NULL,
-  updated_at        INTEGER NOT NULL
+  updated_at        INTEGER NOT NULL,
+  -- 0003: スコア記録の上限の設定値(NULL = 既定 100。status.scoreCap があればそちらを優先)
+  score_cap         INTEGER CHECK (score_cap IS NULL OR score_cap BETWEEN 1 AND 100000)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_servers_name ON servers (name);
@@ -106,7 +108,85 @@ CREATE TABLE IF NOT EXISTS settings_audit_log (
   ip_hash     TEXT,
   server_id   INTEGER,
   server_name TEXT,
-  params_json TEXT    NOT NULL DEFAULT '{}'
+  params_json TEXT    NOT NULL DEFAULT '{}',
+  -- 0003: record_start / record_stop の確認トークンの nonce(1 回限り)。それ以外の行は NULL
+  confirm_nonce TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_settings_audit_log_created_at ON settings_audit_log (created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_audit_log_nonce ON settings_audit_log (confirm_nonce);
+
+-- 0003: スコア記録(試合 1 つ = 1 行。docs/ARCHITECTURE.md 17.1)
+CREATE TABLE IF NOT EXISTS match_recordings (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id        INTEGER NOT NULL,
+  server_name      TEXT,
+  status           TEXT    NOT NULL DEFAULT 'recording' CHECK (status IN ('recording', 'ended')),
+  started_at       INTEGER NOT NULL,
+  ended_at         INTEGER,
+  end_reason       TEXT,
+  map              TEXT,
+  score_cap        INTEGER NOT NULL,
+  score_cap_source TEXT    NOT NULL,
+  empty_since      INTEGER,
+  last_scores_json TEXT,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_match_recordings_active ON match_recordings (server_id) WHERE status = 'recording';
+CREATE INDEX IF NOT EXISTS idx_match_recordings_server ON match_recordings (server_id, id);
+
+-- 0003: 試合の 1 分ごとのサンプル(主キーで二重書き込みを防ぐ)
+CREATE TABLE IF NOT EXISTS match_samples (
+  recording_id        INTEGER NOT NULL,
+  bucket_minute       INTEGER NOT NULL,
+  taken_at            INTEGER NOT NULL,
+  map                 TEXT,
+  players_current     INTEGER,
+  players_max         INTEGER,
+  faction_scores_json TEXT    NOT NULL DEFAULT '[]',
+  cash_total          REAL,
+  faction_stats_json  TEXT    NOT NULL DEFAULT '[]',
+  PRIMARY KEY (recording_id, bucket_minute)
+) WITHOUT ROWID;
+
+-- 0003: キルフィードの受信設定(token_hash は 'sha256$<base64url>'。平文は保存しない)
+CREATE TABLE IF NOT EXISTS server_feeds (
+  server_id            INTEGER PRIMARY KEY,
+  token_hash           TEXT    NOT NULL,
+  token_hint           TEXT    NOT NULL,
+  token_created_at     INTEGER NOT NULL,
+  enabled              INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  last_received_at     INTEGER,
+  last_stored_at       INTEGER,
+  last_rejected_at     INTEGER,
+  last_rejected_reason TEXT,
+  last_dropped_at      INTEGER,
+  last_dropped_reason  TEXT,
+  created_at           INTEGER NOT NULL,
+  updated_at           INTEGER NOT NULL
+);
+
+-- 0003: 受信した生データ(観測モード。保持 7 日)
+CREATE TABLE IF NOT EXISTS feed_raw_events (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id    INTEGER NOT NULL,
+  received_at  INTEGER NOT NULL,
+  bytes        INTEGER NOT NULL,
+  event_count  INTEGER,
+  recording_id INTEGER,
+  body         TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_feed_raw_events_server ON feed_raw_events (server_id, id);
+CREATE INDEX IF NOT EXISTS idx_feed_raw_events_received_at ON feed_raw_events (received_at);
+
+-- 0003: 受信の日次カウンタ(server_id = 0 は全サーバーの合計。day は UTC の日)
+CREATE TABLE IF NOT EXISTS feed_daily (
+  server_id INTEGER NOT NULL,
+  day       INTEGER NOT NULL,
+  batches   INTEGER NOT NULL DEFAULT 0,
+  bytes     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (server_id, day)
+) WITHOUT ROWID;

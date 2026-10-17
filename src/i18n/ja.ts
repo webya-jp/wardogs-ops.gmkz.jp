@@ -6,7 +6,19 @@
  * - RCON から返る生データ(マップ名、陣営名、プレイヤー名など)はカタログに入れない(翻訳しない)
  * - 他の言語を足すときは `src/i18n/<言語コード>.ts` を `Catalog` 型(全キー必須)で作る(手順は docs/ARCHITECTURE.md 13.7)
  */
-import type { ApiErrorCode, AuditEventType, AuditStatus, SetupFormError, SetupWarning, ValidationIssue, WriteAction } from '../types/api';
+import type {
+  ApiErrorCode,
+  AuditEventType,
+  AuditStatus,
+  FeedDropReason,
+  FeedRejectReason,
+  MatchEndReason,
+  RecordingAction,
+  SetupFormError,
+  SetupWarning,
+  ValidationIssue,
+  WriteAction,
+} from '../types/api';
 
 export const ja = {
   // 共通
@@ -82,6 +94,11 @@ export const ja = {
   'error.SERVER_NEEDS_PASSWORD': 'このサーバーの RCON パスワードを読み出せません。「設定」の画面でパスワードを入れ直してください。',
   'error.SERVER_LIMIT_REACHED': '追加できるサーバーの上限に達しました。',
   'error.NO_SERVERS': 'サーバーが登録されていません。「設定」の画面から追加してください。',
+  'error.FEED_TOKEN_INVALID': '受信用トークンが正しくありません。',
+  'error.RECORDING_ALREADY_ACTIVE': 'このサーバーは既にスコアを記録中です。',
+  'error.RECORDING_NOT_ACTIVE': 'この試合は記録中ではありません。画面を更新してください。',
+  'error.RECORDING_LIMIT_REACHED': '同時に記録できるサーバーの数の上限に達しました。ほかのサーバーの記録を停止してからお試しください。',
+  'error.MATCH_NOT_FOUND': '指定した試合の記録が見つかりません。古い記録は自動で削除されます。',
   'error.RCON_UNREACHABLE': 'RCON に接続できません。',
   'error.RCON_TIMEOUT': 'RCON の応答がありません。実行されたかどうかは状態を再読み込みして確認してください。',
   'error.RCON_AUTH_FAILED': 'RCON の認証に失敗しました。',
@@ -218,6 +235,9 @@ export const ja = {
   'action.message': '個別メッセージ',
   'action.map': 'マップ変更',
   'action.match_end': '試合終了',
+  // スコア記録の操作(RecordingAction ごと。全コード必須。docs/ARCHITECTURE.md 17.2)
+  'action.record_start': 'スコア記録の開始',
+  'action.record_stop': 'スコア記録の停止',
 
   // 操作の説明(押す前と確認ダイアログで「何が起きるか」。action.help.<WriteAction> は全コード必須。docs/ARCHITECTURE.md 9.4)
   // RCON の挙動として未検証のこと(マップ変更・試合終了の後の動き。要確認 R-20)は断定しない
@@ -228,6 +248,8 @@ export const ja = {
   'action.help.message': '相手のゲーム画面に表示されます。送った後は取り消せません。',
   'action.help.map': '選んだマップに切り替えます。進行中の試合は終わる見込みです(サーバーの設定によります)。',
   'action.help.match_end': '現在の試合を終了します。通常はローテーションの次のマップに進む見込みです(サーバーの設定によります)。',
+  'action.help.record_start': 'このパネルが 1 分ごとに試合のスコアと人数を記録します。ゲームサーバーの設定は変わりません。',
+  'action.help.record_stop': '記録を終えます。それまでの記録は残ります。ゲームサーバーには影響しません。',
   'action.helpLine': '{action}: {help}',
 
   // 操作ボタンの可否(capabilities と段階)
@@ -246,6 +268,8 @@ export const ja = {
   'confirm.message': '{target} に次のメッセージを送ります。',
   'confirm.map': 'マップを {map} に変更します。',
   'confirm.match_end': '現在の試合を終了します。',
+  'confirm.record_start': 'このサーバーの試合のスコア記録を開始します。',
+  'confirm.record_stop': 'このサーバーのスコア記録を停止します。',
   'confirm.operation': '操作',
   'confirm.server': 'サーバー',
   'confirm.target': '対象',
@@ -434,6 +458,30 @@ export const ja = {
   'audit.event.server_delete_rejected': 'サーバー削除(拒否)',
   'audit.event.server_test': '接続テスト',
   'audit.event.admin_register': '管理パスワード登録',
+  'audit.event.record_start': 'スコア記録の開始',
+  'audit.event.record_stop': 'スコア記録の停止',
+  'audit.event.record_end': 'スコア記録の自動終了',
+  'audit.event.feed_token_issue': '受信用トークンの発行',
+  'audit.event.feed_token_revoke': '受信用トークンの取り消し',
+  'audit.event.feed_settings_update': 'キルフィードの受信設定の変更',
+  // 記録の終了理由(match.endReason.<MatchEndReason> は全コード必須。docs/ARCHITECTURE.md 17.5)
+  'match.endReason.score_cap': 'スコアが上限に達した',
+  'match.endReason.manual': '手動で停止',
+  'match.endReason.map_changed': 'マップが変わった',
+  'match.endReason.match_action': 'このパネルでマップ変更・試合終了をした',
+  'match.endReason.empty': '人数 0 が 10 分続いた',
+  'match.endReason.max_duration': '開始から 3 時間が経った',
+  'match.endReason.server_unavailable': 'サーバーが削除・無効化された',
+  // キルフィードの受信を断った・捨てた理由(feed.reject.<FeedRejectReason>・feed.drop.<FeedDropReason> は全コード必須。17.6)
+  'feed.reject.token_invalid': 'トークンが一致しませんでした',
+  'feed.reject.content_type': 'JSON 以外の形式で届きました',
+  'feed.reject.too_large': '1 回の送信が大きすぎました',
+  'feed.reject.bad_json': 'JSON として読めませんでした',
+  'feed.reject.rate_limited': '送信の回数が多すぎました',
+  'feed.drop.disabled': '受信の保存を止めているため捨てました',
+  'feed.drop.server_unusable': 'サーバーが無効なため捨てました',
+  'feed.drop.daily_limit': 'このサーバーの 1 日の上限に達したため捨てました',
+  'feed.drop.global_limit': '全サーバー合計の 1 日の上限に達したため捨てました',
   'audit.status.pending': '実行中',
   'audit.status.succeeded': '成功',
   'audit.status.failed': '失敗',
@@ -447,6 +495,12 @@ export const ja = {
   Record<`action.${WriteAction}`, string> &
   Record<`confirm.${WriteAction}`, string> &
   Record<`action.help.${WriteAction}`, string> &
+  Record<`action.${RecordingAction}`, string> &
+  Record<`confirm.${RecordingAction}`, string> &
+  Record<`action.help.${RecordingAction}`, string> &
+  Record<`match.endReason.${MatchEndReason}`, string> &
+  Record<`feed.reject.${FeedRejectReason}`, string> &
+  Record<`feed.drop.${FeedDropReason}`, string> &
   Record<`audit.event.${AuditEventType}`, string> &
   Record<`audit.status.${AuditStatus | 'unknown'}`, string>;
 
