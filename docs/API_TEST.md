@@ -326,3 +326,55 @@
 - 本番(Workers Builds・Deploy ボタン経由)での Cron の起動(C-10・C-22)、本番 D1 での `WITHOUT ROWID`・部分索引・batch の原子性(C-23)、Cron 1 回の CPU 時間(C-24)
 - 実サーバーのキルフィードの本文の形式・送信間隔・空のバッチを送るか・再送の挙動(K-1・K-3・K-6)、`scoreCap` / `matchSeconds` / `cash` の意味(R-21・R-22)
 - `wrangler dev`(本番ビルド)での同じ確認は未実施(astro dev のみ)
+
+### 7.6 キルフィード第 2 段階(正規化・保存・API。2026-10-17)
+
+`docs/ARCHITECTURE.md` 17.10、`docs/API.md` 11 章。値(管理パスワード・Cookie・受信用トークン・プレイヤー名・Steam ID)は記録しない。
+
+**確認環境**
+
+| 項目 | 内容 |
+|---|---|
+| Worker | `pnpm build` の成果物を `wrangler dev --port 4391 --persist-to <別の状態ディレクトリ> --test-scheduled`(本番ビルド。司令塔の dev サーバー 4322 とその D1 は使わない) |
+| D1 | 空の別の状態ディレクトリに `wrangler d1 migrations apply DB --local --persist-to …` で 0001〜0004 を適用。`/setup` で管理パスワード(確認スクリプト内でランダム生成)を登録してログイン |
+| RCON・送信 | `MOCK_RCON_PORTS=7790 MOCK_FEED_URL=http://127.0.0.1:4391 MOCK_FEED_TOKEN=<発行したトークン> MOCK_FEED_SHAPE=mixed MOCK_FEED_SEC=1 pnpm mock:rcon`(サーバーの追加はホスト名 `localhost`、ポート 7790) |
+| 手段 | Node の `fetch` の確認スクリプト(リポジトリ外)と `wrangler d1 execute --local --persist-to …`。Cron は curl で `/cdn-cgi/handler/scheduled` を呼んだ |
+| 司令塔の D1 | 4322 が使うローカル D1(`.wrangler/state`)には `pnpm db:migrate:local` で `0004_killfeed.sql` だけを適用した(行は足していない)。適用後も `/login` 200、`/api/killfeed/kills` は未ログインで 401 |
+| 単体テスト | `pnpm test`(vitest、19 ファイル・410 件すべて成功。frontend の `killstats.test.ts` を含む)、`pnpm build` 成功。`pnpm check` 0 件(frontend の作業中のファイルで `tsc` が 1 件出た時点があったが、最終的に 0 件) |
+
+**結果**
+
+| # | 操作 | 期待 | 結果 |
+|---|---|---|---|
+| K2-1 | 正しいトークンで mixed のバッチ(変種 1〜10)を約 1 分 | すべて 204。`feed_kills` にキルの行(変種 8〜9 は保存されない)、`feed_raw_events` にバッチ 1 行ずつ | OK(記録外で 18 キル) |
+| K2-2 | `GET /api/killfeed/kills?server=1&match=unrecorded` | 200、`scope: "unrecorded"`・`match: null`、古い順。武器・乗り物・印・距離・ゲーム内時刻が正規化されている(変種 1 は `WEPN_031`・37.2 m・headshot・3151 秒、変種 3 は `TNK_01 · Anti Air`・roadkill、変種 4 は suicide で `teamkill: null`、変種 5 は `teamkill: true`、変種 7 はキラー null・`Test Fall`)。変種 2・3(陣営なし)は記録外なので陣営不明 | OK |
+| K2-3 | `record_start` の後に同じ送信を続け、`match=<試合 id>` | 200、`match.status: "recording"`。変種 2・3 の当事者に `factionSource: "roster"` の陣営が付き、`teamkill` が判定される。`factions` は最後のサンプルの順 | OK |
+| K2-4 | `after=<cursor>` | 200、`incremental: true`、それ以降のキルだけ(`truncated: false`) | OK |
+| K2-5 | `GET /api/feed/raw/:id/normalized`(変種 6 を含む本文) | `envelope: "array"`、`bigIntegersQuoted: 1`、引用符無しの 17 桁の Steam ID を桁落ちなく読む | OK |
+| K2-6 | 同上(変種 10 / 変種 9) | `envelope: "events"`・kill 2 件 / `incomplete` 1 件・`unmappedKeys: ["a"]` | OK |
+| K2-7 | `PUT /api/servers/1/feed` `{ enabled: true, rawEnabled: "x" }` / `rawEnabled: false` | 400 `fields.rawEnabled = invalid_format` / 200 `rawEnabled: false`。以後 `feed_raw_events` は 38 行のまま増えず、`feed_kills` は 60 → 79 行に増えた | OK |
+| K2-8 | 日次の上限: `feed_daily.kills` を 2,999 にして送信を続ける | 1 キルのバッチで 3,000 に達し、以後のバッチは全部捨てる(`feed_kills` は増えない)。`dropped_kills` が 1 分ごとに加算(46) | OK |
+| K2-9 | `GET /api/servers/1/feed` | `rawEnabled`・`killsToday`(`kills` / `otherEvents` / `incomplete` / `droppedKills`)・`killLimits`(3,000 / 8,000 / 100 / 7)。キル以外・読み取れないキルの件数は受信の状況と同じく 1 分に 1 回まとめて `feed_daily` に書かれる(other 5・incomplete 5 を確認) | OK |
+| K2-10 | 異常系: `server` なし / `match` なし / `match=abc` / `match=999` / `after=x` / 未ログイン / POST | 400 `server = required` / 400 `match = required` / 400 `invalid_format` / 404 `MATCH_NOT_FOUND` / 400 `after = invalid_format` / 401 `UNAUTHENTICATED` / 405 | OK |
+| K2-11 | 異常系(正規化の試行): `:id=abc` / `server` なし / 無い id | 400 `fields.id` / 400 `fields.server = required` / 404 `NOT_FOUND` | OK |
+| K2-12 | 監査ログ(`/api/audit?kind=settings`) | `feed_settings_update`(`params: { enabled: true, rawEnabled: false }`、操作者・succeeded)、`record_start`、`feed_token_issue`。応答にトークン・管理パスワードが含まれない | OK |
+| K2-13 | Cron(curl で scheduled) | 記録中の試合のサンプルに `roster_json`(Steam ID → 陣営の添字。名前なし)。開始時のサンプルにも同じ形で入る | OK |
+| K2-14 | Worker のログ | `wof1.`・プレイヤー名の出現 0 件 | OK |
+
+**ローカル D1 での確認(C-25・C-26。本番 D1 は要確認のまま)**
+
+- C-25: `INSERT INTO feed_kills (...) SELECT ..., json_extract(value, '$.…') ... FROM json_each(?) ORDER BY CAST(key AS INTEGER)` が `wrangler d1 execute --local` と `wrangler dev` の両方で動いた(Steam ID は `TEXT` のまま、null は NULL、記録中の試合の id の副問い合わせも可)。1 文の大きさの上限(1 バッチ 100 キル ≒ 20 KB のバインド)は本番で未確認。
+- C-26: `wrangler d1 migrations apply --local` で 2 つのトリガーが作られ(`sqlite_master` で確認)、`DELETE FROM match_recordings` でその試合のキルが、`DELETE FROM servers` でそのサーバーの記録外のキルだけが消えた(試合に属するキルは残る)。
+- `INSERT ... SELECT ... WHERE ... ON CONFLICT ... DO UPDATE ... WHERE ... RETURNING`(キルの日次の上限)も `wrangler dev` で期待どおり。
+
+**単体テストで確認した項目**
+
+- `src/lib/killfeed/normalize.test.ts`: 対応表の全候補(1 候補ずつ `matched` に出ること)、16 桁以上の整数の引用(小数・指数・負数・0 始まり・文字列の中は対象外)、外側の形 4 種と invalid、種類の判定(`KILL_EVENT_TYPES`・種類なし)、値の検証(Steam ID の形式・距離の範囲と丸め・cm・時刻の ±1 日・`m:ss`・真偽の表記・名前の切り詰め)、flagList、自殺(印・同じ Steam ID)、incomplete、1 バッチ 100 件、診断(値を含めない)
+- `src/lib/killfeed/store.test.ts`: 受信からの保存と件数の間引き、`raw_enabled = 0` でキルだけ保存・PUT の検証と変更ログ、生データの上限はキルを止めない、キルの日次の上限(サーバー・全体。全部捨てる)、`enabled = 0` で保存しない、roster の鮮度(3 分)、出所が違えば `teamkill = null`、`buildRosterJson`、差分の位置(同じ受信時刻の複数行)、クエリの検証・`MATCH_NOT_FOUND`・記録外 500 件、トリガー(試合・サーバーの削除)、記録外の期限切れ(毎時の掃除)、正規化の試行
+- `src/lib/recordings.test.ts`: 開始時と Cron のサンプルの `roster_json`(players が取れなければ NULL)
+- `src/lib/config.test.ts`: 0004 の表・列が無い D1 は `not_migrated`
+
+**未確認**
+
+- 本番 D1 での `json_each` の INSERT・トリガー(C-25・C-26)、受信 1 件の CPU 時間(C-27)
+- 実サーバーの本文の項目名(K-1・K-9〜K-14)。mixed の変種の項目名もすべて推測

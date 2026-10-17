@@ -58,6 +58,18 @@ describe('config', () => {
     resetD1Cache();
   });
 
+  it('0004 の表・列が無い D1(0003 まで)は not_migrated', async () => {
+    resetD1Cache();
+    expect(await probeD1(await makeD1({ migrations: ['0001_init.sql', '0002_servers.sql', '0003_recordings.sql'] }))).toBe('not_migrated');
+    resetD1Cache();
+    const db = await makeD1();
+    await db.prepare('DROP TABLE feed_kills').run();
+    expect(await probeD1(db)).toBe('not_migrated');
+    resetD1Cache();
+    expect(await probeD1(await makeD1())).toBe('ok');
+    resetD1Cache();
+  });
+
   it('0003 の表・列が無い D1(0002 まで)は not_migrated', async () => {
     resetD1Cache();
     expect(await probeD1(await makeD1({ migrations: ['0001_init.sql', '0002_servers.sql'] }))).toBe('not_migrated');

@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { POLL_MIN_INTERVAL_SEC } from '../../types/api';
 import type { CapabilitiesResponse, ServerId } from '../../types/api';
 import { formatDateTime, formatNumber, getTranslator, toLocale } from '../../i18n';
-import type { Language, Translator } from '../../i18n';
+import type { Language, Locale, Translator } from '../../i18n';
 import { apiGet, withServer } from './api';
 import type { ClientError } from './api';
 import { createPoller, INITIAL_SNAPSHOT } from './poller';
@@ -23,6 +23,9 @@ export interface I18n {
   dateTime: (epochMs: number) => string;
   time: (epochMs: number) => string;
   num: (value: number | null | undefined) => string;
+  /** Intl に渡す locale とタイムゾーン(個別の書式が要る画面用) */
+  locale: Locale;
+  timeZone: string;
 }
 
 export function useI18n({ language, timeZone }: I18nProps): I18n {
@@ -34,6 +37,8 @@ export function useI18n({ language, timeZone }: I18nProps): I18n {
       dateTime: (ms) => formatDateTime(ms, locale, timeZone),
       time: (ms) => formatDateTime(ms, locale, timeZone, { timeStyle: 'medium' }),
       num: (v) => (typeof v === 'number' && Number.isFinite(v) ? formatNumber(v, locale) : t('common.none')),
+      locale,
+      timeZone,
     };
   }, [language, timeZone]);
 }

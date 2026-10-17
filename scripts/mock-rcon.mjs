@@ -18,6 +18,10 @@
 //                       ダミーの killed バッチと空のバッチを交互に POST する(MOCK_FEED_URL はパネルの URL。例 http://127.0.0.1:4322)
 //   MOCK_FEED_TOKEN     その送信に使う受信用トークン(パネルの設定タブで発行したもの。ログに出さない)
 //   MOCK_FEED_SEC       送信の間隔(秒。既定 2)
+//   MOCK_FEED_SHAPE     送信する本文の形(docs/ARCHITECTURE.md 17.10.10)。basic(既定)= 第 1 段階のまま /
+//                       mixed = 正規化の対応表の確認用に 10 種類の変種を順番に混ぜる(1 バッチ 1〜3 件)。
+//                       変種の項目名もすべて推測(実サーバーの形式は未検証 K-1)。6 番の変種だけ Steam ID を
+//                       引用符無しの 17 桁の数値で書く(JSON の数値は 0 で始められないため、先頭を 1 にした架空の ID)
 //
 // 試合: POST /v1/match/map・/v1/match/end で新しい試合になり、スコアと cash を初期値に戻す(マップも変わる)。
 // キルフィードの本文の形({ type: 'killed', killer, victim, weapon, distance, headshot, time } の配列)は
@@ -70,6 +74,7 @@ const SCORE_CAP = envNumber('MOCK_SCORE_CAP', 100);
 const FEED_URL = (process.env.MOCK_FEED_URL || '').trim().replace(/\/+$/, '');
 const FEED_TOKEN = (process.env.MOCK_FEED_TOKEN || '').trim();
 const FEED_SEC = envNumber('MOCK_FEED_SEC', 2);
+const FEED_SHAPE = (process.env.MOCK_FEED_SHAPE || 'basic').trim().toLowerCase();
 
 const BASE_PLAYERS = [
   { name: 'TestPlayerA', faction: 'Blue', kills: 12, deaths: 3, cash: 1500, pingMs: 24 },
@@ -360,27 +365,40 @@ if (FEED_URL !== '') {
     console.error('MOCK_FEED_TOKEN is required when MOCK_FEED_URL is set');
     process.exit(1);
   }
+  if (FEED_SHAPE !== 'basic' && FEED_SHAPE !== 'mixed') {
+    console.error('MOCK_FEED_SHAPE must be basic or mixed');
+    process.exit(1);
+  }
   const target = `${FEED_URL}/api/ingest/events`;
   let tick = 0;
+  let variant = 0;
   const send = async () => {
     tick += 1;
     // 1 回おきに空のバッチ(ゲームが空のときも送るかは未検証 K-3)
     const state = states[0];
     let body = '[]';
+    let label = 'empty';
     if (tick % 2 === 1 && state && state.players.length >= 2) {
-      const a = state.players[tick % state.players.length];
-      const b = state.players[(tick + 1) % state.players.length];
-      body = JSON.stringify([
-        {
-          type: 'killed',
-          time: new Date().toISOString(),
-          killer: { name: a.name, steamId: a.steamId, faction: a.faction },
-          victim: { name: b.name, steamId: b.steamId, faction: b.faction },
-          weapon: 'mock_rifle',
-          distance: 50 + (tick % 7) * 25,
-          headshot: tick % 3 === 0,
-        },
-      ]);
+      if (FEED_SHAPE === 'mixed') {
+        const batch = mixedBatch(state, tick);
+        body = batch.body;
+        label = `mixed ${batch.variants.join('+')}`;
+      } else {
+        const a = state.players[tick % state.players.length];
+        const b = state.players[(tick + 1) % state.players.length];
+        body = JSON.stringify([
+          {
+            type: 'killed',
+            time: new Date().toISOString(),
+            killer: { name: a.name, steamId: a.steamId, faction: a.faction },
+            victim: { name: b.name, steamId: b.steamId, faction: b.faction },
+            weapon: 'mock_rifle',
+            distance: 50 + (tick % 7) * 25,
+            headshot: tick % 3 === 0,
+          },
+        ]);
+        label = 'killed x1';
+      }
     }
     try {
       const res = await fetch(target, {
@@ -389,12 +407,124 @@ if (FEED_URL !== '') {
         body,
       });
       await res.arrayBuffer().catch(() => undefined);
-      // トークン・本文は出さない
-      console.log(`${new Date().toISOString()} feed POST /api/ingest/events (${body === '[]' ? 'empty' : 'killed x1'}) -> ${res.status}`);
+      // トークン・本文は出さない(変種の番号と応答の状態だけ)
+      console.log(`${new Date().toISOString()} feed POST /api/ingest/events (${label}) -> ${res.status}`);
     } catch (err) {
       console.log(`${new Date().toISOString()} feed POST /api/ingest/events -> error (${err && err.name ? err.name : 'Error'})`);
     }
   };
+
+  /**
+   * mixed の 1 バッチ(17.10.10 の変種 1〜10 を順番に。1 バッチ 1〜3 件)。10 番(events で包んだオブジェクト)は単独で送る。
+   * 6 番は Steam ID を引用符無しの数値で書くため、本文の文字列を手で組み立てる(JSON.stringify を使わない)
+   */
+  function mixedBatch(st, t) {
+    const count = 1 + (t % 3);
+    const parts = [];
+    const variants = [];
+    for (let i = 0; i < count; i += 1) {
+      const v = (variant % 10) + 1;
+      if (v === 10 && parts.length > 0) break;
+      variant += 1;
+      variants.push(v);
+      if (v === 10) {
+        return { body: JSON.stringify({ events: [mixedVariant(st, 1, t), mixedVariant(st, 2, t)] }), variants };
+      }
+      parts.push(v === 6 ? numericSteamIdVariant(st, t) : JSON.stringify(mixedVariant(st, v, t)));
+    }
+    return { body: `[${parts.join(',')}]`, variants };
+  }
+
+  function pick(st, n) {
+    return st.players[n % st.players.length];
+  }
+
+  /** 同じ陣営の 2 人(無ければ先頭の 2 人) */
+  function sameFactionPair(st) {
+    for (const a of st.players) {
+      const b = st.players.find((p) => p !== a && p.faction === a.faction);
+      if (b) return [a, b];
+    }
+    return [st.players[0], st.players[1]];
+  }
+
+  function mixedVariant(st, v, t) {
+    const a = pick(st, t);
+    const b = pick(st, t + 1);
+    switch (v) {
+      case 1:
+        return {
+          type: 'killed',
+          killer: { name: a.name, steamId: a.steamId, faction: a.faction },
+          victim: { name: b.name, steamId: b.steamId, faction: b.faction },
+          weapon: { id: 'WEPN_031', name: 'Test Rifle' },
+          distanceM: 37.2,
+          headshot: true,
+          gameTime: 3151,
+        };
+      case 2:
+        // 陣営なし(記録中なら roster から付く)
+        return {
+          event: 'kill',
+          killerName: a.name,
+          killerSteamId: a.steamId,
+          victimName: b.name,
+          victimSteamId: b.steamId,
+          weaponName: 'Test Pistol',
+          distance: 12,
+          isHeadshot: false,
+          flags: ['PENETRATION'],
+        };
+      case 3:
+        return {
+          type: 'killed',
+          attacker: { name: a.name, steamId: a.steamId },
+          victim: { name: b.name, steamId: b.steamId },
+          vehicle: { id: 'TNK_01', name: 'Test Tank' },
+          weapon: 'Anti Air',
+          range: 180,
+          tags: 'ROADKILL',
+        };
+      case 4:
+        // 自殺・距離不明
+        return {
+          type: 'killed',
+          killer: { name: a.name, steamId: a.steamId, faction: a.faction },
+          victim: { name: a.name, steamId: a.steamId, faction: a.faction },
+          weapon: { id: 'GRENADE_TEST' },
+        };
+      case 5: {
+        // チームキル(同じ陣営の 2 人)
+        const [x, y] = sameFactionPair(st);
+        return {
+          type: 'killed',
+          killer: { name: x.name, steamId: x.steamId, faction: x.faction },
+          victim: { name: y.name, steamId: y.steamId, faction: y.faction },
+          weapon: { id: 'WEPN_031', name: 'Test Rifle' },
+          distanceM: 8.4,
+        };
+      }
+      case 7:
+        // 環境による死亡(キラーなし)
+        return { type: 'killed', victim: { name: b.name, steamId: b.steamId, faction: b.faction }, cause: 'Test Fall' };
+      case 8:
+        return { type: 'test_unknown_event', foo: 1 };
+      case 9:
+        return { type: 'killed', a: 1 };
+      default:
+        return mixedVariant(st, 1, t);
+    }
+  }
+
+  /** 6 番: killer.steamId を引用符無しの 17 桁の数値で書いた本文(先頭を 1 にした架空の ID。実在の SteamID64 の形式ではない) */
+  function numericSteamIdVariant(st, t) {
+    const a = pick(st, t);
+    const b = pick(st, t + 2);
+    const numericId = `1${a.steamId.slice(1)}`;
+    const victim = JSON.stringify({ name: b.name, steamId: b.steamId, faction: b.faction });
+    return `{"type":"killed","killer":{"name":${JSON.stringify(a.name)},"steamId":${numericId},"faction":${JSON.stringify(a.faction)}},"victim":${victim},"weapon":{"id":"WEPN_031"},"distanceM":64.5}`;
+  }
+
   setInterval(send, Math.max(0.5, FEED_SEC) * 1000);
-  console.log(`mock feed: posting every ${FEED_SEC}s to ${FEED_URL}/api/ingest/events (token not shown)`);
+  console.log(`mock feed: posting every ${FEED_SEC}s (shape: ${FEED_SHAPE}) to ${FEED_URL}/api/ingest/events (token not shown)`);
 }

@@ -13,5 +13,5 @@ const server = ctx.server && !ctx.serverNotFound && ctx.server.usable ? { id: ct
 ---
 <OpsLayout title={ctx.t('tabs.killfeed')} language={ctx.language} ctx={ctx} active="killfeed">
   <ServerGate ctx={ctx} />
-  {server && <KillfeedPanel client:load language={ctx.language} timeZone={ctx.timeZone} server={server} />}
+  {server && <KillfeedPanel client:load language={ctx.language} timeZone={ctx.timeZone} server={server} feedConfigured={ctx.server?.feedConfigured === true} />}
 </OpsLayout>

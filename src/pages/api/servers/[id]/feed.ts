@@ -1,4 +1,4 @@
-// GET /api/servers/:id/feed → ServerFeedStatus、PUT /api/servers/:id/feed({ enabled })→ ServerFeedStatus(docs/API.md 7.3)
+// GET /api/servers/:id/feed → ServerFeedStatus & KillfeedFeedStatusExtra、PUT /api/servers/:id/feed({ enabled, rawEnabled? })→ 同(docs/API.md 7.3・11.4)
 // トークンの値・ハッシュは返さない。PUT はトークン未発行なら 404 NOT_FOUND
 import { getFeedStatus, updateFeedSettings } from '../../../../lib/feed';
 import { jsonError, jsonOk, readJsonBody } from '../../../../lib/http';

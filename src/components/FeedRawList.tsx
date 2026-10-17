@@ -4,9 +4,11 @@
 // - 本文はゲームサーバーから届いた JSON 文字列のまま。**テキストとして**表示する(HTML として解釈しない。
 //   React の文字列の子要素は常にエスケープされる。dangerouslySetInnerHTML は使わない)。既定は折りたたみ
 // - 本文には Steam ID・プレイヤー名が含まれ得る(ログイン後の画面にだけ出す。docs/ARCHITECTURE.md の方針どおり)
+// - 各件の「正規化の結果」で GET /api/feed/raw/:id/normalized(今の対応表で読み取った結果。保存はしない。API.md 11.2)を表示する
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { FEED_RAW_PAGE_DEFAULT, FEED_RETENTION_DAYS } from '../types/api';
 import type { FeedRawEntry, FeedRawResponse, ServerFeedStatus, ServerId } from '../types/api';
+import FeedNormalizeView from './FeedNormalizeView';
 import { apiGet, withServer } from './lib/api';
 import type { ClientError } from './lib/api';
 import type { I18n } from './lib/hooks';
@@ -81,7 +83,7 @@ export default function FeedRawList({ i18n, serverId, settingsHref }: Props) {
           {loading ? t('common.loading') : t('common.refresh')}
         </button>
       </div>
-      <p className="alert">{t('feed.raw.observation')}</p>
+      <p className="alert">{t('killfeed.raw.intro')}</p>
       <p className="muted">
         {t('feed.raw.personalData')} {t('feed.raw.retention', { days: num(FEED_RETENTION_DAYS) })}
       </p>
@@ -114,6 +116,7 @@ export default function FeedRawList({ i18n, serverId, settingsHref }: Props) {
                   {t('feed.raw.entry', { time: dateTime(e.receivedAt), bytes: num(e.bytes), events: eventsText(e) })}
                 </summary>
                 <pre className="feed-raw-body">{e.body}</pre>
+                <FeedNormalizeView i18n={i18n} serverId={serverId} entryId={e.id} />
               </details>
             </li>
           ))}

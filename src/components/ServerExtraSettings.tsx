@@ -1,6 +1,8 @@
 // 設定タブ(/servers)の、選択中のサーバーについての 2 節(docs/ARCHITECTURE.md 17.6・17.9、docs/API.md 7.2・7.3)。
 // - スコア記録: 上限(空欄で既定 SCORE_CAP_DEFAULT)。PUT /api/servers/:id の scoreCap
 // - キルフィード(観測モード): 受信の状況、受信用トークンの発行 / 再発行 / 取り消し、保存の有効・無効、ServerSettings.ini の案内
+// - キルフィード第 2 段階(17.10.7・API.md 11.4): 生データも保存するか(rawEnabled)、今日保存したキルと上限、保持
+//   (応答に項目が無ければ第 1 段階の表示のまま)
 // トークンの平文は発行の応答でだけ返る。この画面の状態(メモリ)にだけ持ち、発行直後に 1 回だけ表示する(保存・ログ出力はしない)。
 // ini の Url はパネル自身の origin(Astro.url.origin。ページから props で受ける)から組み立てる。
 import { useEffect, useRef, useState } from 'react';
@@ -9,12 +11,16 @@ import {
   FEED_INGEST_PATH,
   FEED_RETENTION_DAYS,
   FEED_TOKEN_CACHE_SEC,
+  RECORDING_KEEP_ENDED,
+  RECORDING_RETENTION_DAYS,
   SCORE_CAP_DEFAULT,
   SCORE_CAP_MAX,
   SCORE_CAP_MIN,
 } from '../types/api';
 import type {
   FeedTokenResponse,
+  KillfeedFeedStatusExtra,
+  KillfeedUpdateFeedExtra,
   ServerFeedStatus,
   ServerMutationResponse,
   ServerSummary,
@@ -133,6 +139,9 @@ function ScoreCapSection({ i18n, server, onChanged }: Omit<Props, 'panelOrigin'>
 
 type Pending = 'reissue' | 'revoke' | null;
 
+/** 第 2 段階の項目は backend の実装前の応答には無いので任意として読む */
+type FeedStatus = ServerFeedStatus & Partial<KillfeedFeedStatusExtra>;
+
 /** 一時的な結果の表示 */
 interface Notice {
   kind: 'ok' | 'error';
@@ -143,8 +152,8 @@ interface Notice {
 function FeedSection({ i18n, server, panelOrigin, onChanged }: Props) {
   const { t, time, num } = i18n;
   const feedPath = `/api/servers/${encodeURIComponent(server.id)}/feed`;
-  const feed = useResource<ServerFeedStatus>(feedPath, null);
-  const [status, setStatus] = useState<ServerFeedStatus | null>(null);
+  const feed = useResource<FeedStatus>(feedPath, null);
+  const [status, setStatus] = useState<FeedStatus | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending>(null);
   const [busy, setBusy] = useState(false);
@@ -232,7 +241,7 @@ function FeedSection({ i18n, server, panelOrigin, onChanged }: Props) {
     setBusy(true);
     setNotice(null);
     const body: UpdateFeedRequest = { enabled };
-    const r = await apiPut<ServerFeedStatus>(feedPath, body);
+    const r = await apiPut<FeedStatus>(feedPath, body);
     setBusy(false);
     if (!r.ok) {
       setNotice({ kind: 'error', text: t('feed.failed'), error: r.error });
@@ -240,6 +249,21 @@ function FeedSection({ i18n, server, panelOrigin, onChanged }: Props) {
     }
     setStatus(r.data);
     setNotice({ kind: 'ok', text: t('feed.enabled.saved') });
+  };
+
+  const setRawEnabled = async (rawEnabled: boolean) => {
+    if (busy || !status) return;
+    setBusy(true);
+    setNotice(null);
+    const body: UpdateFeedRequest & KillfeedUpdateFeedExtra = { enabled: status.enabled, rawEnabled };
+    const r = await apiPut<FeedStatus>(feedPath, body);
+    setBusy(false);
+    if (!r.ok) {
+      setNotice({ kind: 'error', text: t('feed.failed'), error: r.error });
+      return;
+    }
+    setStatus(r.data);
+    setNotice({ kind: 'ok', text: t('feed.rawEnabled.saved') });
   };
 
   return (
@@ -367,7 +391,46 @@ function FeedSection({ i18n, server, panelOrigin, onChanged }: Props) {
               <p id="feed-enabled-help" className="action-help">
                 {t('feed.enabled.help')}
               </p>
+              {typeof status.rawEnabled === 'boolean' && (
+                <>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={status.rawEnabled}
+                      disabled={busy}
+                      aria-describedby="feed-raw-enabled-help"
+                      onChange={(e) => void setRawEnabled(e.target.checked)}
+                    />
+                    <span>{t('feed.rawEnabled.label')}</span>
+                  </label>
+                  <p id="feed-raw-enabled-help" className="action-help">
+                    {t('feed.rawEnabled.help')}
+                  </p>
+                </>
+              )}
             </>
+          )}
+
+          {status.killsToday && status.killLimits && (
+            <dl className="kv">
+              <dt>{t('feed.kills.today')}</dt>
+              <dd>
+                {t('feed.kills.todayValue', {
+                  kills: num(status.killsToday.kills),
+                  max: num(status.killLimits.dailyKills),
+                  globalMax: num(status.killLimits.globalDailyKills),
+                })}
+              </dd>
+            </dl>
+          )}
+          {status.killLimits && (
+            <p className="muted">
+              {t('feed.kills.retention', {
+                matches: num(RECORDING_KEEP_ENDED),
+                days: num(RECORDING_RETENTION_DAYS),
+                unrecordedDays: num(status.killLimits.unrecordedRetentionDays),
+              })}
+            </p>
           )}
 
           <FeedStatusView i18n={i18n} status={status} />

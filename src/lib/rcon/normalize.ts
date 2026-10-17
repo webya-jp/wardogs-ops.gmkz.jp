@@ -1,7 +1,7 @@
 // RCON 応答の正規化。docs/API.md 6.1、src/types/api.ts。
 // 形式はすべて非公式資料ベースの未検証(R-8, R-9, R-11)。解釈できない項目は null にし、
 // 最上位の形が想定と違えば null を返す(呼び出し側で RCON_BAD_RESPONSE)。生の応答は返さない。
-import { STATUS_EXPERIENCE_MAX_LENGTH, STATUS_EXPERIENCES_MAX } from '../../types/api';
+import { STATUS_EXPERIENCE_MAX_LENGTH, STATUS_EXPERIENCES_MAX, STEAM_ID_PATTERN } from '../../types/api';
 import type {
   Ban,
   BansResponse,
@@ -174,12 +174,17 @@ export function normalizePlayers(data: unknown, fetchedAt: number): PlayersRespo
 }
 
 /**
- * スコア記録用のプレイヤー(陣営と cash だけ。名前・Steam ID は持たない)。docs/ARCHITECTURE.md 17.1・17.3。
+ * スコア記録用のプレイヤー(陣営と cash と、陣営の付与用の Steam ID。名前は持たない)。docs/ARCHITECTURE.md 17.1・17.3。
  * 画面用の PlayersResponse には cash を出さない(docs/API.md 3 章)ので、別の関数で読む。cash の意味は未検証(R-22)
  */
 export interface RecordingPlayer {
   faction: string | null;
   cash: number | null;
+  /**
+   * キルフィードの陣営の付与用(match_samples.roster_json。docs/ARCHITECTURE.md 17.10.4)。STEAM_ID_PATTERN に合うものだけ。
+   * サンプルの集計(陣営ごとの人数と cash)には使わない
+   */
+  steamId?: string | null;
 }
 
 /** GET /v1/players を記録用に読む。最上位の形が想定と違えば null(呼び出し側で「取れなかった」扱い) */
@@ -189,7 +194,8 @@ export function normalizeRecordingPlayers(data: unknown): RecordingPlayer[] | nu
   const out: RecordingPlayer[] = [];
   for (const p of list.slice(0, MAX_PLAYERS)) {
     if (!isObj(p)) continue;
-    out.push({ faction: faction(p.faction), cash: num(p.cash) });
+    const id = steamId(p.steamId);
+    out.push({ faction: faction(p.faction), cash: num(p.cash), steamId: STEAM_ID_PATTERN.test(id) ? id : null });
   }
   return out;
 }

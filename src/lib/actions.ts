@@ -25,6 +25,7 @@ import { confirmTokenBaseValid, issueConfirmToken, verifyConfirmToken } from './
 import { isPlainObject } from './http';
 import type { ErrorOptions } from './http';
 import type { DerivedKeys } from './keys';
+import { buildRosterJson } from './killfeed/store';
 import { rconRequest, READ_TIMEOUT_MS, WRITE_TIMEOUT_MS } from './rcon/client';
 import type { ClientDeps, RconResult } from './rcon/client';
 import { getCapabilities, invalidateCapabilities } from './rcon/capabilities';
@@ -435,7 +436,7 @@ async function executeRecording(ctx: ActionContext, body: unknown): Promise<Acti
              VALUES (?1, ?2, 'recording', ?3, ?4, ?5, ?6, ?3, ?3) RETURNING id`,
           )
           .bind(sid, server.name, at, st.data.map, cap.cap, cap.source),
-        sampleInsertStmt(db, { activeServerId: sid }, sample, bucketMinute(at)),
+        sampleInsertStmt(db, { activeServerId: sid }, sample, bucketMinute(at), buildRosterJson(players)),
         db
           .prepare(
             `INSERT INTO settings_audit_log (created_at, event, operator, session_tag, ip_hash, server_id, server_name, params_json, confirm_nonce)

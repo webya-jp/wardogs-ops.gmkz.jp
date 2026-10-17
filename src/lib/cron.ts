@@ -5,6 +5,7 @@
 // - ログに出すのは件数とエラーコードだけ(ホスト名・サーバー名・プレイヤー名・パスワードは出さない。5.7)
 import {
   FEED_RETENTION_DAYS,
+  KILLFEED_UNRECORDED_RETENTION_DAYS,
   MAX_ACTIVE_RECORDINGS,
   RECORDING_EMPTY_END_MS,
   RECORDING_MAX_DURATION_MS,
@@ -13,6 +14,7 @@ import type { ApiErrorCode, MatchEndReason, ScoreCapSource } from '../types/api'
 import { CLEANUP_BATCH_ROWS, CLEANUP_MINUTE_UTC, CRON_RCON_CONCURRENCY } from '../types/env';
 import type { CronEnv } from '../types/env';
 import { utcDay } from './feed';
+import { buildRosterJson } from './killfeed/store';
 import { getKeys } from './keys';
 import { rconRequest, READ_TIMEOUT_MS } from './rcon/client';
 import type { ClientDeps } from './rcon/client';
@@ -67,7 +69,7 @@ export function isCleanupMinute(scheduledTime: number): boolean {
   return new Date(scheduledTime).getUTCMinutes() === CLEANUP_MINUTE_UTC;
 }
 
-/** 毎時の掃除(17.7)。1 つの表あたり CLEANUP_BATCH_ROWS 行まで */
+/** 毎時の掃除(17.7・17.10.9)。1 つの表あたり CLEANUP_BATCH_ROWS 行まで(記録外のキルは期限切れの 1 文) */
 export async function runCleanup(db: D1Database, now: number): Promise<void> {
   const n = CLEANUP_BATCH_ROWS;
   await db.batch([
@@ -93,6 +95,10 @@ export async function runCleanup(db: D1Database, now: number): Promise<void> {
       .bind(now - FEED_RETENTION_DAYS * DAY_MS, n),
     db.prepare('DELETE FROM feed_daily WHERE day < ?1').bind(utcDay(now) - 8),
     db.prepare('DELETE FROM server_feeds WHERE server_id NOT IN (SELECT id FROM servers)'),
+    // 記録外のキルの期限切れ(17.10.9。試合に属するキルは試合の削除でトリガーが消す。削除済みのサーバーの分もトリガーが消す)
+    db
+      .prepare('DELETE FROM feed_kills WHERE server_id IN (SELECT id FROM servers) AND recording_id = 0 AND received_at < ?1')
+      .bind(now - KILLFEED_UNRECORDED_RETENTION_DAYS * DAY_MS),
   ]);
 }
 
@@ -131,7 +137,7 @@ async function processRecording(db: D1Database, row: ActiveRow, key: CryptoKey |
 
   // 6. サンプル(記録中のときだけ。同じ分は主キーで 1 行)
   const sample = buildSample(status, players, t);
-  await sampleInsertStmt(db, { recordingId: Number(row.id) }, sample, bucketMinute(t)).run();
+  await sampleInsertStmt(db, { recordingId: Number(row.id) }, sample, bucketMinute(t), buildRosterJson(players)).run();
 
   // 7. 上限(status.scoreCap → サーバーの設定 → 既定)。記録の値と違えば更新する(変化したときだけ)
   const cap = effectiveScoreCap(status.scoreCap, row.s_score_cap);

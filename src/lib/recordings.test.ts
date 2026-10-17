@@ -500,3 +500,25 @@ describe('サーバーのスコア上限の設定', () => {
     expect(logs.map((l) => JSON.parse(l.params_json).scoreCap)).toEqual([50, null]);
   });
 });
+
+describe('陣営の付与用の観測(roster_json。キルフィード第 2 段階 17.10.4)', () => {
+  it('開始時と Cron のサンプルに Steam ID → 陣営の添字だけを書く(名前は入れない)。players が取れなければ NULL', async () => {
+    const s = await setup();
+    const started = await start(s, s.a);
+    const id = Number(started.match.id);
+    const rosters = async () =>
+      ((await s.db.prepare('SELECT roster_json FROM match_samples WHERE recording_id = ?1 ORDER BY bucket_minute').bind(id).all()).results as { roster_json: string | null }[]).map(
+        (r) => r.roster_json,
+      );
+    const expected = { f: ['Blue', 'Red'], p: { '00000000000000001': 0, '00000000000000002': 1, '00000000000000003': 0, '00000000000000004': 1 } };
+    expect((await rosters()).map((r) => (r === null ? null : JSON.parse(r)))).toEqual([expected]);
+    expect((await rosters()).join('')).not.toMatch(/P[1-4]/);
+    await cron(s, T0 + 60_000);
+    (s.st['rcon-a.example.com'] as MockState).playersFails = true;
+    await cron(s, T0 + 120_000);
+    const all = await rosters();
+    expect(all.length).toBe(3);
+    expect(JSON.parse(all[1] ?? 'null')).toEqual(expected);
+    expect(all[2]).toBeNull();
+  });
+});

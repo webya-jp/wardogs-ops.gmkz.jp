@@ -1,10 +1,10 @@
 // テスト専用: Node の node:sqlite を D1 の最小互換(prepare / bind / first / run / all / batch)で包む。
-// マイグレーション(db/migrations/0001_init.sql、0002_servers.sql、0003_recordings.sql)を順に適用する。
+// マイグレーション(db/migrations/0001_init.sql、0002_servers.sql、0003_recordings.sql、0004_killfeed.sql)を順に適用する。
 // batch は 1 トランザクション(途中で失敗したら全体を取り消す。D1 の db.batch() と同じ前提。要確認 M-2)。
 // @types/node を入れていないため、型は any で受ける(本番コードからは import しない)
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-export const MIGRATIONS = ['0001_init.sql', '0002_servers.sql', '0003_recordings.sql'] as const;
+export const MIGRATIONS = ['0001_init.sql', '0002_servers.sql', '0003_recordings.sql', '0004_killfeed.sql'] as const;
 
 export async function makeD1(opts: { migrations?: readonly string[] } = {}): Promise<D1Database> {
   const mod: any = await import(/* @vite-ignore */ `node:${'sqlite'}`);

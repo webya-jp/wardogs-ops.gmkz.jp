@@ -1330,3 +1330,554 @@ dialog.confirm-dialog::backdrop {
 .copy-row button {
   flex: none;
 }
+
+/* ---------- キルフィードの集計(第 2 段階。docs/ARCHITECTURE.md 17.10.7) ---------- */
+/* 375px でも横スクロールを出さない: grid の列は minmax(0, …)、長い名前・武器名は overflow-wrap: anywhere で折り返す */
+
+/* 陣営の印: 色に加えて陣営名の先頭 2 文字を書く(色だけで区別させない)。不明は破線の枠と「?」 */
+.faction-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 2.1em;
+  height: 1.5em;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
+  white-space: nowrap;
+  color: var(--surface);
+  background: var(--chart-other);
+}
+
+.faction-badge[data-faction='1'] {
+  background: var(--chart-1);
+}
+
+.faction-badge[data-faction='2'] {
+  background: var(--chart-2);
+}
+
+.faction-badge[data-faction='3'] {
+  background: var(--chart-3);
+}
+
+.faction-badge[data-faction='unknown'] {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px dashed var(--text-muted);
+}
+
+/* 現在のスコア */
+.score-board {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  padding: 0;
+  margin: 0;
+}
+
+.score-board li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.score-board-name {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.score-board-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 統計カード 5 枚: 768px 未満は 2 列(5 枚目は全幅)、以上は 5 列 */
+.kill-stats {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0;
+  margin: 0;
+}
+
+.kill-stats > li:nth-child(5) {
+  grid-column: 1 / -1;
+}
+
+@media (min-width: 768px) {
+  .kill-stats {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .kill-stats > li:nth-child(5) {
+    grid-column: auto;
+  }
+}
+
+.kill-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.kill-stat-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.kill-stat-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.kill-stat-sub {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* 2 枚並べるカード(上位のプレイヤー + 武器は 768px 以上、時間帯 + 最長キルは 1024px 以上で横に並べる) */
+.kill-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: 16px;
+  align-items: start;
+}
+
+@media (min-width: 768px) {
+  .kill-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .kill-row.kill-row-wide {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .kill-row.kill-row-wide {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  }
+}
+
+/* 時間帯別の棒。ヘッドショットは塗り + 斜線の模様 */
+.kt-bar {
+  cursor: pointer;
+  outline: none;
+}
+
+.kt-hit {
+  fill: transparent;
+}
+
+.kt-bar:hover .kt-hit {
+  fill: var(--surface-2);
+}
+
+.kt-bar:focus-visible .kt-hit {
+  fill: var(--info-bg);
+  stroke: var(--focus);
+  stroke-width: 2;
+}
+
+.kt-bar.is-dim {
+  opacity: 0.4;
+}
+
+.kt-bar-kill {
+  fill: var(--chart-1);
+}
+
+.kt-hs-bg {
+  fill: var(--chart-2);
+}
+
+.kt-hs-line {
+  stroke: var(--surface);
+  stroke-width: 2.5;
+}
+
+.kt-bar-outline {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 2;
+}
+
+.kill-timeline {
+  min-width: 0;
+}
+
+.kill-timeline-selected {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.kill-timeline-selected p {
+  margin: 0;
+}
+
+/* 最長キル */
+.kill-longest p {
+  margin: 0 0 6px;
+  overflow-wrap: anywhere;
+}
+
+.kill-longest-distance {
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.kill-longest-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
+/* 上位のプレイヤー・武器の表(列幅を固定して、名前は折り返す) */
+.kill-table {
+  table-layout: fixed;
+}
+
+.kill-table th.num,
+.kill-table td.num {
+  text-align: right;
+  width: 3.6em;
+}
+
+.kill-table-weapons th.num,
+.kill-table-weapons td.num {
+  width: 4.2em;
+}
+
+.kill-table th,
+.kill-table td {
+  padding: 6px 8px;
+}
+
+.kill-table-name {
+  overflow-wrap: anywhere;
+}
+
+.kill-table-name .faction-badge {
+  margin-right: 6px;
+}
+
+/* 距離の横棒: 階級の名前 | 棒(SVG) | 件数 */
+.kill-distance {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+
+.kill-distance li {
+  display: grid;
+  grid-template-columns: 7.5em minmax(0, 1fr) 3.5em;
+  gap: 8px;
+  align-items: center;
+  padding: 3px 0;
+}
+
+.kd-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.kd-bar {
+  display: block;
+  width: 100%;
+  height: 14px;
+}
+
+.kd-track {
+  fill: var(--surface-2);
+}
+
+.kd-fill {
+  fill: var(--chart-1);
+}
+
+.kd-value {
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* キルログ: フィルタ・検索 */
+.kill-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.kill-filters button.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.kill-search input {
+  width: 100%;
+  max-width: 28em;
+}
+
+/* キルログの 1 行: 768px 未満はカード(時刻 / キラー → 被害者 / 武器・印・距離)、以上は列を揃えた行 */
+.kill-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+
+.kill-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-areas:
+    'time time time'
+    'killer arrow victim'
+    'weapon weapon distance'
+    'more more more'
+    'detail detail detail';
+  gap: 4px 8px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: var(--surface);
+}
+
+.kl-time {
+  grid-area: time;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.kl-killer {
+  grid-area: killer;
+}
+
+.kl-victim {
+  grid-area: victim;
+}
+
+.kl-arrow {
+  grid-area: arrow;
+  color: var(--text-muted);
+}
+
+.kl-party {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.kl-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.kl-weapon {
+  grid-area: weapon;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.kl-weapon-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kl-flags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.kl-distance {
+  grid-area: distance;
+  justify-self: end;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kl-more {
+  grid-area: more;
+}
+
+.kl-more .button-link {
+  min-height: 32px;
+}
+
+.kl-detail {
+  grid-area: detail;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin-top: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kl-detail .kv {
+  margin: 0;
+}
+
+.kl-detail .kl-sub {
+  margin: 4px 0 0;
+  font-weight: 400;
+}
+
+.kl-detail .steam-id {
+  white-space: normal;
+  word-break: break-all;
+}
+
+@media (min-width: 768px) {
+  .kill-entry {
+    grid-template-columns: 8.5em minmax(0, 1.1fr) minmax(0, 1.3fr) minmax(0, 1.1fr) 6.5em auto;
+    grid-template-areas:
+      'time killer weapon victim distance more'
+      'detail detail detail detail detail detail';
+    gap: 4px 12px;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    padding: 8px 0;
+    margin: 0;
+    background: transparent;
+  }
+
+  .kl-time {
+    flex-direction: column;
+  }
+
+  .kl-arrow {
+    display: none;
+  }
+}
+
+/* キルの印。ヘッドショットは斜線の模様の小さな四角を添える(色だけで区別させない。文字も書く) */
+.kill-flag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+
+.kill-flag-headshot {
+  border-color: var(--chart-2);
+}
+
+.kill-flag-headshot::before {
+  content: '';
+  display: inline-block;
+  width: 0.75em;
+  height: 0.75em;
+  margin-right: 4px;
+  border: 1px solid var(--chart-2);
+  background: repeating-linear-gradient(45deg, var(--chart-2) 0 2px, transparent 2px 4px);
+}
+
+.kill-flag-teamkill {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.kill-flag-suicide {
+  border-style: dashed;
+}
+
+.kill-notes {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+/* 正規化の結果(FeedNormalizeView) */
+.feed-normalize {
+  margin: 0 0 8px;
+}
+
+.feed-normalize-result {
+  border-left: 3px solid var(--accent);
+  padding: 4px 0 4px 12px;
+  margin: 8px 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.feed-normalize-result h3 {
+  margin-top: 0;
+}
+
+.feed-normalize-result h4 {
+  font-size: 0.9rem;
+  margin: 8px 0 4px;
+}
+
+.feed-normalize-events {
+  padding-left: 1.25rem;
+  margin: 0;
+}
+
+.feed-normalize-events > li {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.feed-normalize-head {
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.key-chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0;
+  margin: 0;
+}
+
+.key-chips li {
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}

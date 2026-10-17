@@ -1,6 +1,6 @@
 // スコア記録: サンプルの組み立て・上限の決め方・終了処理・保持数の削除・一覧と推移の読み取り。docs/ARCHITECTURE.md 17.1〜17.3・17.5・17.7、docs/API.md 8 章。
 // D1・時刻は引数で受け取る(cloudflare:workers に依存させない)。開始・停止の二段階(prepare / execute)は actions.ts、毎分の処理は cron.ts。
-// - サンプルにはプレイヤー名・Steam ID を入れない(陣営ごとの人数と cash の合計だけ)
+// - サンプルにはプレイヤー名を入れない(陣営ごとの人数と cash の合計。roster_json は Steam ID → 陣営の添字だけ。17.10.4)
 // - 終了は `status = 'recording'` 条件の UPDATE で 1 回だけ。record_end は UPDATE が行を返したときだけ書く(Cron の二重実行でも 1 行)
 import {
   MATCH_END_REASONS,
@@ -97,6 +97,8 @@ export function sampleInsertStmt(
   target: { recordingId: number } | { activeServerId: number },
   sample: MatchSample,
   bucket: number,
+  /** 陣営の付与用の観測(killfeed/store.ts の buildRosterJson。名前は入れない。17.10.4)。無ければ null */
+  rosterJson: string | null = null,
 ): D1PreparedStatement {
   const values = [
     bucket,
@@ -112,19 +114,19 @@ export function sampleInsertStmt(
     return db
       .prepare(
         `INSERT OR IGNORE INTO match_samples (recording_id, bucket_minute, taken_at, map, players_current, players_max,
-                                              faction_scores_json, cash_total, faction_stats_json)
-         SELECT ?9, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+                                              faction_scores_json, cash_total, faction_stats_json, roster_json)
+         SELECT ?9, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?10
           WHERE EXISTS (SELECT 1 FROM match_recordings WHERE id = ?9 AND status = 'recording')`,
       )
-      .bind(...values, target.recordingId);
+      .bind(...values, target.recordingId, rosterJson);
   }
   return db
     .prepare(
       `INSERT OR IGNORE INTO match_samples (recording_id, bucket_minute, taken_at, map, players_current, players_max,
-                                            faction_scores_json, cash_total, faction_stats_json)
-       SELECT id, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 FROM match_recordings WHERE server_id = ?9 AND status = 'recording'`,
+                                            faction_scores_json, cash_total, faction_stats_json, roster_json)
+       SELECT id, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?10 FROM match_recordings WHERE server_id = ?9 AND status = 'recording'`,
     )
-    .bind(...values, target.activeServerId);
+    .bind(...values, target.activeServerId, rosterJson);
 }
 
 // ============================================================

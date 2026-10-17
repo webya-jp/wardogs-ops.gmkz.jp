@@ -5,6 +5,7 @@
 // - 受信: 処理の順序は 17.6 の表のとおり。上限・無効で捨てるときも 204(ゲームの再送を増やさない)
 // - トークン(平文・ハッシュ)・Authorization・本文・接続元 IP をログ・エラー応答・settings_audit_log の params に出さない
 // - このファイルは servers.ts を import しない(servers.ts が削除時に invalidateFeedToken を呼ぶため。循環を避ける)
+// - 第 2 段階(17.10.3): 受信した本文を正規化してキルを feed_kills に保存する(killfeed/*)。生データの保存は raw_enabled で止められる
 import {
   FEED_DAILY_MAX_BATCHES,
   FEED_DAILY_MAX_BYTES,
@@ -21,6 +22,10 @@ import {
   FEED_TOKEN_CACHE_SEC,
   FEED_TOKEN_PATTERN,
   FEED_TOKEN_PREFIX,
+  KILLFEED_DAILY_MAX_KILLS,
+  KILLFEED_GLOBAL_DAILY_MAX_KILLS,
+  KILLFEED_MAX_KILLS_PER_BATCH,
+  KILLFEED_UNRECORDED_RETENTION_DAYS,
   MAX_SERVERS,
   SERVER_ID_PATTERN,
 } from '../types/api';
@@ -31,6 +36,8 @@ import type {
   FeedRawResponse,
   FeedRejectReason,
   FeedTokenResponse,
+  KillfeedFeedStatusExtra,
+  KillfeedIngestCounts,
   ServerFeedStatus,
   ServerId,
   ValidationIssue,
@@ -39,6 +46,17 @@ import type { AuditActor } from './audit';
 import { discardBody, isPlainObject, jsonError, readLimited } from './http';
 import type { ErrorOptions } from './http';
 import { b64urlToBytes, bytesToB64url, randomB64url, timingSafeEqualBytes } from './keys';
+import { normalizeFeedValue, parseFeedJson } from './killfeed/normalize';
+import {
+  addPendingCounts,
+  attachRosterFactions,
+  hasPendingCounts,
+  insertKills,
+  readIngestCounts,
+  resetKillfeedStoreForTest,
+  takeKillQuota,
+  takePendingCountsStmt,
+} from './killfeed/store';
 
 export type FeedOutcome<T> = { ok: true; data: T } | { ok: false; code: ApiErrorCode; opts?: ErrorOptions };
 
@@ -96,6 +114,8 @@ interface FeedAuthRow {
   /** null = server_feeds に行が無い */
   hash: Uint8Array | null;
   enabled: boolean;
+  /** 生データ(feed_raw_events)も保存する(server_feeds.raw_enabled。0004) */
+  rawEnabled: boolean;
   /** servers に行があり enabled = 1 */
   serverUsable: boolean;
   at: number;
@@ -115,20 +135,21 @@ async function loadAuthRow(db: D1Database, server: ServerId, now: number): Promi
   if (cached && now - cached.at < FEED_TOKEN_CACHE_SEC * 1000) return cached;
   const row = await db
     .prepare(
-      `SELECT f.token_hash AS token_hash, f.enabled AS enabled, s.enabled AS server_enabled
+      `SELECT f.token_hash AS token_hash, f.enabled AS enabled, f.raw_enabled AS raw_enabled, s.enabled AS server_enabled
          FROM server_feeds f LEFT JOIN servers s ON s.id = f.server_id
         WHERE f.server_id = ?1`,
     )
     .bind(Number(server))
-    .first<{ token_hash: string; enabled: number; server_enabled: number | null }>();
+    .first<{ token_hash: string; enabled: number; raw_enabled: number; server_enabled: number | null }>();
   const entry: FeedAuthRow = row
     ? {
         hash: storedHashBytes(row.token_hash),
         enabled: Number(row.enabled) === 1,
+        rawEnabled: Number(row.raw_enabled) === 1,
         serverUsable: row.server_enabled !== null && Number(row.server_enabled) === 1,
         at: now,
       }
-    : { hash: null, enabled: false, serverUsable: false, at: now };
+    : { hash: null, enabled: false, rawEnabled: false, serverUsable: false, at: now };
   authCache.delete(server);
   authCache.set(server, entry);
   while (authCache.size > MAX_CACHE) {
@@ -201,6 +222,7 @@ export function resetFeedForTest(): void {
   rateWindows.clear();
   pendingStatus.clear();
   lastFlush.clear();
+  resetKillfeedStoreForTest();
 }
 
 function noteStatus(server: ServerId, patch: PendingStatus): void {
@@ -216,7 +238,7 @@ function flushStatus(db: D1Database, server: ServerId, now: number): Promise<voi
   const last = lastFlush.get(server);
   if (last !== undefined && now - last < STATUS_FLUSH_MS) return null;
   const p = pendingStatus.get(server);
-  if (!p) return null;
+  if (!p && !hasPendingCounts(server)) return null;
   pendingStatus.delete(server);
   lastFlush.delete(server);
   lastFlush.set(server, now);
@@ -225,6 +247,18 @@ function flushStatus(db: D1Database, server: ServerId, now: number): Promise<voi
     if (first.done) break;
     lastFlush.delete(first.value);
   }
+  const stmts: D1PreparedStatement[] = [];
+  // 正規化の件数(キル以外・読み取れなかった・上限で捨てたキル)。17.10.3 の 16
+  const counts = takePendingCountsStmt(db, server, utcDay(now));
+  if (counts) stmts.push(counts);
+  if (p) stmts.push(statusStmt(db, server, p));
+  return db
+    .batch(stmts)
+    .then(() => undefined)
+    .catch(() => undefined);
+}
+
+function statusStmt(db: D1Database, server: ServerId, p: PendingStatus): D1PreparedStatement {
   return db
     .prepare(
       `UPDATE server_feeds SET
@@ -244,18 +278,15 @@ function flushStatus(db: D1Database, server: ServerId, now: number): Promise<voi
       p.rejected?.reason ?? null,
       p.dropped?.at ?? null,
       p.dropped?.reason ?? null,
-    )
-    .run()
-    .then(() => undefined)
-    .catch(() => undefined);
+    );
 }
 
 // ============================================================
 // 受信(POST /api/ingest/events)
 // ============================================================
 
-/** 受信の結果の種類(ログ・テスト用。204 のもの) */
-export type IngestResult = 'stored' | 'empty' | FeedDropReason;
+/** 受信の結果の種類(ログ・テスト用。204 のもの)。raw_disabled = 生データを保存しない設定で、保存したキルも無い */
+export type IngestResult = 'stored' | 'empty' | 'raw_disabled' | FeedDropReason;
 
 /** 本文の event_count と「空のバッチか」。配列ならその長さ、events 配列を持つオブジェクトならその長さ、それ以外は null */
 export function countEvents(value: unknown): { count: number | null; empty: boolean } {
@@ -269,7 +300,19 @@ export interface IngestDeps {
   /** 受信の状況の書き込み(応答の後で行う)。無ければ待たずに捨てる */
   waitUntil?: (p: Promise<unknown>) => void;
   /** ログ(テストで差し替える)。本文・トークンは渡さない */
-  log?: (entry: { kind: 'ingest'; server: ServerId | null; result: string; bytes: number | null }) => void;
+  log?: (entry: IngestLogEntry) => void;
+}
+
+/** Workers Logs の 1 行(件数だけ。名前・Steam ID・本文・トークンは入れない) */
+export interface IngestLogEntry {
+  kind: 'ingest';
+  server: ServerId | null;
+  result: string;
+  bytes: number | null;
+  /** 保存したキル・キル以外・読み取れなかったキル(正規化まで進んだときだけ) */
+  kills?: number;
+  other?: number;
+  incomplete?: number;
 }
 
 const defaultLog: NonNullable<IngestDeps['log']> = (e) => console.log(JSON.stringify(e));
@@ -302,6 +345,7 @@ export async function handleIngest(db: D1Database, request: Request, deps: Inges
   const waitUntil = deps.waitUntil ?? ((p: Promise<unknown>) => void p.catch(() => undefined));
   let server: ServerId | null = null;
   let bytes: number | null = null;
+  let tally: Pick<IngestLogEntry, 'kills' | 'other' | 'incomplete'> = {};
 
   const finish = (result: string, response: Response): Response => {
     if (server !== null) {
@@ -309,7 +353,7 @@ export async function handleIngest(db: D1Database, request: Request, deps: Inges
       if (flushing) waitUntil(flushing);
     }
     // 保存・空のバッチは毎回出さない(約 2 秒ごとに来るため)。拒否・捨てたものだけ出す
-    if (result !== 'stored' && result !== 'empty') log({ kind: 'ingest', server, result, bytes });
+    if (result !== 'stored' && result !== 'empty' && result !== 'raw_disabled') log({ kind: 'ingest', server, result, bytes, ...tally });
     return response;
   };
   const reject = async (reason: FeedRejectReason, code: ApiErrorCode, opts: ErrorOptions = {}): Promise<Response> => {
@@ -358,12 +402,10 @@ export async function handleIngest(db: D1Database, request: Request, deps: Inges
   noteStatus(server, { received: now });
   // 9. 空のバッチ(本文が空、[]、events が空配列)は D1 に書かない
   if (text.trim() === '') return finish('empty', noContent());
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    return reject('bad_json', 'BAD_REQUEST');
-  }
+  // 16 桁以上の整数(Steam ID の可能性)は文字列として読む(17.10.2 の 1。保存する本文は受けた文字列のまま)
+  const parsed = parseFeedJson(text);
+  if (!parsed.ok) return reject('bad_json', 'BAD_REQUEST');
+  const value = parsed.value;
   const events = countEvents(value);
   if (events.empty) return finish('empty', noContent());
 
@@ -375,25 +417,53 @@ export async function handleIngest(db: D1Database, request: Request, deps: Inges
   if (!check.row.enabled) return drop('disabled');
   if (!check.row.serverUsable) return drop('server_unusable');
 
-  // 11. 1 日の上限(サーバーごと → 全体。全体で断られた場合、サーバーの分は 1 件多く数えたまま残る)
+  // 11. 正規化(CPU のみ。17.10.3)
+  const norm = normalizeFeedValue(value, { receivedAt: now, maxKills: KILLFEED_MAX_KILLS_PER_BATCH }, parsed.bigIntegersQuoted);
   const day = utcDay(now);
   const sid = Number(server);
+  let rawDrop: FeedDropReason | null = null;
+  let rawStored = false;
+  let killsStored = 0;
+  let droppedKills = norm.droppedKills;
   try {
-    if (!(await takeDaily(db, sid, day, bytes, FEED_DAILY_MAX_BATCHES, FEED_DAILY_MAX_BYTES))) return drop('daily_limit');
-    if (!(await takeDaily(db, 0, day, bytes, FEED_GLOBAL_DAILY_MAX_BATCHES, FEED_GLOBAL_DAILY_MAX_BYTES))) return drop('global_limit');
-    // 12. 保存(本文は受けた文字列のまま。受信時に記録中の試合を添える)
-    await db
-      .prepare(
-        `INSERT INTO feed_raw_events (server_id, received_at, bytes, event_count, recording_id, body)
-         VALUES (?1, ?2, ?3, ?4, (SELECT id FROM match_recordings WHERE server_id = ?1 AND status = 'recording'), ?5)`,
-      )
-      .bind(sid, now, bytes, events.count, text)
-      .run();
+    // 12. 生データ(raw_enabled = 1 のときだけ)。1 日の上限で断られたら生データだけ捨てる
+    //     (サーバーごと → 全体。全体で断られた場合、サーバーの分は 1 件多く数えたまま残る)
+    if (check.row.rawEnabled) {
+      if (!(await takeDaily(db, sid, day, bytes, FEED_DAILY_MAX_BATCHES, FEED_DAILY_MAX_BYTES))) rawDrop = 'daily_limit';
+      else if (!(await takeDaily(db, 0, day, bytes, FEED_GLOBAL_DAILY_MAX_BATCHES, FEED_GLOBAL_DAILY_MAX_BYTES))) rawDrop = 'global_limit';
+      else {
+        // 本文は受けた文字列のまま。受信時に記録中の試合を添える
+        await db
+          .prepare(
+            `INSERT INTO feed_raw_events (server_id, received_at, bytes, event_count, recording_id, body)
+             VALUES (?1, ?2, ?3, ?4, (SELECT id FROM match_recordings WHERE server_id = ?1 AND status = 'recording'), ?5)`,
+          )
+          .bind(sid, now, bytes, events.count, text)
+          .run();
+        rawStored = true;
+      }
+    }
+    if (norm.kills.length > 0) {
+      // 13. キルの日次の上限(サーバー → 全体)。断られたらそのバッチのキルを全部捨てる
+      const refused = await takeKillQuota(db, server, day, norm.kills.length);
+      if (refused) droppedKills += norm.kills.length;
+      else {
+        // 14. 陣営の付与(陣営の無い当事者がいるときだけサンプルを 1 行読む。30 秒キャッシュ)
+        const kills = await attachRosterFactions(db, server, norm.kills, now);
+        // 15. json_each の 1 文で保存
+        killsStored = await insertKills(db, server, now, kills);
+      }
+    }
   } catch {
     return finish('INTERNAL_ERROR', jsonError('INTERNAL_ERROR'));
   }
-  noteStatus(server, { stored: now });
-  return finish('stored', noContent());
+  // 16. キル以外・読み取れなかった・捨てたキルは isolate 内で足し、受信の状況と同じ機会に feed_daily へ
+  addPendingCounts(server, { other: norm.counts.other, incomplete: norm.counts.incomplete, dropped: droppedKills });
+  tally = { kills: killsStored, other: norm.counts.other, incomplete: norm.counts.incomplete };
+  if (rawDrop) noteStatus(server, { dropped: { at: now, reason: rawDrop } });
+  if (rawStored || killsStored > 0) noteStatus(server, { stored: now });
+  if (rawDrop) return finish(rawDrop, noContent());
+  return finish(rawStored || killsStored > 0 ? 'stored' : 'raw_disabled', noContent());
 }
 
 // ============================================================
@@ -405,6 +475,7 @@ interface FeedRow {
   token_hint: string;
   token_created_at: number;
   enabled: number;
+  raw_enabled: number;
   last_received_at: number | null;
   last_stored_at: number | null;
   last_rejected_at: number | null;
@@ -429,7 +500,7 @@ async function serverRow(db: D1Database, id: ServerId): Promise<{ id: number; na
 async function feedRow(db: D1Database, id: ServerId): Promise<FeedRow | null> {
   return db
     .prepare(
-      `SELECT server_id, token_hint, token_created_at, enabled, last_received_at, last_stored_at,
+      `SELECT server_id, token_hint, token_created_at, enabled, raw_enabled, last_received_at, last_stored_at,
               last_rejected_at, last_rejected_reason, last_dropped_at, last_dropped_reason
          FROM server_feeds WHERE server_id = ?1`,
     )
@@ -439,9 +510,15 @@ async function feedRow(db: D1Database, id: ServerId): Promise<FeedRow | null> {
 
 const nOrNull = (v: number | null | undefined): number | null => (v === null || v === undefined ? null : Number(v));
 
+/** GET / PUT /api/servers/:id/feed の応答(第 1 段階の項目 + 第 2 段階の項目。docs/API.md 11.4) */
+export type FeedStatusWithKills = ServerFeedStatus & KillfeedFeedStatusExtra;
+
+const ZERO_KILL_COUNTS: KillfeedIngestCounts = { kills: 0, otherEvents: 0, incomplete: 0, droppedKills: 0 };
+
 /** ServerFeedStatus を組み立てる(トークンの値・ハッシュは含めない) */
-export async function buildFeedStatus(db: D1Database, id: ServerId, now: number, row?: FeedRow | null): Promise<ServerFeedStatus> {
+export async function buildFeedStatus(db: D1Database, id: ServerId, now: number, row?: FeedRow | null): Promise<FeedStatusWithKills> {
   const r = row === undefined ? await feedRow(db, id) : row;
+  const killsToday = r !== null ? await readIngestCounts(db, id, utcDay(now)) : { ...ZERO_KILL_COUNTS };
   const today = await db
     .prepare('SELECT batches, bytes FROM feed_daily WHERE server_id = ?1 AND day = ?2')
     .bind(Number(id), utcDay(now))
@@ -470,6 +547,15 @@ export async function buildFeedStatus(db: D1Database, id: ServerId, now: number,
       ratePerMin: FEED_RATE_PER_MIN,
     },
     ingestPath: FEED_INGEST_PATH,
+    // 未発行は既定(true)を返す(発行すると raw_enabled = 1 の行ができる)
+    rawEnabled: r === null || Number(r.raw_enabled) === 1,
+    killsToday,
+    killLimits: {
+      dailyKills: KILLFEED_DAILY_MAX_KILLS,
+      globalDailyKills: KILLFEED_GLOBAL_DAILY_MAX_KILLS,
+      perBatch: KILLFEED_MAX_KILLS_PER_BATCH,
+      unrecordedRetentionDays: KILLFEED_UNRECORDED_RETENTION_DAYS,
+    },
   };
 }
 
@@ -492,19 +578,19 @@ function settingsLog(
 }
 
 /** GET /api/servers/:id/feed */
-export async function getFeedStatus(db: D1Database, idParam: string | undefined, now = Date.now()): Promise<FeedOutcome<ServerFeedStatus>> {
+export async function getFeedStatus(db: D1Database, idParam: string | undefined, now = Date.now()): Promise<FeedOutcome<FeedStatusWithKills>> {
   const id = parseId(idParam);
   if (!id.ok) return id;
   if (!(await serverRow(db, id.data))) return fail('SERVER_NOT_FOUND');
   return { ok: true, data: await buildFeedStatus(db, id.data, now) };
 }
 
-/** PUT /api/servers/:id/feed(本文 { enabled }) */
+/** PUT /api/servers/:id/feed(本文 { enabled, rawEnabled? })。rawEnabled は省略時に変えない(docs/API.md 11.4) */
 export async function updateFeedSettings(
   m: FeedMutationContext,
   idParam: string | undefined,
   body: unknown,
-): Promise<FeedOutcome<ServerFeedStatus>> {
+): Promise<FeedOutcome<FeedStatusWithKills>> {
   const id = parseId(idParam);
   if (!id.ok) return id;
   const now = m.now ?? Date.now();
@@ -515,13 +601,24 @@ export async function updateFeedSettings(
     const issue: ValidationIssue = body.enabled === undefined ? 'required' : 'invalid_format';
     return fail('VALIDATION_FAILED', { fields: { enabled: issue } });
   }
+  if (body.rawEnabled !== undefined && typeof body.rawEnabled !== 'boolean') {
+    return fail('VALIDATION_FAILED', { fields: { rawEnabled: 'invalid_format' } });
+  }
   const row = await feedRow(m.db, id.data);
   if (!row) return fail('NOT_FOUND');
   const enabled = body.enabled;
-  if ((Number(row.enabled) === 1) !== enabled) {
+  const curRaw = Number(row.raw_enabled) === 1;
+  const rawEnabled = typeof body.rawEnabled === 'boolean' ? body.rawEnabled : curRaw;
+  const enabledChanged = (Number(row.enabled) === 1) !== enabled;
+  const rawChanged = rawEnabled !== curRaw;
+  if (enabledChanged || rawChanged) {
+    // params の rawEnabled は変えたときだけ(docs/API.md 11.4)
+    const params: Record<string, unknown> = rawChanged ? { enabled, rawEnabled } : { enabled };
     await m.db.batch([
-      m.db.prepare('UPDATE server_feeds SET enabled = ?2, updated_at = ?3 WHERE server_id = ?1').bind(Number(id.data), enabled ? 1 : 0, now),
-      settingsLog(m.db, { ...m.actor, now, event: 'feed_settings_update', serverId: srv.id, serverName: srv.name, params: { enabled } }),
+      m.db
+        .prepare('UPDATE server_feeds SET enabled = ?2, raw_enabled = ?3, updated_at = ?4 WHERE server_id = ?1')
+        .bind(Number(id.data), enabled ? 1 : 0, rawEnabled ? 1 : 0, now),
+      settingsLog(m.db, { ...m.actor, now, event: 'feed_settings_update', serverId: srv.id, serverName: srv.name, params }),
     ]);
     invalidateFeedToken(id.data);
   }
@@ -558,7 +655,7 @@ export async function issueFeedToken(m: FeedMutationContext, idParam: string | u
 }
 
 /** DELETE /api/servers/:id/feed-token(本文 {}。未発行でも 200。行があったときだけ記録) */
-export async function revokeFeedToken(m: FeedMutationContext, idParam: string | undefined): Promise<FeedOutcome<ServerFeedStatus>> {
+export async function revokeFeedToken(m: FeedMutationContext, idParam: string | undefined): Promise<FeedOutcome<FeedStatusWithKills>> {
   const id = parseId(idParam);
   if (!id.ok) return id;
   const now = m.now ?? Date.now();
