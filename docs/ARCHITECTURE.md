@@ -1,8 +1,8 @@
 # wardogs-ops 構成(正本)
 
-作成日: 2026-10-15(JST)/ 更新: 2026-10-16(複数サーバー対応、第 15 章。Worker Secrets の廃止、第 5 章・第 16 章)/ 担当: architect
+作成日: 2026-10-15(JST)/ 更新: 2026-10-17(画面構成をサイドバー + ヘッダータブに。第 9 章・13.8・15.5)、2026-10-16(複数サーバー対応、第 15 章。Worker Secrets の廃止、第 5 章・第 16 章)/ 担当: architect
 上位の正本: `docs/PLAN.md`(2026-10-15 改訂版)。契約: `docs/API.md`、`src/types/api.ts`、`src/types/env.ts`、`db/schema.sql`、`db/migrations/`、`wrangler.jsonc`。
-RCON の仕様は非公式資料ベース(`docs/research/wardogs-rcon.md`)。本書の「未検証」「要確認」は第 14 章の番号(R-n / C-n / I-n / M-n)で参照する。
+RCON の仕様は非公式資料ベース(`docs/research/wardogs-rcon.md`)。本書の「未検証」「要確認」は第 14 章の番号(R-n / C-n / I-n / M-n / K-n / U-n)で参照する。
 
 ## 1. 目的と設計目標
 
@@ -86,7 +86,7 @@ Cloudflare Worker「wardogs-ops」(Astro SSR + React アイランド)
    │     └─ normalize.ts      # RCON 応答の正規化
    ├─ pages/                  # frontend-pages(API は backend)
    │  ├─ index.astro          # 状態
-   │  ├─ players.astro / bans.astro / audit.astro / servers.astro
+   │  ├─ players.astro / bans.astro / audit.astro / servers.astro / killfeed.astro(準備中。9.6)
    │  ├─ login.astro          # GET 表示 / POST 認証
    │  ├─ logout.ts            # POST のみ
    │  ├─ setup.astro          # 初期設定(管理パスワードの登録)/ D1 の不備の案内。GET 表示 / POST 登録
@@ -131,7 +131,7 @@ Worker: Cookie 検証 → RCON GET /v1/status(タイムアウト 5 秒)→ 正�
         └ /api/status のときだけ、成功したら server_snapshots に INSERT OR IGNORE(waitUntil で応答後に実行。4.4)
 ```
 
-- 1 画面が叩く API は原則 1 本(状態画面は `/api/status`、プレイヤー画面は `/api/players`)。1 リクエスト = RCON 1 回 + D1 0〜1 回で、サブリクエスト 50・同時接続 6 の上限に十分収まる。
+- 1 画面が叩く API は原則 1 本(状態画面は `/api/status`、プレイヤー画面は `/api/players`)に、サイドバーの `/api/status`(9.3。状態画面ではメインと共有して 1 本)を加える。1 リクエスト = RCON 1 回 + D1 0〜1 回で、サブリクエスト 50・同時接続 6 の上限に十分収まる。
 - capabilities は画面表示時に `/api/capabilities` を 1 回取る(Worker 側で 10 分キャッシュ)。
 - 応答は `Cache-Control: no-store`。Worker 側で RCON の結果はキャッシュしない(複数タブの同時更新でも RCON 側の上限 600/分〔R-13〕に遠い)。
 
@@ -505,19 +505,28 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 
 ## 9. 画面一覧
 
-| パス | 内容 | アイランド | 自動更新 |
-|---|---|---|---|
-| `/setup` | 初期設定(管理パスワードの登録)、または D1 の不備の案内(9.1) | なし(フォーム POST) | − |
-| `/login` | パスワード、操作者名(任意)。ロック中は残り時間。`?registered=1` のときは「登録しました。ログインしてください」 | なし(フォーム POST) | − |
-| `/` 状態 | サーバー名、マップ、人数(現在/最大)、陣営スコア、ローテーション位置。broadcast、マップ変更、試合終了 | あり | 30 秒 |
-| `/players` | 接続中一覧(名前、陣営、K/D、ping、Steam ID)。行ごとに kick / message / ban | あり | 30 秒 |
-| `/bans` | BAN 一覧(Steam ID、日時、理由、実行者、監査ログからの名前)。解除 | あり | 手動更新 |
-| `/audit` | 操作ログ(日時〔vars `TIMEZONE` で表示。既定は日本時間〕、操作者、サーバー、操作、対象、内容、結果)。50 件ずつ。「操作」「設定変更」のタブ、サーバーでの絞り込み(15.7) | あり | 手動更新 |
-| `/servers` | サーバーの一覧・追加・編集・有効/無効・接続テスト・削除(15.7) | あり | 手動更新 |
+2026-10-17 ユーザー決定: ログイン後の画面を「**左に固定サイドバー + 上にヘッダータブ + 中央にメイン**」の構成にする(参考: WARDOGS 向けの既存 RCON デスクトップアプリ)。ログイン前の画面(`/setup`、`/login`)は従来どおりサイドバー・タブの無い 1 カラム(`narrow`)。
 
-共通: ヘッダーに対象サーバーのセレクト(15.5)。`/`、`/players`、`/bans` は選択中のサーバーを表示し、0 台なら「サーバーを追加してください」と `/servers` への案内を出す。画面上部に `warnings`(`/api/session`)を表示する。capabilities が `missing` のボタンは無効化し理由を示す、`unknown` は「未確認」表示。モバイル幅で操作できること。自動更新は `document.visibilityState === 'hidden'` の間止め、`POLL_MIN_INTERVAL_SEC`(30 秒)より短くしない。
+### 9.0 ページとタブの一覧
+
+| パス | タブ(`tabs.*`) | 内容 | アイランド | 自動更新 |
+|---|---|---|---|---|
+| `/setup` | − | 初期設定(管理パスワードの登録)、または D1 の不備の案内(9.1) | なし(フォーム POST) | − |
+| `/login` | − | パスワード、操作者名(任意)。ロック中は残り時間。`?registered=1` のときは「登録しました。ログインしてください」 | なし(フォーム POST) | − |
+| `/` | 概要(Overview) | 状態の詳細とよく使う操作(9.4) | あり | 30 秒(サイドバーと共有。9.3) |
+| `/players` | プレイヤー(Players) | 接続中一覧と行ごとの操作(9.4) | あり | 30 秒 |
+| `/bans` | BAN(Bans) | BAN 一覧と解除(9.4) | あり | 手動更新 |
+| `/audit` | 操作ログ(Audit) | 「操作」「設定変更」の切り替え、サーバーでの絞り込み(9.4、15.7) | あり | 手動更新 |
+| `/servers` | 設定(Settings) | サーバーの一覧・追加・編集・有効/無効・接続テスト・削除(15.7)。将来はアプリ設定も(9.4) | あり | 手動更新 |
+| `/killfeed` | キルフィード(Killfeed) | **枠だけ**。「準備中」の説明のみ(9.6) | なし | − |
+
+- パスは変えない(既存のブックマーク・README の案内を壊さないため)。タブ名と URL が一致しないのは `/`(概要)と `/servers`(設定)だけ。
+- サイドバーは、ログイン後のすべてのページ(上表の `/` 以下)に出す。「手動更新」のページでも、サイドバーの状態は 30 秒ごとに更新される(9.3)。
+- 共通の規則(従来から変えない): `/`、`/players`、`/bans` は選択中のサーバーを表示し、0 台・見つからない・使えないときは `ServerGate`(15.4 / 15.5)の案内を出してアイランドを描画しない。`warnings`(`/api/session`)はメインの上部に出す(`SessionNotices`)。capabilities が `missing` のボタンは無効化して理由を示し、`unknown` は「未確認」表示。自動更新は `document.visibilityState === 'hidden'` の間止め、`POLL_MIN_INTERVAL_SEC`(30 秒)より短くしない。
 
 ### 9.1 `/setup` の画面仕様
+
+(節番号は他章・API.md から参照されているため 9.1 のまま残す)
 
 状態ごとに出すもの(判定は 5.1.1):
 
@@ -535,6 +544,141 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 - 送信ボタン: 「登録する」。二重送信を防ぐため送信中は押せなくしてよい(JS がある場合のみ。無くても 2 回目は `SETUP_ALREADY_DONE` になるだけ)。
 - エラー時: 該当の HTTP ステータス(`SETUP_FORM_ERROR_STATUS`)でフォームを再表示し、`setup.error.<SetupFormError>` を出す(`PASSWORD_TOO_SHORT` は `{min}`、`PASSWORD_TOO_LONG` は `{max}` を埋める)。**入力したパスワードは再表示しない**(両欄とも空に戻す)。
 - 成功時: `/login?registered=1` へ 303。
+
+### 9.2 レイアウト(サイドバー / タブ / メイン)
+
+`src/layouts/OpsLayout.astro` を、`ctx`(ログイン後)があるときだけ次の 3 領域で組む。`ctx` が無いときは従来のヘッダー + 1 カラム。
+
+```
+┌────────────────┬─────────────────────────────────────────────┐
+│ サイドバー      │ ヘッダー: アプリ名                            │
+│ (幅 288px、    ├─────────────────────────────────────────────┤
+│  固定。中だけ   │ タブ: 概要 | プレイヤー | BAN | 操作ログ | 設定 | キルフィード(準備中) │
+│  縦スクロール)  ├─────────────────────────────────────────────┤
+│ 1 サーバー切替  │ お知らせ(SessionNotices)                      │
+│   + 追加        │ メイン(<main id="main">。各ページの slot)     │
+│ 2 サーバーカード│                                             │
+│ 3 試合の要点    │                                             │
+│ 4 縦ナビ        │                                             │
+│ 5 操作者・期限・│                                             │
+│   ログアウト    │                                             │
+└────────────────┴─────────────────────────────────────────────┘
+```
+
+- HTML の順序は「スキップリンク → ヘッダー → サイドバー(`<aside aria-label={t('sidebar.label')}>`)→ タブ(`<nav aria-label={t('tabs.label')}>`)→ お知らせ → `<main>`」。スキップリンクは `<main>` へ飛ぶ(サイドバーを読み飛ばせる)。見た目の配置は CSS Grid の `grid-template-areas` で決める(HTML の順序を見た目に合わせて崩さない)。
+- デスクトップ(幅 1024px 以上): 2 列(`288px minmax(0, 1fr)`)。サイドバーは `position: sticky; top: 0; height: 100dvh; overflow-y: auto`(メインと独立にスクロール)。
+- **サイドバーの上から順に**(文言は 13.8 の `sidebar.*`):
+  1. **サーバー切り替え**: 現在ヘッダーにあるセレクトをそのまま移す(15.5 の GET フォーム、JS があれば選択で即送信、現在のパスを保つ、選択肢の印〔無効・要パスワード再入力・設定に不備〕も従来どおり)。その下に「サーバーを追加」リンク(`/servers?server=<現在の id>#add`。`ServersPanel` は `location.hash === '#add'` のとき追加フォームを開いて最初の欄にフォーカスする)。0 台のときはセレクトを出さず「サーバーを追加」だけ。
+  2. **サーバーカード**: 表示名(運営者が付けた名前)、ゲーム内サーバー名(`status.serverName`)、現在のマップ(`status.map`。表示名はメインの概要タブだけで引く)、人数(現在 / 最大)、ゲームモード(`status.experiences` を「・」区切りで。空なら行ごと出さない)、**ホスト名:ポート**(`ServerSummary.host` / `port`。等幅、長いホスト名は折り返す。2026-10-17 ユーザー判断で表示可)、接続状態(9.3 の表)。
+  3. **試合の要点**: 陣営スコア(先頭 `SIDEBAR_FACTION_LIMIT` = 3 陣営。超える分は「ほか {n} 陣営」。陣営名は RCON の生データ)、次のマップ(`rotation.nextMapName ?? rotation.nextMap`)、ローテーション位置(`rotation.nowIndex` を 1 始まりにして「{now} / {count}」。count が無ければ「{now} 番目」)。値が無い項目は行ごと出さない。全部無ければブロックごと出さない。
+  4. **縦ナビ**: 状態 / プレイヤー / BAN / 操作ログ / サーバー設定。**タブと同じ定義**(`src/layouts/nav.ts` の 1 つの配列)から作り、ラベルも同じキー(`tabs.*`)を使う(タブと縦ナビで呼び名が食い違わないように)。リンクには `?server=<現在の id>`(15.5)。キルフィードは縦ナビには出さない(準備中のため)。
+  5. **最下部**(`margin-top: auto` で下端に寄せる): 操作者名(`sidebar.session.operator` / `operatorAnonymous`)、ログインの有効期限(`formatDateTime`、タイムゾーンは vars `TIMEZONE`)、ログアウト(従来の `POST /logout` フォーム)。
+- **サイドバーに置かないもの**: スポンサー画像・説明欄など金銭を連想させる要素、ホスティング業者の案内・広告、ゲームサーバー ID(非公開情報。`GET /v1/server-id` は呼ばない)、RCON パスワードやその長さ・`passwordShort`。
+- **ヘッダー**: アプリ名(`/` へのリンク。`?server=` 付き)と、幅 1024px 未満のときだけサイドバーの開閉ボタン(9.5)。操作者名・期限・ログアウトはサイドバー最下部へ移したのでヘッダーには出さない。
+- **タブ**: 概要 / プレイヤー / BAN / 操作ログ / 設定 / キルフィード。現在のページは `aria-current="page"`。キルフィードは「準備中」の小さな印(`tabs.comingSoon`)付きで `/killfeed` へのリンク(9.6)。タブはページ遷移で切り替える。ARIA の `tablist` / `tab` は使わない(各タブは別 URL の通常のリンクで、JS 無しでも動き、`?server=` の規則〔15.5〕をそのまま使えるため。`tablist` はページ内のパネル切り替え用の役割で、ページ遷移のリンクに付けると支援技術の操作説明と食い違う)。
+- サイドバーの縦ナビとタブは同じ行き先の重複になる。要望どおり両方置くが、幅 1024px 未満では縦ナビを出さない(9.5)。重複を嫌う場合は `nav.ts` の `inSidebar` を外すだけで済む(要確認 U-16)。
+
+### 9.3 サイドバーのデータ源と更新
+
+**新しい API は作らない**。既存の `/api/status` の応答を広げるだけにする(`experiences`、`rotation.count` / `nextMap` / `nextMapName`。API.md 3 章、`src/types/api.ts` の `StatusResponse` / `StatusRotation`)。
+
+| 項目 | データ源 | 取得のしかた |
+|---|---|---|
+| サーバー一覧・選択中のサーバー・表示名・ホスト名:ポート・有効/無効・`needsPassword` | `PageContext`(`ctx.servers` / `ctx.server`。中身は `/api/servers` と同じ `ServerSummary`) | **サーバー描画(SSR)のみ**。ページ遷移ごとに最新になる。サイドバーから `/api/servers` を呼ばない |
+| 操作者名・ログインの有効期限 | `ctx.session`(`/api/session` の `session` と同じ値) | SSR のみ。セッションは 12 時間で延長しない(U-2)ので取り直す必要が無い |
+| ゲーム内サーバー名・マップ・人数・ゲームモード・陣営スコア・次のマップ・ローテーション位置・最終更新時刻・RCON に届いているか | `/api/status` | 30 秒ごと(`POLL_MIN_INTERVAL_SEC`)。**メインと共有する**(下記) |
+| 設定の警告(`warnings`) | `/api/session` | 従来どおり `SessionNotices` が表示後に 1 回(サイドバーでは扱わない) |
+
+**二重取得の回避(決定: モジュール単位の共有ストア)**
+
+- `src/components/lib/status-store.ts` を作り、`/api/status` の取得・30 秒ごとの更新・非表示中の停止・同時取得の抑止(取得中なら相乗り)を **サーバー id ごとに 1 つ**だけ持つ。購読者(アイランド)が 1 つ以上いる間だけ動き、0 になったら止める(参照カウント)。
+- React からは `useSharedStatus(serverId)`(`useSyncExternalStore`)で使う。返す値は `useResource` と同じ形(`data` / `error` / `loading` / `updatedAt` / `refresh`)にし、`StatusPanel` の `useResource('/api/status')` をこれに置き換える。
+- Astro のアイランドは別々の React ルートだが、**同じページで同じ URL の ES モジュールは 1 回だけ評価される**ため、`status-store.ts` のモジュール変数は両方のアイランドで共有される(Vite が共通チャンクに分ける)。`pnpm build` の出力と、実機の Network パネルで「概要タブで `/api/status` が 30 秒に 1 回」であることを確認する(要確認 I-6。共有されていなかった場合は、ストアの登録先を `globalThis` の 1 つのキーに置く)。
+- 「更新」ボタン(`refresh`)はストア経由なので、メインで押せばサイドバーも同時に更新される。書き込み操作(マップ変更・試合終了・kick 等)の成功後もストアの `refresh` を呼ぶ(人数・マップがすぐ反映される)。
+- 既存の `useResource` の取得・タイマー処理は、ストアと同じ実装(例 `createPoller(path, pollSec)`)に寄せ、似た処理を 2 系統持たない。
+- 採らなかった案: (a) サイドバーとメインを 1 つのアイランドにまとめて props で渡す(全ページの構造を作り直すことになり、`ServerGate` などのサーバー描画を活かせない)、(b) サイドバー用の軽量 API(RCON の呼び出しは同じ 1 回で、Worker のリクエスト数も減らないため利点が無い)、(c) `BroadcastChannel` でブラウザのタブ間も共有(複数タブで別サーバーを開いていることがあり〔15.5〕、仕組みも増えるため)。
+
+**取得しない条件**: サーバーが 0 台、`?server=` が見つからない(`serverNotFound`)、選択中のサーバーが `usable` でない(無効・パスワード再入力が必要)ときは、サイドバーのアイランドを描画しない(=ポーリングしない)。カードには SSR で表示名・ホスト名:ポート・理由と `/servers` への導線だけを出す。
+
+**接続状態の表示**(サーバーカード。判定は上から順):
+
+| 条件 | 表示(`sidebar.state.*`) | 補足 |
+|---|---|---|
+| `!server.enabled` | `disabled`(無効) | SSR。`/servers` への導線 |
+| `server.needsPassword` | `needsPassword`(パスワードの再入力が必要) | SSR。`/servers` への導線 |
+| 未取得(初回の取得中) | `loading`(確認中) | − |
+| 直近の取得が成功 | `ok`(RCON に接続できています)+ `sidebar.updated`(最終更新 {time}) | `updatedAt` を時刻のみで整形 |
+| `RCON_UNREACHABLE` / `RCON_TIMEOUT` | `unreachable`(RCON に届きません) | 前回の値は残し、`common.staleData` を添える |
+| `RCON_AUTH_FAILED` | `authFailed`(RCON のパスワードが違います) | `/servers` への導線 |
+| `RCON_RATE_LIMITED` | `rateLimited`(RCON の回数制限中) | `retryAfterSec` があれば添える |
+| それ以外のエラー(他の `RCON_*`・`NETWORK`・`SERVER_*` 等) | `error`(状態を取得できません) | 詳細はメインの `ErrorView` に任せる(概要タブ以外では詳細を出さない) |
+
+- 色だけで状態を伝えない(文言 + 記号)。`role="status"` にし、読み上げは状態の文言が変わったときだけ起きるようにする(30 秒ごとの「最終更新」の書き換えは読み上げ対象の外に置く)。
+- 直近の接続テスト(`lastTest`)はサイドバーには出さない(ポーリングの結果の方が新しいため)。`/servers` の一覧で見る。
+- `UNAUTHENTICATED`(セッション切れ)を受けたら、既存のアイランドと同じく `/login` への案内を出す(ストアはポーリングを止める)。
+
+**無料枠への影響(11.1・15.9 への追加)**: 概要タブでは従来どおり 30 秒に 1 回(共有のため増えない)。プレイヤータブでは `/api/players` に加えてサイドバーの `/api/status` が 30 秒に 1 回増える(1 タブを 24 時間開くと 2,880 → 5,760 リクエスト/日)。BAN・操作ログ・設定タブは従来は自動更新が無かったが、サイドバーの分が 30 秒に 1 回になる。11.1 の「多め」(運営者 3 人 × 2 タブ × 12 時間)は、全タブがプレイヤータブだった最悪で約 17,800/日、上限の目安は「タブ 17 本を 24 時間」。無料枠内に収まるが、余裕は半分になる。`/v1/rotation` は 300 秒キャッシュのため RCON 呼び出しの増分は 1 サーバーあたり 5 分に 1 回で、`/api/status` のサブリクエストは最大 7(50 / 同時 6 に収まる。`/v1/rotation` は `/v1/status` の後に順に呼ぶ)。
+
+### 9.4 各タブの内容
+
+| タブ | メイン | 主なキー |
+|---|---|---|
+| 概要(`/`) | 状態の詳細(ゲーム内サーバー名、マップ〔表示名と id〕、人数、陣営スコア〔全陣営〕、ゲームモード、ローテーション位置、次のマップ、最終更新時刻と「更新」)。**よく使う操作**: 全体メッセージ(broadcast)、マップ変更、試合終了。各操作のボタン・フォームの直下に「何が起きるか」の短い説明(`action.help.<action>`) | `status.*`、`action.help.broadcast` / `map` / `match_end` |
+| プレイヤー(`/players`) | 接続中一覧(名前、陣営、K/D、ping、Steam ID)。行ごとに kick / 個別メッセージ / BAN。一覧の上に 3 操作の説明を 1 回だけ出す(行ごとには出さない。モバイルで行が長くなるため) | `players.*`、`action.help.kick` / `message` / `ban` |
+| BAN(`/bans`) | BAN 一覧(Steam ID、日時、理由、実行者、監査ログからの名前)。解除。一覧の上に解除の説明 | `bans.*`、`action.help.unban` |
+| 操作ログ(`/audit`) | 従来どおり(「操作」「設定変更」の切り替え、サーバーでの絞り込み。既定は全サーバー〔U-9〕。サイドバーで選んだサーバーに自動では絞らない) | `audit.*` |
+| 設定(`/servers`) | 従来の「サーバー設定」(15.7)。ページ見出しは「設定」、その下に「サーバー」の節を置く。将来アプリ設定(言語・タイムゾーン。D1 `settings`、8.8)を足すときは同じページに「アプリ」の節を足す(パスは `/servers` のまま。節が増えて長くなったら `/settings` を作り、`/servers` はそのサーバーの節として残す) | `servers.*`、`tabs.settings` |
+| キルフィード(`/killfeed`) | 「準備中」の説明だけ(9.6)。API を呼ばない | `killfeed.*` |
+
+**操作の説明(`action.help.*`)の規則**
+
+- `action.help.<WriteAction>` を **全 `WRITE_ACTIONS` 分必須**にする(`confirm.<action>` と同じく `satisfies` で型検査。13.1)。
+- 1〜2 文、60 文字程度まで。ボタン(または送信ボタン)の `aria-describedby` で結び付ける。確認ダイアログ(`ConfirmDialog`)の本文の下にも同じ説明を出す(押す前と実行前の 2 回読める)。
+- RCON の挙動として**未検証のことを断定しない**。趣旨の例: 試合終了「現在の試合を終了します。通常はローテーションの次のマップに進みます(サーバーの設定によります)」、マップ変更「全員が新しいマップに移ります。進行中の試合は終わります」(いずれも要確認 R-20)、BAN「再接続できなくなります。解除は BAN タブから行えます」、kick「サーバーから退出させます。再接続はできます」、全体メッセージ・個別メッセージ「ゲーム内に表示されます。送った後は取り消せません」、BAN 解除「再び接続できるようになります」。
+
+### 9.5 モバイル(375px)
+
+- **幅 1024px 未満**ではサイドバーを左列に置かず、ヘッダーの直下に**折りたたみ式のパネル**として置く。ドロワー(画面の上に重ねる表示)は採らない: 重ね表示はフォーカスの閉じ込め・背景のスクロール固定・Esc で閉じる処理が要り、JS 無しで動かないため。
+  - 閉じているとき: 1 行の要約(表示名・人数「現在 / 最大」・接続状態の記号と短い文言)と開閉ボタン(ハンバーガーの記号 + `sidebar.toggle.open` / `sidebar.toggle.close`。`aria-expanded`、`aria-controls`)。
+  - 開いたとき: 9.2 の 1〜3 と 5(縦ナビは出さない。タブがあるため)。
+  - JS が無い場合は常に開いた状態で表示する(`<html>` に `js` クラスが付いたときだけ閉じた状態から始める。開閉ボタンも JS があるときだけ出す)。開閉の状態は保存しない(ページ遷移ごとに閉じた状態に戻る)。
+  - 0 台・使えないときの案内はメインの `ServerGate` にも出るので、要約だけでも状況が分かる。
+- **タブ**: 1 行に並べ、**タブ列の中だけ横スクロール**(`overflow-x: auto`、`scroll-snap-type: x proximity`)。現在のタブは読み込み時に `scrollIntoView({ inline: 'nearest', block: 'nearest' })` で見える位置に寄せる。タップ領域は高さ 44px 以上。右端に続きがあることが分かるよう、端に薄いグラデーションを付けてよい。
+- **ページ全体に横スクロールを出さない**(`body` の `overflow-x: hidden` で隠すのではなく、はみ出す要素を作らない。ホスト名・Steam ID・マップ id は `overflow-wrap: anywhere`、表は既存の 1 列表示〔`ops.css` の `max-width: 719px`〕を使う。グリッドの列は `minmax(0, 1fr)`)。
+- 確認: 375×812 で、横スクロールが無いこと、開閉・タブ・サーバー切り替え・ログアウトが操作できることをスクリーンショットで確認する(QA)。
+
+### 9.6 キルフィード(将来。枠だけ)
+
+- 今回はタブと `/killfeed` ページだけを作り、「準備中」と理由の短い説明(`killfeed.*`)を出す。API・D1 の追加は無い。
+- 理由: RCON HTTP API には接続・キルのイベントを取得するルートが無い。資料上、イベントはゲームサーバー側から外部へ送る `WDServerFeed` だけ(`docs/research/wardogs-rcon.md` 2.4。`killed` のみ、未検証)。
+- 実現するには**別タスク**として次を決める(14 章 K-1〜K-5):
+  1. Worker に受信エンドポイント(資料では `Url + /api/ingest/events` に Bearer トークン付きで約 2 秒ごとにバッチ POST)を足す。ログイン Cookie・Origin 検査の対象外にし、サーバーごとの受信用トークン(RCON パスワードとは別。D1 にハッシュで保存)で認証する。
+  2. ゲームサーバーの設定(`[WDServerFeed] Url / Token`)に Worker の URL とトークンを入れる手順(設定ファイルの編集は第 2 段階の範囲)。
+  3. 量の見積り: 2 秒ごとの POST は 1 台で最大 43,200 リクエスト/日になり、無料枠 10 万/日を 2〜3 台で使い切る。D1 の書き込みも同様。保存せず画面に流すだけにするか、間引くかを含めて決める。
+  4. 画面への届け方(30 秒ポーリングで足りるか)。
+- 上記が決まるまで、`/killfeed` はログイン済みの人にだけ見える静的な案内ページのままにする。
+
+### 9.7 frontend-pages への引き継ぎ(ファイル単位)
+
+| ファイル | 作業 |
+|---|---|
+| `src/layouts/nav.ts`(新規) | タブ・縦ナビの定義(`id`、`href`、`label: MessageKey`、`inSidebar`、`comingSoon`)を 1 つの配列で。`NavId` を `OpsLayout.astro` から移し、`killfeed` を追加 |
+| `src/layouts/OpsLayout.astro` | 9.2 の 3 領域とタブ列。ヘッダーのサーバーセレクト・操作者・期限・ログアウトを `Sidebar.astro` へ移す。開閉ボタン、`<html>` の `js` クラス、セレクトの即送信、現在のタブを寄せるインラインスクリプト |
+| `src/components/Sidebar.astro`(新規) | サイドバーの SSR 部分(切り替え・追加リンク・カードの静的項目と使えない理由・縦ナビ・最下部)。`usable` のときだけ `SidebarStatus` を `client:load` で置く |
+| `src/components/SidebarStatus.tsx`(新規) | カードの動的項目(ゲーム内サーバー名・マップ・人数・ゲームモード・接続状態・最終更新)と試合の要点。`useSharedStatus`。props は `language` / `timeZone` / `serverId`。モバイルの要約行も同じアイランドで出す |
+| `src/components/lib/status-store.ts`(新規) | 9.3 の共有ストアと `useSharedStatus` |
+| `src/components/lib/hooks.ts` | `useResource` の取得・タイマー処理をストアと共通化 |
+| `src/components/StatusPanel.tsx` | `useSharedStatus` に置き換え。ゲームモード・次のマップ・ローテーション件数の表示。`action.help.*`。操作の成功後に `refresh` |
+| `src/components/PlayersTable.tsx` / `BansTable.tsx` | 一覧の上の操作の説明(`action.help.*`)。操作の成功後にストアの `refresh` |
+| `src/components/ConfirmDialog.tsx` | 本文の下に `action.help.<action>` |
+| `src/components/ServersPanel.tsx` | `#add` で追加フォームを開く。見出しを「設定」+「サーバー」の節に |
+| `src/pages/killfeed.astro`(新規) | 準備中の案内(アイランドなし)。`active="killfeed"` |
+| `src/pages/*.astro` | `active` の値とページタイトルのキーを `tabs.*` に |
+| `src/styles/ops.css` | グリッド(1024px 以上で 2 列)、サイドバー、タブ列の横スクロール、折りたたみパネル。既存の `.site-nav` / `.header-session` / `.server-switch` を置き換え |
+| `src/i18n/ja.ts` | 13.8 のキーを追加。`nav.*`・`header.operator*`・`header.sessionExpires`・`header.server*` を移し替えて削除 |
+| `docs/screenshots/`(README 用) | 撮り直し。ホスト名はダミー(`rcon.example.com`)のみ |
+
+backend の作業: `src/lib/rcon/normalize.ts`(`experiences` と `/v1/rotation` の正規化)、`src/lib/reads.ts` 周辺(`/v1/rotation` の取得・300 秒キャッシュ・失敗時 null と 60 秒の失敗キャッシュ・`map` / `match_end` 成功時の破棄。capabilities の `routes` に `GET /v1/rotation` が無ければ呼ばない。`CapabilitiesResponse.read` には足さない)、`src/lib/rcon/routes.ts`、テスト。済んだら architect が `StatusResponse.experiences` と `StatusRotation` の 3 項目の `?` を外す。
 
 ## 10. Secrets / vars
 
@@ -587,13 +731,15 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 | 多め(3 人 × 2 タブ × 12 時間) | 6 × 1,440 + 約 500 | 約 9,100 |
 | 上限の目安 | 100,000 / 2,880 | タブ 34 本を 24 時間開き続けて到達 |
 
+2026-10-17 のサイドバー(9.3)により、状態タブ以外を開いている間は `/api/status` が 30 秒に 1 回加わる(1 タブあたり最大 5,760/日。上の表は最大で約 2 倍、上限の目安はタブ 17 本を 24 時間)。
+
 ログイン画面への総当たりはリクエスト数を消費する(5.6 のロックは CPU と D1 を守るが、リクエスト数そのものは減らせない)。無料枠を使い切ると当日 UTC 0 時(JST 9 時)まで Worker が止まる。対策が必要になったら WAF のレート制限ルール(Free は 1 ルール)を README の「困ったとき」で案内する。
 
 ### 11.2 サブリクエスト(1 リクエストあたり)
 
 | API | RCON | D1 | 計 |
 |---|---|---|---|
-| `/api/status` | 1(+ capabilities 取得時 1) | 0〜1(スナップショット)+ D1 判定 0〜1 | 最大 4 |
+| `/api/status` | 1(+ capabilities 取得時 1、+ `/v1/rotation` 300 秒に 1 回。9.3) | 0〜1(スナップショット)+ D1 判定 0〜1 | 最大 5 |
 | `/api/actions/prepare` | 1〜2(players、maps) | 0〜1(unban の名前) | 最大 3 |
 | `/api/actions/execute` | 1 | 2(INSERT + UPDATE) | 3 |
 | `POST /login` 成功 | 0 | 約 8(D1 判定・管理者の読み取り、throttle 加算・消去、audit、掃除 3。回数の引き上げ時は +1) | 約 8 |
@@ -648,7 +794,7 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 
 - 画面の文言(Astro ページ、React アイランド、ログインフォームのエラー、/setup の警告、確認ダイアログ、操作ログの表示)はすべて `src/i18n/<言語コード>.ts` のカタログに集約し、`t(key, params?)` 経由で参照する。**コンポーネント・Astro ページに文言を直書きしない**(`<title>` や `aria-label` も含む)。
 - `src/i18n/ja.ts` がキーの正本。キーはドット区切りのフラットな文字列(例 `login.title`、`error.RCON_TIMEOUT`)。`MessageKey = keyof typeof ja`、他の言語は `Catalog = Record<MessageKey, string>` で作るので **キーの過不足は型エラーになる**。
-- `error.<ApiErrorCode>` と `validation.<ValidationIssue>` は `satisfies` で全コード分を必須にしてある(コードを `src/types/api.ts` に足すとカタログが型エラーになり、訳し漏れを防ぐ。キーを 1 つ消すと tsc がエラーになることを確認済み)。`SetupWarning` の `setup.warning.<コード>`、確認ダイアログの `confirm.<action>`、操作ログの `audit.event.<event>` も、実装時に同じ方法で全コード必須にする。
+- `error.<ApiErrorCode>` と `validation.<ValidationIssue>` は `satisfies` で全コード分を必須にしてある(コードを `src/types/api.ts` に足すとカタログが型エラーになり、訳し漏れを防ぐ。キーを 1 つ消すと tsc がエラーになることを確認済み)。`SetupWarning` の `setup.warning.<コード>`、確認ダイアログの `confirm.<action>`、操作の説明の `action.help.<action>`(9.4)、操作ログの `audit.event.<event>` も、実装時に同じ方法で全コード必須にする。
 - 補間: `{name}` を params の値で置換する。値は文字列化するだけで HTML エスケープはしない(Astro / React の通常の出力でエスケープされる。`set:html` / `dangerouslySetInnerHTML` にカタログの文字列を渡さない)。
 - **翻訳しないもの**: RCON から返る生データ(サーバー名、マップ名・displayName、陣営名、プレイヤー名、BAN の理由・実行者、`rconMessage`)と、運営者が入力した文字列(broadcast の本文、kick の理由、操作者名、登録サーバーの表示名・ホスト名)。そのまま表示する。
 
@@ -700,6 +846,27 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 4. 利用者は vars `LANGUAGE` を `"en"`(または `"auto"`)にする。README に「言語 / Language」の設定方法を書き足す。
 5. `README.en.md` を足し、`README.md` と相互に言語リンク欄でつなぐ。
 
+### 13.8 画面構成(サイドバー + ヘッダータブ)のキー(2026-10-17)
+
+9 章の画面構成で frontend-pages が足すキーの名前空間。値の例は趣旨で、正確な文言は frontend-pages がカタログに書く。
+
+| 名前空間 | キー | 用途 |
+|---|---|---|
+| `tabs.*` | `label`、`overview`、`players`、`bans`、`audit`、`settings`、`killfeed`、`comingSoon` | ヘッダータブとサイドバーの縦ナビ(同じキーを使う)。ページタイトルもこれを使う。`nav.*` はこれに移して削除する |
+| `sidebar.*` | `label`、`toggle.open`、`toggle.close`、`summary`(要約行。例 `{name} {current}/{max}`) | サイドバー全体とモバイルの開閉 |
+| `sidebar.switcher.*` | `label`、`submit`、`addServer`、`optionDisabled`、`optionNeedsPassword`、`optionUnusable` | サーバー切り替え(`header.server*` から移す) |
+| `sidebar.card.*` | `title`、`displayName`、`gameName`、`map`、`players`、`playersValue`、`mode`、`endpoint`、`endpointValue`(`{host}:{port}`) | サーバーカード |
+| `sidebar.state.*` | `disabled`、`needsPassword`、`loading`、`ok`、`unreachable`、`authFailed`、`rateLimited`、`error` | 接続状態(9.3 の表)。`sidebar.updated`(最終更新 {time}) |
+| `sidebar.match.*` | `title`、`scores`、`moreFactions`(ほか {n} 陣営)、`nextMap`、`rotation`、`rotationValue`({now} / {count})、`rotationIndexOnly`({now} 番目) | 試合の要点 |
+| `sidebar.session.*` | `operator`、`operatorAnonymous`、`expires` | 最下部(`header.operator*`・`header.sessionExpires` から移す)。ログアウトは既存の `logout.submit` |
+| `action.help.*` | `<WriteAction>` の 7 つ(`kick` `ban` `unban` `broadcast` `message` `map` `match_end`) | 操作の直下と確認ダイアログの「何が起きるか」(9.4)。`satisfies` で全操作必須 |
+| `killfeed.*` | `title`、`comingSoon`、`why` | `/killfeed` の準備中の案内(9.6) |
+| `status.*`(追加) | `mode`、`nextMap`、`rotationCountValue` | 概要タブで足す項目 |
+
+- RCON の生データ(ゲーム内サーバー名・マップ id・`experiences`・陣営名)と運営者が入力した表示名・ホスト名は翻訳しない(13.1)。
+- 削除するキー(移し替え後): `nav.label` / `nav.status` / `nav.players` / `nav.bans` / `nav.audit` / `nav.servers`、`header.operator` / `header.operatorAnonymous` / `header.sessionExpires`、`header.server` / `header.serverSwitch` / `header.serverNeedsPassword` / `header.serverDisabled` / `header.serverUnusable`。
+- `server.notFound.help` の「上のメニューでサーバーを選び直してください」は、サイドバー(モバイルでは上部のパネル)に合う言い方に直す。
+
 ## 14. 要確認一覧
 
 確度の区別は `docs/research/wardogs-rcon.md`(確定 / 未検証 / 推測)と `docs/research/cloudflare-deploy-button.md` に従う。本設計はいずれも「確認できなくても壊れない」側に倒してあるが、実機で確定させること。
@@ -725,6 +892,8 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **R-15** 認証失敗(パスワード違い)と AllowedHosts による拒否のステータスの違い、失敗が続いたときのロックアウトの有無(送信元を共有する他者の失敗に巻き込まれないか)。
 - **R-16** サーバーの提供元ごとに、RCON ポートをインターネットに公開できるか(運営者ごとの確認事項。README で案内)。
 - **R-17** 開発元による公式ドキュメント・RCON の外部利用に関する規約(未確認)。
+- **R-19** `/v1/status` の `experiences[]` が「ゲームモード」を表すか(要素の形式・値の例)。`/v1/rotation` の `entries[]` の要素の形式(マップ id のフィールド名、表示名の有無)と `enabled: false` の意味。違っていた場合、サイドバーのゲームモードは非表示にし、次のマップは `rotation.nextIndex` だけに戻す(9.3)。
+- **R-20** `POST /v1/match/end` の後にローテーションの次のマップへ進むか、`POST /v1/match/map` が進行中の試合をどう扱うか。操作の説明(`action.help.*`。9.4)の文言はこれを断定しない形にしてあり、確認後に直す。
 - **R-18** 書き込みルートの成功時の応答(ステータスが 200 / 204 のどちらか、本文の有無と形式)。現在は 2xx なら本文に関係なく成功とする。
 
 ### Cloudflare(一次資料で未確定、または実機確認が必要)
@@ -758,6 +927,7 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **I-2** 2 つ目の言語を動的 import にする場合、`getTranslator` を同期のまま保てるか(サーバーは先読み、アイランドは読み込み完了まで待つ等。追加時に決める)。
 - **I-3** Workers の実行環境(workerd)とブラウザで `Intl.DateTimeFormat` の `timeZone` 指定・`ja-JP` の書式が揃うか(サーバー描画とアイランドで日時の表記がずれないか)。
 - **I-4** vars `LANGUAGE` / `TIMEZONE` をダッシュボードで変えた値が、次のデプロイで `wrangler.jsonc` の値に戻るか(C-8 と同じ問題。戻る場合はフォーク側の `wrangler.jsonc` を書き換える手順を README に書く)。
+- **I-6** 同じページの複数の React アイランドが `src/components/lib/status-store.ts` のモジュール変数を共有するか(Astro 7 + Vite のチャンク分割。9.3)。`pnpm build` の出力と、実機の Network パネルで `/api/status` の回数を確認する。
 - **I-5** `Accept-Language` の照合は言語コード単位(`ja-JP` → `ja`)の簡易実装。地域で文言を分けたい言語(例 `pt-BR` と `pt-PT`)を足す場合は、`LANGUAGE` の値の形式と照合規則を見直す。
 
 ### 複数サーバー(第 15 章)
@@ -769,6 +939,14 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **M-5**(2026-10-16 に不要)Deploy ボタンのフォームから `RCON_URL` / `RCON_PASSWORD` を外す件。Secrets の廃止で `.dev.vars.example` ごと削除した。
 - **M-6** `audit_log.event` の CHECK により、第 2 段階で RCON の書き込み操作(kill・陣営変更など)を足すと audit_log に記録できない。そのときは CHECK の無い新しい操作ログ表への移行(旧表は読み取り専用で残す)を設計する。
 - **M-7** AES-256-GCM の復号コスト(1 行あたり)の実測。15.3 の見込み(十数マイクロ秒)を本番の Workers で確認する。初期設定の登録し直し(5.1.1)では全サーバー分(最大 20 行)を復号する。
+
+### キルフィード(9.6。将来の別タスク)
+
+- **K-1** `WDServerFeed` の送信仕様(`Url + /api/ingest/events`、Bearer、約 2 秒ごとのバッチ、イベントは `killed` のみ)の真偽と本文の形式。接続・切断イベントが無いこと。
+- **K-2** 受信エンドポイントの認証(サーバーごとのトークンの発行・保存・差し替え)と、ログイン Cookie・Origin 検査の対象外にする範囲。
+- **K-3** 受信のリクエスト数(1 台で最大 43,200/日)と D1 の書き込みが無料枠に収まる方法(間引き・保存しない・集約)。
+- **K-4** ゲームサーバーの設定ファイルに URL とトークンを入れる手順(設定の編集は第 2 段階)と、サーバーの提供元が設定を許すか。
+- **K-5** 画面への届け方(30 秒ポーリング、または別の仕組み)と保持期間。
 
 ### 設計上の判断(ユーザー確認事項)
 
@@ -787,6 +965,12 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **U-8** 画面から登録したサーバーのホスト名・ポートは、ログイン済みの運営者には一覧に表示する(編集に必要なため。パスワードは表示しない)。
 - **U-9** サーバー設定の変更ログは、操作ログ画面の別タブ「設定変更」に出す(D1 の制約で別テーブルのため、操作と同じ一覧には混ぜない)。操作ログの既定は全サーバー表示。
 - **U-10**(2026-10-16 に不要)SESSION_SECRET を README で「推奨」に上げる件 → SESSION_SECRET ごと廃止(鍵は `instance_key`。5.1.2)。
+
+以下は 2026-10-17 の画面構成(サイドバー + ヘッダータブ。9 章)で architect が決めた点(ユーザー確認待ち。推奨どおりなら決定事項として扱う)。
+
+- **U-16** サイドバーの縦ナビとヘッダータブは同じ行き先を重複して持つ。要望どおり両方置き、幅 1024px 未満では縦ナビを出さない。ラベルは両方 `tabs.*` で揃える(タブ「概要」とナビ「状態」のような呼び名の違いを作らない)。推奨: このまま。重複が気になれば縦ナビを外す(`nav.ts` の 1 か所)。
+- **U-17** モバイルのサイドバーはドロワーではなく、ヘッダー直下の折りたたみパネル(JS 無しでは常に開く)。キルフィードはタブだけ出し、押すと準備中の案内ページ(`/killfeed`)を開く。
+- **U-18** サイドバーの状態(30 秒ごと)は BAN・操作ログ・設定タブでも動く。そのため Worker のリクエスト数が最大で約 2 倍になる(9.3。無料枠内)。推奨: このまま(どのタブでも人数と接続状態が見える方を優先)。
 
 以下は 2026-10-16 の Worker Secrets 廃止に関するもの。U-11 はユーザー決定、U-12 以降は architect が決めた点(ユーザー確認待ち。推奨どおりなら決定事項として扱う)。
 
@@ -875,9 +1059,10 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 4. それも無ければ表示順の先頭(使えない理由を表示)。0 台なら 15.4 の案内。
 
 - 1 で決まったときは、ページの応答で Cookie を発行する(`HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000`〔30 日〕。開発時は `Secure` なし)。**署名しない**: 値はサーバーの id だけで、毎回 D1 と照合する。書き換えられてもログイン済みの人が元々使えるサーバーに切り替わるだけで、署名しても守るものが無い。ログアウト時に消す。
-- ヘッダーにサーバーのセレクト(有効なサーバー。`needsPassword` は印を付けて表示)。JS 無しでも動くよう、`?server=` を送る GET フォーム + 送信ボタンにする(JS があれば選択で即送信)。現在のパスを保つ。
-- ナビゲーションのリンクには `?server=<現在の id>` を付ける(複数タブで別々のサーバーを開いていても、Cookie の書き換えで他のタブが別サーバーに変わらないように)。
-- React アイランドは選択中の `serverId` を props で受け取り、**すべての API 呼び出しに明示して送る**。切り替えはページ遷移(全体の再読み込み)で行い、アイランド内の状態を持ち越さない。
+- **サイドバーの最上部**にサーバーのセレクト(有効なサーバー。`needsPassword` は印を付けて表示)と「サーバーを追加」リンク(9.2。2026-10-17 にヘッダーから移した)。JS 無しでも動くよう、`?server=` を送る GET フォーム + 送信ボタンにする(JS があれば選択で即送信)。現在のパスを保つ。モバイル幅では折りたたみパネルの中に入る(9.5)。
+- ヘッダータブ・サイドバーの縦ナビ・アプリ名のリンクには `?server=<現在の id>` を付ける(複数タブで別々のサーバーを開いていても、Cookie の書き換えで他のタブが別サーバーに変わらないように)。
+- サイドバーのサーバーカード(9.2・9.3)は選択中のサーバーを表す。切り替えはページ遷移なので、カードとメインが別のサーバーを指すことは無い。
+- React アイランドは選択中の `serverId` を props で受け取り、**すべての API 呼び出しに明示して送る**。切り替えはページ遷移(全体の再読み込み)で行い、アイランド内の状態を持ち越さない。`/api/status` の共有ストア(9.3)もサーバー id ごとに分ける。
 
 API での決め方:
 
@@ -902,7 +1087,7 @@ API での決め方:
 
 ### 15.7 画面 `/servers`
 
-- ログイン後のナビゲーションに「サーバー設定」を追加する。
+- ログイン後のナビゲーションに「サーバー設定」を追加する(2026-10-17 以降はヘッダータブの「設定」と、サイドバーの縦ナビの「サーバー設定」。9.2・9.4)。
 - 一覧: 表示名、ホスト名:ポート、有効 / 無効、直近の接続テストの結果と時刻、「パスワードの再入力が必要」「パスワードが短め」の表示、操作(編集・接続テスト・有効化/無効化・削除)。
 - 追加・編集フォーム: 表示名 / ホスト名 / ポート / RCON パスワード の 4 項目だけ。編集時のパスワード欄は空(「変更しない場合は空欄」。ホスト名かポートを変えたときは必須)。保存すると接続テストの結果を表示する。
 - 削除: 確認ダイアログで表示名を入力させ、`confirmName` として送る(Worker で現在の表示名と照合)。削除と変更ログは同じトランザクション。
@@ -919,7 +1104,7 @@ D1 必須化(2026-10-16)で、登録サーバーが使えない段階は無く�
 ### 15.9 無料枠への影響(11 章への追加)
 
 - Worker リクエスト: 変わらない(画面が叩くのは選択中の 1 台分だけ)。`/servers` は一覧 1 回 + 必要なときの接続テスト。
-- サブリクエスト: RCON を呼ぶ API はサーバーの解決で D1 読み取りが 1 回、ログイン Cookie の検証(5.3)で 1 回増える。`/api/status` は最大 6(RCON 2 + D1 判定 1 + 管理者 1 + サーバー 1 + スナップショット 1)、`/api/actions/execute` は 5〜6。いずれも 50 / 同時 6 に収まる。
+- サブリクエスト: RCON を呼ぶ API はサーバーの解決で D1 読み取りが 1 回、ログイン Cookie の検証(5.3)で 1 回増える。`/api/status` は最大 7(RCON 3〔status・capabilities・rotation。9.3〕+ D1 判定 1 + 管理者 1 + サーバー 1 + スナップショット 1)、`/api/actions/execute` は 5〜6。いずれも 50 / 同時 6 に収まる。
 - D1 書き込み: スナップショットは「開いているサーバー 1 台につき 5 分に 1 行」。全 20 台を 24 時間開き続けた最悪でも `20 × 288 = 5,760` 行/日(インデックス更新を含めて約 1.2 万行、上限の 12%)。設定変更・接続テストは 1 回 1〜2 行。
 - D1 読み取り: 管理者 1 行 + サーバーの解決 1 行/リクエスト、一覧は最大 20 行。500 万行/日に遠い。
 - ストレージ: `servers` は 1 行 1 KB 未満。
@@ -934,7 +1119,7 @@ D1 必須化(2026-10-16)で、登録サーバーが使えない段階は無く�
 ### 15.11 多言語化(13 章との関係)
 
 - architect がカタログに足したもの(型で必須のため): `error.SERVER_*` / `error.NO_SERVERS`、`validation.out_of_range` など 6 つ、`setup.warning.SERVER_PASSWORDS_UNREADABLE`、`audit.event.server_add` / `server_update` / `server_delete`。
-- frontend-pages が足すもの: `nav.servers`、`servers.*`(一覧・フォーム・削除確認)、`header.server*`(セレクト)、`field.name` / `field.host` / `field.port` / `field.password` / `field.server` / `field.confirmName`、`audit.kind.*`・`audit.serverFilter.*`、`audit.param.*`(設定変更の内容)、確認ダイアログのサーバー名表示。
+- frontend-pages が足すもの: `nav.servers`、`servers.*`(一覧・フォーム・削除確認)、`header.server*`(セレクト。2026-10-17 に `sidebar.switcher.*` へ移す。13.8)、`field.name` / `field.host` / `field.port` / `field.password` / `field.server` / `field.confirmName`、`audit.kind.*`・`audit.serverFilter.*`、`audit.param.*`(設定変更の内容)、確認ダイアログのサーバー名表示。
 - 運営者が入力した表示名・ホスト名は翻訳しない(13.1 の「翻訳しないもの」に含める)。
 - Secrets 廃止に伴うカタログの変更は 16.3。
 

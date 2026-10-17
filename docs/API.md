@@ -1,6 +1,6 @@
 # Worker 内部 API 契約
 
-作成日: 2026-10-15(JST)/ 更新: 2026-10-16(複数サーバー対応: 1.2、3・4 章の `server`、5 章のコード、7 章。Worker Secrets の廃止: 1 章、2 章の `/setup`、5 章、既定サーバーの削除)/ 担当: architect。型の正本は `src/types/api.ts`(本書と食い違ったら司令塔に報告)。
+作成日: 2026-10-15(JST)/ 更新: 2026-10-17(`/api/status` に `experiences`・次のマップを追加。3 章)、2026-10-16(複数サーバー対応: 1.2、3・4 章の `server`、5 章のコード、7 章。Worker Secrets の廃止: 1 章、2 章の `/setup`、5 章、既定サーバーの削除)/ 担当: architect。型の正本は `src/types/api.ts`(本書と食い違ったら司令塔に報告)。
 構成・認証の詳細は `docs/ARCHITECTURE.md`。RCON の確度は第 6 章と `docs/research/wardogs-rcon.md`。
 
 ## 1. 共通
@@ -99,6 +99,14 @@ RCON パスワード(平文・暗号文とも)、管理パスワードのハッ�
 ### `GET /api/status?server=<id>` → `StatusResponse`
 
 RCON `GET /v1/status`。成功時は人数スナップショットを記録(サーバーごとに 5 分に 1 行。`server_snapshots`)。
+
+2026-10-17 追加(サイドバーのサーバーカード・試合の要点用。ARCHITECTURE 9.3)。新しい API は作らず、この応答を広げる:
+
+- `experiences`: `/v1/status` の `experiences[]` の文字列要素(最大 `STATUS_EXPERIENCES_MAX` 件、各 `STATUS_EXPERIENCE_MAX_LENGTH` 文字、制御文字を除く)。追加の RCON 呼び出しなし。画面は「ゲームモード」として表示する(モードを表すかは要確認 R-19)。
+- `rotation.count` / `rotation.nextMap` / `rotation.nextMapName`: RCON `GET /v1/rotation` の `entries` から求める。**結果は isolate 内にサーバーごと `ROTATION_CACHE_SEC`(300 秒)保持**し(キーは capabilities と同じ `${serverId}|${baseUrl}`)、30 秒ごとのポーリングで毎回は呼ばない。`map` / `match_end` の execute が成功したとき、そのサーバーの分を破棄する。
+- `/v1/rotation` が capabilities で `missing`、または失敗(タイムアウト・形式不正・`enabled: false`)した場合は 3 項目とも null にし、**`/api/status` 自体は失敗にしない**(状態の表示を優先)。失敗は 60 秒間キャッシュし、毎回呼び直さない。
+- `/v1/rotation` の呼び出しは `/v1/status` の成功後に行い、そのタイムアウトは 3 秒(`/api/status` 全体の応答を遅らせすぎないため)。
+- backend の実装が済むまで 3 項目は省略され得る(型は `?`)。画面は省略を null と同じに扱う。
 
 ### `GET /api/players?server=<id>` → `PlayersResponse`
 
@@ -257,6 +265,7 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 |---|---|---|---|---|
 | `/api/capabilities` | `GET /v1/capabilities` | `apiVersion`, `build`, `routes[]` | 未検証(A, B) | R-1 |
 | `/api/status` | `GET /v1/status` | `serverName`, `map`, `players.current/max`, `factionScores[]`, `rotation.nowIndex/nextIndex` | 未検証(A, B) | R-8 |
+| `/api/status`(次のマップ・件数。300 秒キャッシュ) | `GET /v1/rotation` | `enabled`, `entries[].map`(表示名があれば併用), `entries.length` | 未検証(A, B。要素の形式は不明) | R-8、R-19 |
 | `/api/players`、prepare(kick / ban / message の名前解決) | `GET /v1/players` | `players[].name/steamId/faction/kills/deaths/pingMs`, `count` | 未検証(A, B) | R-9 |
 | `/api/bans` | `GET /v1/bans` | `bans[].steamId/bannedAtUtc/bannedBy/reason`, `count` | 未検証(A, B) | − |
 | `/api/maps`、prepare(map) | `GET /v1/catalog/maps` | `maps[].id/displayName` | 未検証(A, B) | R-11 |
@@ -275,7 +284,7 @@ RCON `GET /v1/catalog/maps`。マップ変更のプルダウン用。
 
 ### 6.3 使わないルート(第 2 段階以降)
 
-`GET /v1/health`、`GET /v1/rotation`、`GET /v1/reserved-slots`、`GET /v1/audit`(RCON 側の監査ログ。AUTH_FAIL の確認用に第 2 段階で検討)、`GET /v1/config`・`POST /v1/config/validate`・`PUT /v1/config`(設定。第 2 段階)、`POST /v1/players/{steamId}/kill`、`PATCH /v1/players/{steamId}`、`POST /v1/match/restart`、`PUT /v1/world/lighting`、`GET /v1/server-id`(サーバー ID は非公開情報のため取得しない)。
+`GET /v1/health`、`GET /v1/reserved-slots`、`GET /v1/audit`(RCON 側の監査ログ。AUTH_FAIL の確認用に第 2 段階で検討)、`GET /v1/config`・`POST /v1/config/validate`・`PUT /v1/config`(設定。第 2 段階)、`POST /v1/players/{steamId}/kill`、`PATCH /v1/players/{steamId}`、`POST /v1/match/restart`、`PUT /v1/world/lighting`、`GET /v1/server-id`(サーバー ID は非公開情報のため取得しない)。
 
 ## 7. サーバー API(複数サーバー)
 

@@ -301,15 +301,52 @@ export interface CapabilitiesResponse {
 // 読み取り
 // ============================================================
 
-/** GET /api/status(RCON GET /v1/status を正規化) */
+/**
+ * GET /api/status(RCON GET /v1/status を正規化。次のマップは GET /v1/rotation から補う)。
+ * サイドバーのサーバーカードと状態タブ(Overview)が同じ応答を共有する(docs/ARCHITECTURE.md 9.3)
+ */
 export interface StatusResponse {
   serverName: string | null;
   map: string | null;
   players: { current: number | null; max: number | null };
   factionScores: FactionScore[];
-  rotation: { nowIndex: number | null; nextIndex: number | null };
+  rotation: StatusRotation;
+  /**
+   * RCON /v1/status の `experiences[]`(RCON の生データ。翻訳しない)。文字列の要素だけを先頭から
+   * STATUS_EXPERIENCES_MAX 件、各 STATUS_EXPERIENCE_MAX_LENGTH 文字まで。取れなければ空配列。
+   * 画面はこれを「ゲームモード」として表示するが、実際にモードを表すかは未検証(要確認 R-19)。
+   * 2026-10-17 追加。backend の実装後に `?` を外す
+   */
+  experiences?: string[];
   fetchedAt: number;
 }
+
+/** ローテーション位置と次のマップ(docs/ARCHITECTURE.md 9.3、docs/API.md 3 章) */
+export interface StatusRotation {
+  nowIndex: number | null;
+  nextIndex: number | null;
+  /**
+   * ローテーションの件数(RCON GET /v1/rotation の `entries.length`)。取れなければ null。
+   * 2026-10-17 追加。backend の実装後に `?` を外す
+   */
+  count?: number | null;
+  /**
+   * 次のマップの id(`entries[nextIndex]` のマップ。RCON の生データ)。/v1/rotation が無い・取れない・
+   * 範囲外・ローテーションが無効なら null。2026-10-17 追加。backend の実装後に `?` を外す
+   */
+  nextMap?: string | null;
+  /** 次のマップの表示名(`entries[nextIndex]` に表示名があれば。/v1/catalog/maps は引かない。無ければ null)。同上 */
+  nextMapName?: string | null;
+}
+
+/** StatusResponse.experiences の最大件数 */
+export const STATUS_EXPERIENCES_MAX = 8;
+/** StatusResponse.experiences の 1 要素の最大文字数 */
+export const STATUS_EXPERIENCE_MAX_LENGTH = 64;
+/** /v1/rotation の結果を isolate 内に保持する時間(秒。サーバーごと。map / match_end の成功で破棄) */
+export const ROTATION_CACHE_SEC = 300;
+/** サイドバーに出す陣営スコアの数(それ以上は「ほか n 陣営」) */
+export const SIDEBAR_FACTION_LIMIT = 3;
 
 /** 形式は未検証(要確認 R-8)。解釈できない要素は null にする */
 export interface FactionScore {
