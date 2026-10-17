@@ -1,9 +1,13 @@
-// 状態画面(/)。/api/status を 30 秒ごとに取得し、broadcast・マップ変更・試合終了を操作する(docs/ARCHITECTURE.md 9 章)。
-// サーバー名・マップ名・陣営名は RCON の生データなので翻訳しない。
+// 概要タブ(/)。状態の詳細と、よく使う操作(broadcast・マップ変更・試合終了)。docs/ARCHITECTURE.md 9.4。
+// - /api/status はサイドバーと共有のストアから読む(useSharedStatus。30 秒ごと、二重に取得しない。9.3)
+// - 各操作の直下に「何が起きるか」(action.help.*)を出し、ボタンの aria-describedby で結び付ける
+// - 操作の成功後はストアを取り直す(サイドバーの人数・マップもすぐ変わる)
+// サーバー名・マップ名・陣営名・experiences は RCON の生データなので翻訳しない。
 import { Fragment, useMemo, useState } from 'react';
 import { MESSAGE_MAX_LENGTH, POLL_MIN_INTERVAL_SEC } from '../types/api';
-import type { MapsResponse, StatusResponse } from '../types/api';
+import type { MapsResponse } from '../types/api';
 import { useCapabilities, useI18n, useResource } from './lib/hooks';
+import { useSharedStatus } from './lib/status-store';
 import type { I18nProps } from './lib/hooks';
 import { gateFor } from './lib/gate';
 import { withServer } from './lib/api';
@@ -23,7 +27,7 @@ const ACTIONS = ['broadcast', 'map', 'match_end'] as const;
 export default function StatusPanel({ language, timeZone, writesEnabled, server }: Props) {
   const i18n = useI18n({ language, timeZone });
   const { t, time, num } = i18n;
-  const status = useResource<StatusResponse>(withServer('/api/status', server.id), POLL_MIN_INTERVAL_SEC);
+  const status = useSharedStatus(server.id);
   const maps = useResource<MapsResponse>(withServer('/api/maps', server.id), null);
   const caps = useCapabilities(server.id);
   const [request, setRequest] = useState<ActionRequestSpec | null>(null);
@@ -41,6 +45,12 @@ export default function StatusPanel({ language, timeZone, writesEnabled, server 
   const mapGate = gateFor('map', caps, writesEnabled);
   const endGate = gateFor('match_end', caps, writesEnabled);
   const currentMapName = s?.map ? (mapNames[s.map] ?? null) : null;
+  const modes = (s?.experiences ?? []).filter((m) => m !== '');
+  const nextMapId = s?.rotation.nextMap ?? null;
+  const nextMapName = s ? (s.rotation.nextMapName ?? (nextMapId ? (mapNames[nextMapId] ?? null) : null)) : null;
+  const rotationCount = s?.rotation.count ?? null;
+  // nowIndex / nextIndex は 0 始まり(entries の添字)。画面では 1 始まりにする
+  const oneBased = (v: number | null) => (v === null ? null : v + 1);
 
   return (
     <>
@@ -86,9 +96,25 @@ export default function StatusPanel({ language, timeZone, writesEnabled, server 
               <div className="stat">
                 <span className="stat-label">{t('status.rotation')}</span>
                 <span className="stat-value">
-                  {t('status.rotationValue', { now: num(s.rotation.nowIndex), next: num(s.rotation.nextIndex) })}
+                  {t('status.rotationValue', { now: num(oneBased(s.rotation.nowIndex)), next: num(oneBased(s.rotation.nextIndex)) })}
                 </span>
+                {rotationCount !== null && (
+                  <span className="muted">{t('status.rotationCountValue', { count: num(rotationCount) })}</span>
+                )}
               </div>
+              {(nextMapId !== null || nextMapName !== null) && (
+                <div className="stat">
+                  <span className="stat-label">{t('status.nextMap')}</span>
+                  <span className="stat-value">{nextMapName ?? nextMapId}</span>
+                  {nextMapName && nextMapId && <span className="muted mono">{nextMapId}</span>}
+                </div>
+              )}
+              {modes.length > 0 && (
+                <div className="stat">
+                  <span className="stat-label">{t('status.mode')}</span>
+                  <span className="stat-value">{modes.join(t('status.listSeparator'))}</span>
+                </div>
+              )}
             </div>
             <h2>{t('status.factionScores')}</h2>
             {s.factionScores.length === 0 ? (
@@ -131,7 +157,13 @@ export default function StatusPanel({ language, timeZone, writesEnabled, server 
                 onChange={(e) => setMessage(e.target.value)}
               />
             </div>
-            <button type="submit" className="button-primary" disabled={broadcastGate.disabled || message.trim() === ''}>
+            <p id="help-broadcast" className="action-help">{t('action.help.broadcast')}</p>
+            <button
+              type="submit"
+              className="button-primary"
+              aria-describedby="help-broadcast"
+              disabled={broadcastGate.disabled || message.trim() === ''}
+            >
               {t('status.broadcast.submit')}
             </button>
           </form>
@@ -163,11 +195,17 @@ export default function StatusPanel({ language, timeZone, writesEnabled, server 
                 ))}
               </select>
             </div>
+            <p id="help-map" className="action-help">{t('action.help.map')}</p>
             <div className="button-row tight">
               <button type="button" className="button-small" onClick={maps.refresh} disabled={maps.loading}>
                 {t('common.refresh')}
               </button>
-              <button type="submit" className="button-outline-danger push-end" disabled={mapGate.disabled || mapId === ''}>
+              <button
+                type="submit"
+                className="button-outline-danger push-end"
+                aria-describedby="help-map"
+                disabled={mapGate.disabled || mapId === ''}
+              >
                 {t('status.mapChange.submit')}
               </button>
             </div>
@@ -177,11 +215,12 @@ export default function StatusPanel({ language, timeZone, writesEnabled, server 
 
       <section className="card danger-zone" aria-labelledby="danger-title">
         <h2 id="danger-title">{t('status.dangerZone')}</h2>
-        <p>{t('status.matchEnd.help')}</p>
+        <p id="help-match_end" className="action-help">{t('action.help.match_end')}</p>
         <div className="button-row">
           <button
             type="button"
             className="button-outline-danger push-end"
+            aria-describedby="help-match_end"
             disabled={endGate.disabled}
             onClick={() => setRequest({ action: 'match_end', params: {} })}
           >

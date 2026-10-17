@@ -1,6 +1,7 @@
 // 書き込み操作の確認ダイアログ(prepare → 確認 → execute の二段階。docs/ARCHITECTURE.md 4.3・7.3、docs/API.md 4 章)。
 // - 入力が要る操作(kick / ban の理由、個別メッセージの本文)は最初に入力欄を出す
 // - 確認内容は prepare が返した正規化済み params と targetName から、カタログの confirm.<action> で組み立てる
+// - 確認内容の下に、操作ボタンの直下と同じ「何が起きるか」(action.help.<action>)を出す(docs/ARCHITECTURE.md 9.4)
 // - destructive(ban / map / match_end)は強調し、確認チェックを入れるまで実行ボタンを押せない
 // - 実行中は閉じられず、二重送信しない。RCON_TIMEOUT は「結果不明」として自動で再実行しない
 // - 対象サーバー(server)を prepare・execute の両方に明示して送り、ダイアログにサーバー名を出す(docs/ARCHITECTURE.md 15.5・15.6)
@@ -302,6 +303,7 @@ export default function ConfirmDialog({ i18n, server, request, mapNames = {}, on
             </p>
           )}
           {renderSummary()}
+          <p className="action-help">{t(`action.help.${prepared.action}`)}</p>
           <p className="muted">{t('confirm.expires', { time: time(prepared.expiresAt) })}</p>
           {destructive && (
             <label className="checkbox">

@@ -11,7 +11,9 @@
 //
 // 127.0.0.1 と ::1 だけで待ち受ける。サーバー名は "Mock Server <ポート>"。
 // プレイヤー名・Steam ID は架空(Steam ID は 0 始まりの 17 桁で、実在の SteamID64 の形式ではない)。
-// ポートごとにプレイヤー名(末尾に "-<ポート>")・Steam ID・人数を変え、画面でどのサーバーに繋がっているか見分けられるようにする。
+// ポートごとにプレイヤー名(末尾に "-<ポート>")・Steam ID・人数・experiences・ローテーションを変え、
+// 画面でどのサーバーに繋がっているか見分けられるようにする。experiences の値(mock_mode_*)・ローテーションの要素の形
+// ({ map, displayName })は架空。POST /v1/match/map・/v1/match/end でローテーション位置を 1 つ進める。
 import { createServer } from 'node:http';
 import { timingSafeEqual, createHash } from 'node:crypto';
 
@@ -57,13 +59,15 @@ function makeState(port, index) {
     port,
     password: PASSWORDS[index] && PASSWORDS[index].trim() !== '' ? PASSWORDS[index] : DEFAULT_PASSWORD,
     serverName: `Mock Server ${port}`,
-    map: index % 2 === 0 ? 'mock_map_alpha' : 'mock_map_bravo',
+    map: ROTATION_SETS[index % ROTATION_SETS.length][0].map,
     maxPlayers: 64,
     factionScores: [
       { faction: 'Blue', score: 120 + index * 10 },
       { faction: 'Red', score: 95 + index * 10 },
     ],
-    rotation: { nowIndex: index % 3, nextIndex: (index + 1) % 3 },
+    experiences: EXPERIENCE_SETS[index % EXPERIENCE_SETS.length],
+    rotationEntries: ROTATION_SETS[index % ROTATION_SETS.length],
+    rotation: { nowIndex: 0, nextIndex: 1 },
     players: BASE_PLAYERS.slice(0, count).map((p, i) => ({ ...p, name: `${p.name}-${port}`, steamId: fakeSteamId(port, i + 1) })),
     bans: [{ steamId: fakeSteamId(port, 99), bannedAtUtc: '2026-10-01T12:00:00Z', bannedBy: 'mock', reason: 'example ban' }],
     maps: [
@@ -75,6 +79,26 @@ function makeState(port, index) {
   };
 }
 
+/** ポートごとの experiences(架空) */
+const EXPERIENCE_SETS = [['mock_mode_conquest'], ['mock_mode_frontline', 'mock_mode_night'], []];
+
+const MAP_NAMES = { mock_map_alpha: 'Mock Map Alpha', mock_map_bravo: 'Mock Map Bravo', mock_map_charlie: 'Mock Map Charlie' };
+const entry = (id) => ({ map: id, displayName: MAP_NAMES[id] });
+/** ポートごとのローテーション(件数と順番を変える) */
+const ROTATION_SETS = [
+  ['mock_map_alpha', 'mock_map_bravo', 'mock_map_charlie'].map(entry),
+  ['mock_map_bravo', 'mock_map_charlie', 'mock_map_alpha', 'mock_map_charlie'].map(entry),
+  ['mock_map_charlie', 'mock_map_alpha'].map(entry),
+];
+
+/** ローテーション位置を 1 つ進め、現在のマップをその位置のマップにする */
+function advanceRotation(state) {
+  const n = state.rotationEntries.length;
+  const now = state.rotation.nextIndex;
+  state.rotation = { nowIndex: now, nextIndex: (now + 1) % n };
+  state.map = state.rotationEntries[now].map;
+}
+
 const ROUTES = [
   'GET /v1/status',
   'GET /v1/players',
@@ -82,6 +106,7 @@ const ROUTES = [
   'GET /v1/capabilities',
   'GET /v1/bans',
   'GET /v1/catalog/maps',
+  'GET /v1/rotation',
   'POST /v1/players/{steamId}/kick',
   'POST /v1/players/{steamId}/message',
   'POST /v1/broadcast',
@@ -163,7 +188,7 @@ function makeHandler(state) {
       return reply(200, {
         serverName: state.serverName,
         map: state.map,
-        experiences: [],
+        experiences: state.experiences,
         lighting: 'Day',
         alternator: false,
         scoreTick: 1,
@@ -195,6 +220,9 @@ function makeHandler(state) {
     }
     if (method === 'GET' && path === '/v1/bans') return reply(200, { bans: state.bans, count: state.bans.length });
     if (method === 'GET' && path === '/v1/catalog/maps') return reply(200, { maps: state.maps });
+    if (method === 'GET' && path === '/v1/rotation') {
+      return reply(200, { enabled: true, mode: 'sequential', entries: state.rotationEntries });
+    }
 
     if (method === 'POST' && (m = /^\/v1\/players\/([^/]+)\/kick$/.exec(path))) {
       const id = decodeURIComponent(m[1]);
@@ -235,11 +263,12 @@ function makeHandler(state) {
     if (method === 'POST' && path === '/v1/match/map') {
       const found = state.maps.find((x) => x.id === b.map);
       if (!found) return reply(400, { error: 'unknown map' });
+      advanceRotation(state);
       state.map = found.id;
       return reply(200, { ok: true });
     }
     if (method === 'POST' && path === '/v1/match/end') {
-      state.rotation = { nowIndex: state.rotation.nextIndex, nextIndex: (state.rotation.nextIndex + 1) % state.maps.length };
+      advanceRotation(state);
       return reply(200, { ok: true });
     }
     return reply(404, { error: 'route not found' });

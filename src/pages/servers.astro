@@ -7,6 +7,6 @@ import ServersPanel from '../components/ServersPanel';
 
 const ctx = await getPageContext(Astro.request, Astro.locals, Astro.response);
 ---
-<OpsLayout title={ctx.t('servers.title')} language={ctx.language} ctx={ctx} active="servers">
+<OpsLayout title={ctx.t('tabs.settings')} language={ctx.language} ctx={ctx} active="settings">
   <ServersPanel client:load language={ctx.language} timeZone={ctx.timeZone} />
 </OpsLayout>

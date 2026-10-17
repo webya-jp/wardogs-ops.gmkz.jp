@@ -1,4 +1,5 @@
-// サーバー設定画面(/servers)。docs/ARCHITECTURE.md 15.7、docs/API.md 7 章。手動更新。
+// 設定タブ(/servers)の「サーバー」の節。docs/ARCHITECTURE.md 9.4・15.7、docs/API.md 7 章。手動更新。
+// - #add で開いたときは追加フォームを開いて最初の欄にフォーカスする
 // - 一覧: 表示名、ホスト名:ポート、有効/無効、直近の接続テスト、パスワードの再入力が必要・短め
 // - 操作: 編集・接続テスト・有効化/無効化・削除
 // - 追加・編集フォームは 4 項目(表示名 / ホスト名 / ポート / RCON パスワード)。保存後に接続テストの結果を出す
@@ -77,8 +78,27 @@ export default function ServersPanel({ language, timeZone }: Props) {
   const limit = data?.limit ?? 0;
   const limitReached = data !== null && servers.length >= limit;
 
+  // サイドバーの「サーバーを追加」(/servers#add)から来たときは追加フォームを開き、最初の欄にフォーカスする(docs/ARCHITECTURE.md 9.2)
+  const focusFirstField = useRef(false);
   useEffect(() => {
-    if (mode) formRef.current?.scrollIntoView({ block: 'start' });
+    const onHash = () => {
+      if (window.location.hash !== '#add') return;
+      focusFirstField.current = true;
+      setMode({ type: 'add' });
+      setValues(EMPTY);
+      setFormError(null);
+    };
+    onHash();
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+  useEffect(() => {
+    if (!mode) return;
+    formRef.current?.scrollIntoView({ block: 'start' });
+    if (focusFirstField.current) {
+      focusFirstField.current = false;
+      document.getElementById('server-name')?.focus();
+    }
   }, [mode]);
   useEffect(() => {
     if (outcome) outcomeRef.current?.scrollIntoView({ block: 'nearest' });
@@ -245,9 +265,11 @@ export default function ServersPanel({ language, timeZone }: Props) {
   const fieldError = (field: (typeof FORM_FIELDS)[number]) => fieldIssueText(field, formError, t);
 
   return (
+    <>
+    <h1>{t('tabs.settings')}</h1>
     <section aria-labelledby="servers-title">
       <div className="toolbar">
-        <h1 id="servers-title">{t('servers.title')}</h1>
+        <h2 id="servers-title">{t('servers.section')}</h2>
         {data && <span className="badge">{t('servers.count', { count: num(servers.length), limit: num(limit) })}</span>}
         <span className="spacer" />
         <button type="button" className="button-small" onClick={list.refresh} disabled={list.loading}>
@@ -297,9 +319,9 @@ export default function ServersPanel({ language, timeZone }: Props) {
 
       {mode && (
         <section ref={formRef} className="card server-form" aria-labelledby="server-form-title">
-          <h2 id="server-form-title">
+          <h3 id="server-form-title">
             {mode.type === 'add' ? t('servers.form.addTitle') : t('servers.form.editTitle', { name: serverLabel(mode.server, t) })}
-          </h2>
+          </h3>
           {editing?.needsPassword && <p className="alert alert-warn">{t('servers.form.passwordReenter')}</p>}
           {formError && <ErrorView error={formError} t={t} lead={t('servers.form.saveFailed')} inlineFields={FORM_FIELDS} />}
           <form onSubmit={(e) => void onSubmit(e)} noValidate>
@@ -468,6 +490,7 @@ export default function ServersPanel({ language, timeZone }: Props) {
         }}
       />
     </section>
+    </>
   );
 }
 

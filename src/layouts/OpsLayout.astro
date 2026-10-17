@@ -1,19 +1,19 @@
 ---
-// 運営パネル共通のレイアウト。lang は解決済みの言語、noindex、OG なし。
-// ctx(ログイン後のページの共通値)があるときだけ、ヘッダーの操作者名・ログアウト・ナビ・お知らせを出す。
-// 文言はすべてカタログ経由(docs/ARCHITECTURE.md 13 章)。
-// サーバーの切り替え(docs/ARCHITECTURE.md 15.5): ヘッダーのセレクトは ?server= を送る GET フォーム(JS 無しでも動く。
-// JS があれば選択で即送信)。現在のパスを保つ。ナビのリンクには ?server=<選択中の id> を付け、
-// 複数タブで別々のサーバーを開いていても Cookie の書き換えで他のタブが別サーバーに変わらないようにする。
+// 運営パネル共通のレイアウト。lang は解決済みの言語、noindex、OG なし。文言はすべてカタログ経由(docs/ARCHITECTURE.md 13 章)。
+// - ctx とセッション(ログイン後)があるとき: 「サイドバー + ヘッダータブ + メイン」の 3 領域(docs/ARCHITECTURE.md 9.2)
+//   HTML の順序は スキップリンク → ヘッダー → サイドバー → タブ → お知らせ → main。見た目の配置は CSS Grid で決める
+//   幅 1024px 未満ではサイドバーをヘッダー直下の折りたたみパネルにする(9.5)。JS が無ければ常に開いた状態
+// - それ以外(/setup・/login): 従来のヘッダー + 1 カラム
+// サーバーの切り替え・操作者名・期限・ログアウトはサイドバーにある(Sidebar.astro)。
+// タブ・アプリ名のリンクには ?server=<選択中の id> を付ける(15.5。複数タブで別々のサーバーを開いていても混ざらないように)。
 import '../styles/ops.css';
 import SessionNotices from '../components/SessionNotices';
-import { formatDateTime, getTranslator, toLocale } from '../i18n';
-import type { Language, MessageKey } from '../i18n';
+import Sidebar from '../components/Sidebar.astro';
+import { getTranslator } from '../i18n';
+import type { Language } from '../i18n';
 import type { PageContext } from './page-context';
-import type { ServerSummary } from '../types/api';
-import { serverLabel } from '../components/lib/servers';
-
-export type NavId = 'status' | 'players' | 'bans' | 'audit' | 'servers';
+import { NAV_ITEMS, hrefWithServer } from './nav';
+import type { NavId } from './nav';
 
 interface Props {
   title: string;
@@ -29,40 +29,11 @@ const t = getTranslator(language);
 const appName = t('app.name');
 const fullTitle = title === appName ? appName : t('layout.title', { page: title, app: appName });
 
-const NAV: { id: NavId; href: string; label: MessageKey }[] = [
-  { id: 'status', href: '/', label: 'nav.status' },
-  { id: 'players', href: '/players', label: 'nav.players' },
-  { id: 'bans', href: '/bans', label: 'nav.bans' },
-  { id: 'audit', href: '/audit', label: 'nav.audit' },
-  { id: 'servers', href: '/servers', label: 'nav.servers' },
-];
-
-const currentServerId = ctx?.serverId ?? null;
-const withServer = (href: string) => (currentServerId ? `${href}?server=${encodeURIComponent(currentServerId)}` : href);
-
-// セレクトに出すのは有効なサーバー(選択中のものは無効でも出す。今どれを見ているか分かるように)
-const switchable: ServerSummary[] = ctx ? ctx.servers.filter((s) => s.enabled || s.id === currentServerId) : [];
-const optionLabel = (s: ServerSummary): string => {
-  const name = serverLabel(s, t);
-  if (!s.enabled) return t('header.serverDisabled', { name });
-  if (s.needsPassword) return t('header.serverNeedsPassword', { name });
-  if (!s.usable) return t('header.serverUnusable', { name });
-  return name;
-};
-const currentPath = Astro.url.pathname;
-
 const session = ctx?.session ?? null;
-const operatorText = session
-  ? session.operator
-    ? t('header.operator', { name: session.operator })
-    : t('header.operatorAnonymous', { tag: session.sessionTag })
-  : null;
-const expiresText =
-  session && ctx
-    ? t('header.sessionExpires', {
-        time: formatDateTime(session.expiresAt, toLocale(language), ctx.timeZone, { dateStyle: 'short', timeStyle: 'short' }),
-      })
-    : null;
+const shell = ctx !== undefined && session !== null;
+const currentServerId = ctx?.serverId ?? null;
+// <head> のインラインスクリプトは描画前に <html> へ js クラスを付ける(モバイルでサイドバーを閉じた状態から始めるため。
+// JS が無ければ開いたまま。開閉ボタンも JS があるときだけ出す)
 ---
 <!doctype html>
 <html lang={language}>
@@ -73,68 +44,94 @@ const expiresText =
     <meta name="referrer" content="same-origin" />
     <meta name="color-scheme" content="light dark" />
     <title>{fullTitle}</title>
+    {shell && (
+      <script is:inline>document.documentElement.classList.add('js');</script>
+    )}
   </head>
-  <body>
+  <body class={shell ? 'has-shell' : undefined}>
     <a class="skip-link" href="#main">{t('layout.skipToMain')}</a>
-    <header class="site-header">
-      <div class="container">
-        <a class="brand" href={session ? withServer('/') : '/login'}>{appName}</a>
-        {session && ctx && switchable.length > 0 && (
-          <form class="server-switch" method="get" action={currentPath} data-server-switch>
-            <label for="server-select">{t('header.server')}</label>
-            <select id="server-select" name="server">
-              {ctx.serverNotFound && (
-                <option value="" selected disabled>{t('server.notFound.title')}</option>
-              )}
-              {switchable.map((s) => (
-                <option value={s.id} selected={s.id === currentServerId && !ctx.serverNotFound}>{optionLabel(s)}</option>
-              ))}
-            </select>
-            <button type="submit" class="button-small">{t('header.serverSwitch')}</button>
-          </form>
-        )}
-        {session && (
-          <div class="header-session">
-            <span>{operatorText}</span>
-            <span>{expiresText}</span>
-            <form method="post" action="/logout">
-              <button type="submit" class="button-small">{t('logout.submit')}</button>
-            </form>
-          </div>
-        )}
-      </div>
-    </header>
-    {session && (
-      <nav class="site-nav" aria-label={t('nav.label')}>
-        <div class="container">
+    {shell && ctx ? (
+      <div class="shell">
+        <header class="site-header shell-header">
+          <a class="brand" href={hrefWithServer('/', currentServerId)}>{appName}</a>
+          <button
+            type="button"
+            class="button-small sidebar-toggle"
+            aria-controls="sidebar"
+            aria-expanded="false"
+            data-sidebar-toggle
+            data-label-open={t('sidebar.toggle.open')}
+            data-label-close={t('sidebar.toggle.close')}
+            hidden
+          >
+            <span class="sidebar-toggle-icon" aria-hidden="true"></span>
+            <span class="sidebar-toggle-label">{t('sidebar.toggle.open')}</span>
+          </button>
+        </header>
+        <Sidebar ctx={ctx} active={active} />
+        <nav class="shell-tabs" aria-label={t('tabs.label')}>
           <ul>
-            {NAV.map((item) => (
+            {NAV_ITEMS.map((item) => (
               <li>
-                <a href={withServer(item.href)} aria-current={item.id === active ? 'page' : undefined}>{t(item.label)}</a>
+                <a href={hrefWithServer(item.href, currentServerId)} aria-current={item.id === active ? 'page' : undefined}>
+                  {t(item.label)}
+                  {item.comingSoon && <span class="tab-badge">{t('tabs.comingSoon')}</span>}
+                </a>
               </li>
             ))}
           </ul>
+        </nav>
+        <div class="shell-notices">
+          <SessionNotices client:load language={language} initialFeatures={ctx.features} initialWarnings={ctx.warnings} />
         </div>
-      </nav>
-    )}
-    <div class="container">
-      {ctx && session && (
-        <SessionNotices client:load language={language} initialFeatures={ctx.features} initialWarnings={ctx.warnings} />
-      )}
-    </div>
-    <main id="main" class="container">
-      <div class={narrow ? 'narrow' : undefined}>
-        <slot />
+        <main id="main" class="shell-main">
+          <div class={narrow ? 'narrow' : undefined}>
+            <slot />
+          </div>
+        </main>
       </div>
-    </main>
+    ) : (
+      <>
+        <header class="site-header">
+          <div class="container">
+            <a class="brand" href="/login">{appName}</a>
+          </div>
+        </header>
+        <main id="main" class="container">
+          <div class={narrow ? 'narrow' : undefined}>
+            <slot />
+          </div>
+        </main>
+      </>
+    )}
     <script>
-      // 選択したらすぐに切り替える(JS が無い場合は「切り替え」ボタンで送る)
+      // サーバーのセレクトは選択したらすぐに切り替える(JS が無い場合は「切り替え」ボタンで送る)
       for (const form of document.querySelectorAll<HTMLFormElement>('form[data-server-switch]')) {
         const select = form.querySelector('select');
         select?.addEventListener('change', () => {
           if (select.value !== '') form.requestSubmit();
         });
       }
+
+      // モバイル(1024px 未満)のサイドバーの開閉。開閉の状態は保存しない(ページ遷移ごとに閉じた状態に戻る)
+      const toggle = document.querySelector<HTMLButtonElement>('[data-sidebar-toggle]');
+      const sidebar = document.querySelector<HTMLElement>('[data-sidebar]');
+      if (toggle && sidebar) {
+        const label = toggle.querySelector('.sidebar-toggle-label');
+        const setOpen = (open: boolean) => {
+          sidebar.classList.toggle('is-open', open);
+          toggle.setAttribute('aria-expanded', String(open));
+          if (label) label.textContent = (open ? toggle.dataset.labelClose : toggle.dataset.labelOpen) ?? '';
+        };
+        toggle.hidden = false;
+        setOpen(false);
+        toggle.addEventListener('click', () => setOpen(!sidebar.classList.contains('is-open')));
+      }
+
+      // 現在のタブを見える位置に寄せる(タブ列だけが横にスクロールする)
+      document
+        .querySelector('.shell-tabs a[aria-current="page"]')
+        ?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
     </script>
   </body>
 </html>

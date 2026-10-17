@@ -10,6 +10,6 @@ import { serverLabel } from '../components/lib/servers';
 const ctx = await getPageContext(Astro.request, Astro.locals, Astro.response);
 const servers = ctx.servers.map((s) => ({ id: s.id, label: serverLabel(s, ctx.t) }));
 ---
-<OpsLayout title={ctx.t('nav.audit')} language={ctx.language} ctx={ctx} active="audit">
+<OpsLayout title={ctx.t('tabs.audit')} language={ctx.language} ctx={ctx} active="audit">
   <AuditLog client:load language={ctx.language} timeZone={ctx.timeZone} servers={servers} />
 </OpsLayout>

@@ -2,6 +2,7 @@
 // - Steam ID はログイン済みの運営者向けに全桁表示する(確定 U-3、docs/ARCHITECTURE.md 6.5)
 // - STEAM_ID_PATTERN に合わない ID の行は表示だけして操作ボタンを無効にする
 // - 破壊的操作(kick / ban)は行の末尾に、区切り線で他のボタンから離して置く。実行は必ず確認ダイアログを通す
+// - 一覧の上に 3 操作の説明(action.help.*)を 1 回だけ出す(行ごとには出さない。モバイルで行が長くなるため)
 // - プレイヤー名・陣営名は RCON の生データなので翻訳しない
 import { useState } from 'react';
 import { POLL_MIN_INTERVAL_SEC, STEAM_ID_PATTERN } from '../types/api';
@@ -14,6 +15,8 @@ import ConfirmDialog from './ConfirmDialog';
 import type { ActionRequestSpec, TargetServer } from './ConfirmDialog';
 import ErrorView from './ErrorView';
 import GateNotes from './GateNotes';
+import ActionHelp, { actionHelpId } from './ActionHelp';
+import { refreshSharedStatus } from './lib/status-store';
 
 interface Props extends I18nProps {
   writesEnabled: boolean;
@@ -49,6 +52,7 @@ export default function PlayersTable({ language, timeZone, writesEnabled, server
         {players.updatedAt !== null && <>{t('common.lastUpdated', { time: time(players.updatedAt) })} </>}
         {t('common.autoRefresh', { seconds: POLL_MIN_INTERVAL_SEC })}
       </p>
+      <ActionHelp actions={ACTIONS} t={t} />
       <GateNotes actions={ACTIONS} caps={caps} writesEnabled={writesEnabled} t={t} />
       {players.error && (
         <>
@@ -95,6 +99,7 @@ export default function PlayersTable({ language, timeZone, writesEnabled, server
                           <button
                             type="button"
                             className="button-small"
+                            aria-describedby={actionHelpId('message')}
                             disabled={messageGate.disabled}
                             onClick={() => setRequest({ action: 'message', params: { steamId: p.steamId }, input: 'message', subject: { name: p.name, steamId: p.steamId } })}
                           >
@@ -104,6 +109,7 @@ export default function PlayersTable({ language, timeZone, writesEnabled, server
                             <button
                               type="button"
                               className="button-small button-outline-danger"
+                              aria-describedby={actionHelpId('kick')}
                               disabled={kickGate.disabled}
                               onClick={() => setRequest({ action: 'kick', params: { steamId: p.steamId }, input: 'reason', subject: { name: p.name, steamId: p.steamId } })}
                             >
@@ -112,6 +118,7 @@ export default function PlayersTable({ language, timeZone, writesEnabled, server
                             <button
                               type="button"
                               className="button-small button-outline-danger"
+                              aria-describedby={actionHelpId('ban')}
                               disabled={banGate.disabled}
                               onClick={() => setRequest({ action: 'ban', params: { steamId: p.steamId }, input: 'reason', subject: { name: p.name, steamId: p.steamId } })}
                             >
@@ -136,7 +143,11 @@ export default function PlayersTable({ language, timeZone, writesEnabled, server
         request={request}
         onClose={() => setRequest(null)}
         onDone={(action) => {
-          if (action === 'kick' || action === 'ban') players.refresh();
+          if (action === 'kick' || action === 'ban') {
+            players.refresh();
+            // サイドバーの人数もすぐ反映する(/api/status の共有ストア)
+            refreshSharedStatus(server.id);
+          }
         }}
       />
     </section>

@@ -24,6 +24,12 @@ export const READ_ROUTES: Record<ReadKind, RouteDef> = {
   maps: { method: 'GET', template: '/v1/catalog/maps' },
 };
 
+/**
+ * 次のマップ・ローテーション件数(/api/status の補助。docs/API.md 3 章)。CapabilitiesResponse.read には足さない。
+ * capabilities の routes にあるときだけ呼ぶ
+ */
+export const ROTATION_ROUTE: RouteDef = { method: 'GET', template: '/v1/rotation' };
+
 export const WRITE_ROUTES: Record<WriteAction, RouteDef> = {
   kick: { method: 'POST', template: '/v1/players/{steamId}/kick' },
   ban: { method: 'POST', template: '/v1/bans' },

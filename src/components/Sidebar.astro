@@ -1,0 +1,148 @@
+---
+// サイドバー(ログイン後のすべてのページ。docs/ARCHITECTURE.md 9.2・9.3・9.5)。上から順に:
+//   1 サーバー切り替え(?server= を送る GET フォーム。JS があれば選択で即送信)と「サーバーを追加」
+//   2 サーバーカード / 3 試合の要点(使えるサーバーのときだけ SidebarStatus アイランドが /api/status の共有ストアから描く)
+//   4 縦ナビ(幅 1024px 以上のみ。タブと同じ nav.ts の定義) / 5 操作者名・ログインの有効期限・ログアウト
+// サーバー一覧・ホスト名:ポート・needsPassword・操作者名・期限は SSR の ctx から出す(/api/servers・/api/session は呼ばない)。
+// 置かないもの: 金銭を連想させる要素、ホスティング業者の案内、ゲームサーバー ID、RCON パスワードやその長さ。
+import SidebarStatus from './SidebarStatus';
+import { formatDateTime, toLocale } from '../i18n';
+import type { MessageKey } from '../i18n';
+import type { PageContext } from '../layouts/page-context';
+import { NAV_ITEMS, hrefWithServer } from '../layouts/nav';
+import type { NavId } from '../layouts/nav';
+import type { ServerSummary } from '../types/api';
+import { serverLabel } from './lib/servers';
+
+interface Props {
+  ctx: PageContext;
+  active?: NavId;
+}
+
+const { ctx, active } = Astro.props;
+const { t, language } = ctx;
+const currentServerId = ctx.serverId;
+const currentPath = Astro.url.pathname;
+
+// セレクトに出すのは有効なサーバー(選択中のものは無効でも出す。今どれを見ているか分かるように)
+const switchable: ServerSummary[] = ctx.servers.filter((s) => s.enabled || s.id === currentServerId);
+const optionLabel = (s: ServerSummary): string => {
+  const name = serverLabel(s, t);
+  if (!s.enabled) return t('sidebar.switcher.optionDisabled', { name });
+  if (s.needsPassword) return t('sidebar.switcher.optionNeedsPassword', { name });
+  if (!s.usable) return t('sidebar.switcher.optionUnusable', { name });
+  return name;
+};
+
+const server = ctx.serverNotFound ? null : ctx.server;
+const usable = server !== null && server.usable;
+// 使えないときの状態(9.3 の表の上 2 行。それ以外の不備は error 扱い)
+const staticState: { kind: string; key: MessageKey } | null =
+  server && !server.usable
+    ? !server.enabled
+      ? { kind: 'disabled', key: 'sidebar.state.disabled' }
+      : server.needsPassword
+        ? { kind: 'needsPassword', key: 'sidebar.state.needsPassword' }
+        : { kind: 'error', key: 'server.unusable.other' }
+    : null;
+// 要約行(サーバーが選べていないとき)
+const summaryFallback: string | null = ctx.serverNotFound
+  ? t('server.notFound.title')
+  : ctx.servers.length === 0
+    ? t('server.none.title')
+    : null;
+
+const session = ctx.session;
+const operatorText = session
+  ? session.operator
+    ? t('sidebar.session.operator', { name: session.operator })
+    : t('sidebar.session.operatorAnonymous', { tag: session.sessionTag })
+  : null;
+const expiresText = session
+  ? t('sidebar.session.expires', {
+      time: formatDateTime(session.expiresAt, toLocale(language), ctx.timeZone, { dateStyle: 'short', timeStyle: 'short' }),
+    })
+  : null;
+const sidebarNav = NAV_ITEMS.filter((item) => item.inSidebar);
+---
+<aside id="sidebar" class="sidebar" aria-label={t('sidebar.label')} data-sidebar>
+  <div class="sidebar-inner">
+    <section class="sidebar-section sidebar-switcher">
+      {switchable.length > 0 && (
+        <form class="server-switch" method="get" action={currentPath} data-server-switch>
+          <label for="server-select">{t('sidebar.switcher.label')}</label>
+          <div class="server-switch-row">
+            <select id="server-select" name="server">
+              {ctx.serverNotFound && (
+                <option value="" selected disabled>{t('server.notFound.title')}</option>
+              )}
+              {switchable.map((s) => (
+                <option value={s.id} selected={s.id === currentServerId && !ctx.serverNotFound}>{optionLabel(s)}</option>
+              ))}
+            </select>
+            <button type="submit" class="button-small">{t('sidebar.switcher.submit')}</button>
+          </div>
+        </form>
+      )}
+      <p class="sidebar-add">
+        <a href={hrefWithServer('/servers', currentServerId, '#add')}>{t('sidebar.switcher.addServer')}</a>
+      </p>
+    </section>
+
+    {usable && server ? (
+      <SidebarStatus
+        client:load
+        language={language}
+        timeZone={ctx.timeZone}
+        serverId={server.id}
+        displayName={serverLabel(server, t)}
+        host={server.host}
+        port={server.port}
+      />
+    ) : server && staticState ? (
+      <>
+        <p class="sidebar-summary">
+          <span class="sidebar-summary-name">{serverLabel(server, t)}</span>
+          <span class="sidebar-state-mark" data-state={staticState.kind}>{t(staticState.key)}</span>
+        </p>
+        <section class="sidebar-section sidebar-card" aria-labelledby="sidebar-card-title">
+          <h2 id="sidebar-card-title">{t('sidebar.card.title')}</h2>
+          <dl class="sidebar-kv">
+            <dt>{t('sidebar.card.displayName')}</dt>
+            <dd>{serverLabel(server, t)}</dd>
+            <dt>{t('sidebar.card.endpoint')}</dt>
+            <dd class="mono endpoint">{t('sidebar.card.endpointValue', { host: server.host, port: server.port })}</dd>
+          </dl>
+          <p class="sidebar-state">
+            <span class="sidebar-state-mark" data-state={staticState.kind}>{t(staticState.key)}</span>
+          </p>
+          <p><a href={hrefWithServer('/servers', server.id)}>{t('server.toSettings')}</a></p>
+        </section>
+      </>
+    ) : summaryFallback ? (
+      <p class="sidebar-summary">
+        <span class="sidebar-summary-name">{summaryFallback}</span>
+      </p>
+    ) : null}
+
+    <nav class="sidebar-section sidebar-nav" aria-label={t('sidebar.nav')}>
+      <ul>
+        {sidebarNav.map((item) => (
+          <li>
+            <a href={hrefWithServer(item.href, currentServerId)} aria-current={item.id === active ? 'page' : undefined}>{t(item.label)}</a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+
+    {session && (
+      <section class="sidebar-section sidebar-session">
+        <p>{operatorText}</p>
+        <p class="muted">{expiresText}</p>
+        <form method="post" action="/logout">
+          <button type="submit" class="button-small">{t('logout.submit')}</button>
+        </form>
+      </section>
+    )}
+  </div>
+</aside>

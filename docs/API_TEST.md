@@ -249,3 +249,23 @@
 
 - `wrangler dev`(本番ビルド。`__Host-wo_session` / `__Host-wo_server`)での同じ確認は未実施
 - 本番の Workers での PBKDF2(1 万回)の CPU 時間(C-20)、本番 D1 での条件付き INSERT・`db.batch()` の原子性(M-2)
+
+### 6.7 `/api/status` の新項目(2026-10-17)
+
+`docs/API.md` 3 章(`experiences`、`rotation.count` / `nextMap` / `nextMapName`)、`docs/ARCHITECTURE.md` 9.3。dev サーバーは起動せず(frontend の作業と並行のため)、単体テストと Node でのモック直接呼び出しで確認した。`/v1/rotation` の形式は非公式資料ベースの未検証(R-19)。
+
+| # | 確認 | 期待 | 結果 |
+|---|---|---|---|
+| ST-1 | `/v1/status` の `experiences[]` | 文字列の要素だけ、最大 `STATUS_EXPERIENCES_MAX` 件・各 `STATUS_EXPERIENCE_MAX_LENGTH` 文字、制御文字を除く。配列でなければ `[]` | OK(`normalize.test.ts`) |
+| ST-2 | `/v1/rotation` `{ enabled: true, entries }` + status の `nextIndex` | `count = entries.length`、`nextMap = entries[nextIndex].map`、表示名があれば `nextMapName` | OK(同上) |
+| ST-3 | 要素の形式の揺れ(文字列 / `map` がオブジェクト / `mapId`・`id` / `mapName`・`name`) | 落ちずに読める。読めない要素・範囲外・`nextIndex` なしは `nextMap` / `nextMapName` だけ null(`count` は残す) | OK(同上) |
+| ST-4 | `enabled: false`・`entries` が配列でない・最上位が配列 / null | 3 項目とも null(`nowIndex` / `nextIndex` は残す) | OK(同上) |
+| ST-5 | capabilities の `routes` に `GET /v1/rotation` が無い / capabilities が取れない | `/v1/rotation` を呼ばない。3 項目 null、`/api/status` は成功 | OK(`reads.test.ts`) |
+| ST-6 | 成功のキャッシュ | サーバーごとに 300 秒は再取得しない。次のマップは毎回 status の `nextIndex` から求める | OK(同上) |
+| ST-7 | `/v1/rotation` が 500・形式不正・`enabled: false` | `/api/status` は成功・3 項目 null。60 秒は再取得しない | OK(同上) |
+| ST-8 | `/v1/status` 自体の失敗 | 従来どおりのエラー。`/v1/rotation` は呼ばない | OK(同上) |
+| ST-9 | `match_end` の execute | 成功でそのサーバーのキャッシュだけ破棄(他サーバー・失敗時・kick では破棄しない) | OK(`actions.test.ts`。`map` は同じ分岐) |
+| ST-10 | モック(`MOCK_RCON_PORTS` に 2 ポート、Node から直接呼び出し) | ポートごとに `experiences`(1 件 / 2 件)・`entries` の件数(3 / 4)が異なる。capabilities に `GET /v1/rotation`。`match/end`・`match/map` でローテーション位置が 1 つ進み、他のポートは変わらない | OK |
+
+- 単体テスト: `pnpm test` 14 ファイル・116 件すべて成功。`pnpm check` のエラーは frontend 担当のファイル(`src/layouts/OpsLayout.astro`、`src/pages/*.astro`、`src/components/{StatusPanel,ServersPanel}.tsx`)のみで、backend のファイルは 0 件
+- 未確認: dev サーバー経由の `/api/status` の応答(frontend の作業後に確認する)、実サーバーの `/v1/rotation` の形式と `experiences` の意味(R-19)

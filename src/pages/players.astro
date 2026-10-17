@@ -10,7 +10,7 @@ import { serverLabel } from '../components/lib/servers';
 const ctx = await getPageContext(Astro.request, Astro.locals, Astro.response);
 const server = ctx.server && !ctx.serverNotFound && ctx.server.usable ? { id: ctx.server.id, label: serverLabel(ctx.server, ctx.t) } : null;
 ---
-<OpsLayout title={ctx.t('nav.players')} language={ctx.language} ctx={ctx} active="players">
+<OpsLayout title={ctx.t('tabs.players')} language={ctx.language} ctx={ctx} active="players">
   <ServerGate ctx={ctx} />
   {server && <PlayersTable client:load language={ctx.language} timeZone={ctx.timeZone} writesEnabled={ctx.features.writes} server={server} />}
 </OpsLayout>

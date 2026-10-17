@@ -1,0 +1,17 @@
+---
+// キルフィード(/killfeed)。docs/ARCHITECTURE.md 9.6。今は「準備中」の案内だけ(API・D1 は使わない。アイランドなし)。
+// ログイン済みの人にだけ見える(middleware の認証を通る)。
+export const prerender = false;
+import OpsLayout from '../layouts/OpsLayout.astro';
+import { getPageContext } from '../layouts/page-context';
+
+const ctx = await getPageContext(Astro.request, Astro.locals, Astro.response);
+const { t } = ctx;
+---
+<OpsLayout title={t('tabs.killfeed')} language={ctx.language} ctx={ctx} active="killfeed">
+  <section class="card" aria-labelledby="killfeed-title">
+    <h1 id="killfeed-title">{t('killfeed.title')} <span class="badge">{t('tabs.comingSoon')}</span></h1>
+    <p><strong>{t('killfeed.comingSoon')}</strong></p>
+    <p>{t('killfeed.why')}</p>
+  </section>
+</OpsLayout>

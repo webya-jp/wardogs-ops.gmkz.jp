@@ -1,5 +1,5 @@
 // BAN 画面(/bans)。手動更新。行ごとに BAN 解除(確認ダイアログを通す)。docs/ARCHITECTURE.md 9 章。
-// 理由・実行者は RCON の生データ、名前は監査ログからの補完(翻訳しない)。Steam ID は全桁表示(確定 U-3)。
+// 一覧の上に解除の説明(action.help.unban)。理由・実行者は RCON の生データ、名前は監査ログからの補完(翻訳しない)。Steam ID は全桁表示(確定 U-3)。
 import { useState } from 'react';
 import { STEAM_ID_PATTERN } from '../types/api';
 import type { BansResponse } from '../types/api';
@@ -11,6 +11,8 @@ import ConfirmDialog from './ConfirmDialog';
 import type { ActionRequestSpec, TargetServer } from './ConfirmDialog';
 import ErrorView from './ErrorView';
 import GateNotes from './GateNotes';
+import ActionHelp, { actionHelpId } from './ActionHelp';
+import { refreshSharedStatus } from './lib/status-store';
 
 interface Props extends I18nProps {
   writesEnabled: boolean;
@@ -43,6 +45,7 @@ export default function BansTable({ language, timeZone, writesEnabled, server }:
         {bans.updatedAt !== null && <>{t('common.lastUpdated', { time: time(bans.updatedAt) })} </>}
         {t('common.manualRefresh')}
       </p>
+      <ActionHelp actions={ACTIONS} t={t} />
       <GateNotes actions={ACTIONS} caps={caps} writesEnabled={writesEnabled} t={t} />
       {bans.error && (
         <>
@@ -80,6 +83,7 @@ export default function BansTable({ language, timeZone, writesEnabled, server }:
                       <button
                         type="button"
                         className="button-small"
+                        aria-describedby={actionHelpId('unban')}
                         disabled={unbanGate.disabled}
                         onClick={() => setRequest({ action: 'unban', params: { steamId: b.steamId } })}
                       >
@@ -95,7 +99,11 @@ export default function BansTable({ language, timeZone, writesEnabled, server }:
           </table>
         </div>
       )}
-      <ConfirmDialog i18n={i18n} server={server} request={request} onClose={() => setRequest(null)} onDone={() => bans.refresh()} />
+      <ConfirmDialog i18n={i18n} server={server} request={request} onClose={() => setRequest(null)} onDone={() => {
+          bans.refresh();
+          refreshSharedStatus(server.id);
+        }}
+      />
     </section>
   );
 }

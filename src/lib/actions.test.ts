@@ -6,7 +6,8 @@ import type { ActionContext } from './actions';
 import { listAudit, toApiStatus } from './audit';
 import type { FetchFn } from './rcon/client';
 import { resetCapabilitiesForTest } from './rcon/capabilities';
-import { createServer, resetServersForTest, updateServer } from './servers';
+import { readStatus, resetRotationForTest } from './reads';
+import { createServer, resetServersForTest, resolveServer, updateServer } from './servers';
 import type { MutationContext } from './servers';
 import { testKeys } from './testing/keys';
 import { makeD1 } from './testing/sqlite-d1';
@@ -64,7 +65,50 @@ const rows = async (db: D1Database) =>
 beforeEach(() => {
   hostCalls.length = 0;
   resetCapabilitiesForTest();
+  resetRotationForTest();
   resetServersForTest();
+});
+
+describe('actions と /v1/rotation のキャッシュ', () => {
+  it('map / match_end の成功でそのサーバーのキャッシュだけを破棄する(失敗・他の操作では破棄しない)', async () => {
+    const base = fetchWith(['GET /v1/status', 'GET /v1/rotation', 'GET /v1/players', 'POST /v1/players/{steamId}/kick', 'POST /v1/match/end']);
+    let endStatus = 200;
+    const fetchFn: FetchFn = async (url, init) => {
+      const u = new URL(url);
+      if (u.pathname === '/v1/rotation') {
+        hostCalls.push(`${u.hostname} ${init.method} ${u.pathname}`);
+        return Response.json({ enabled: true, entries: [{ map: 'a' }, { map: 'b' }] });
+      }
+      if (u.pathname === '/v1/match/end') return Response.json({ ok: endStatus === 200 }, { status: endStatus });
+      return base(url, init);
+    };
+    const deps = { fetchFn, log: () => undefined };
+    const { c, a, b } = await setup({ deps });
+    const sa = await resolveServer(c.servers, a);
+    const sb = await resolveServer(c.servers, b);
+    if (!sa.ok || !sb.ok) throw new Error('resolve failed');
+    const rotationCalls = () => hostCalls.filter((h) => h.endsWith('/v1/rotation')).map((h) => h.split(' ')[0]);
+    await readStatus(sa.data, deps);
+    await readStatus(sb.data, deps);
+    expect(rotationCalls()).toEqual(['rcon-a.example.com', 'rcon-b.example.com']);
+
+    const run = async (action: 'match_end' | 'kick', params: Record<string, unknown>) => {
+      const p = await prepareAction(c, { server: a, action, params });
+      if (!p.ok) throw new Error('prepare failed');
+      return executeAction(c, { server: a, action, params: p.data.params, confirmToken: p.data.confirmToken });
+    };
+    expect((await run('kick', { steamId: PLAYER.steamId })).ok).toBe(true);
+    endStatus = 500;
+    expect((await run('match_end', {})).ok).toBe(false);
+    await readStatus(sa.data, deps);
+    expect(rotationCalls()).toHaveLength(2);
+
+    endStatus = 200;
+    expect((await run('match_end', {})).ok).toBe(true);
+    await readStatus(sa.data, deps);
+    await readStatus(sb.data, deps);
+    expect(rotationCalls()).toEqual(['rcon-a.example.com', 'rcon-b.example.com', 'rcon-a.example.com']);
+  });
 });
 
 describe('actions(prepare → execute)', () => {

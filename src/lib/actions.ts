@@ -22,6 +22,7 @@ import type { ClientDeps, RconResult } from './rcon/client';
 import { getCapabilities, invalidateCapabilities } from './rcon/capabilities';
 import { normalizeMaps, normalizePlayers } from './rcon/normalize';
 import { buildWriteRequest, READ_ROUTES, routeKey } from './rcon/routes';
+import { invalidateRotation } from './reads';
 import { parseServerParam, resolveServer } from './servers';
 import type { ResolvedServer, ServerContext } from './servers';
 import type { SessionData } from './session';
@@ -247,5 +248,7 @@ export async function executeAction(ctx: ActionContext, body: unknown): Promise<
     // UPDATE に失敗しても pending の行は残る(画面は 1 分以上の pending を「結果不明」と表示する)
   }
   if (!r.ok) return fromRcon(server, r);
+  // 次のマップ・ローテーション位置が変わり得るので、そのサーバーの /v1/rotation のキャッシュを捨てる
+  if (req.action === 'map' || req.action === 'match_end') invalidateRotation(server.id);
   return { ok: true, data: { auditId, action: req.action, executedAt: finishedAt, server: server.id } };
 }

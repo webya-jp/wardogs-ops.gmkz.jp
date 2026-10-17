@@ -1,7 +1,7 @@
 /*
  * 運営パネル共通のスタイル(Tailwind・外部ライブラリは使わない)。
  * - カラートークンは :root に置き、prefers-color-scheme: dark で上書きする
- * - モバイルファースト。左右 16px のガター、ページ全体で横スクロールを出さない
+ * - モバイルファースト。左右 16px のガター、ページ全体で横スクロールを出さない(隠すのではなく、はみ出す要素を作らない)
  * - 表は .table-wrap(横スクロール用ラッパー)で包み、狭い画面では .table-cards で行をカード表示にする
  */
 
@@ -72,7 +72,6 @@ body {
   font-size: 16px;
   line-height: 1.6;
   overflow-wrap: anywhere;
-  overflow-x: hidden;
 }
 
 a {
@@ -166,49 +165,6 @@ code,
   color: var(--text);
   text-decoration: none;
   margin-right: auto;
-}
-
-.header-session {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 12px;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-}
-
-.header-session form {
-  margin: 0;
-}
-
-.site-nav {
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-}
-
-.site-nav ul {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  list-style: none;
-  margin: 0;
-  padding: 6px 0;
-}
-
-.site-nav a {
-  display: block;
-  padding: 8px 12px;
-  border-radius: var(--radius);
-  text-decoration: none;
-  color: var(--text);
-  min-height: 44px;
-  line-height: 28px;
-}
-
-.site-nav a[aria-current='page'] {
-  background: var(--accent);
-  color: var(--accent-text);
-  font-weight: 600;
 }
 
 main {
@@ -738,49 +694,392 @@ dialog.confirm-dialog::backdrop {
   margin-top: 0;
 }
 
-/* ---------- サーバーの切り替え(ヘッダー。docs/ARCHITECTURE.md 15.5) ---------- */
+/* ---------- ログイン後の画面構成(サイドバー + ヘッダータブ + メイン。docs/ARCHITECTURE.md 9.2・9.5) ---------- */
 
-.server-switch {
+[hidden] {
+  display: none !important;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    'header'
+    'sidebar'
+    'tabs'
+    'notices'
+    'main';
+  min-height: 100dvh;
+}
+
+.shell-header {
+  grid-area: header;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 4px 8px;
-  margin: 0;
+  gap: 8px 12px;
+  padding: 10px var(--gutter);
   min-width: 0;
 }
 
-.server-switch label {
-  font-size: 0.85rem;
-  color: var(--text-muted);
+.sidebar {
+  grid-area: sidebar;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
 }
 
-.server-switch select {
-  width: auto;
-  min-width: 12em;
-  max-width: 100%;
-  flex: 1 1 12em;
+.sidebar-inner {
+  display: flex;
+  flex-direction: column;
+  padding: 12px var(--gutter);
+  min-height: 100%;
+}
+
+.shell-tabs {
+  grid-area: tabs;
+  position: relative;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+/* タブ列の中だけ横スクロールする(ページ全体には横スクロールを出さない) */
+.shell-tabs ul {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 6px var(--gutter);
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+}
+
+.shell-tabs li {
+  flex: none;
+  scroll-snap-align: start;
+}
+
+/* 右端に続きがあることを示す薄いグラデーション */
+.shell-tabs::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 20px;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--surface));
+}
+
+.shell-tabs a {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.shell-tabs a[aria-current='page'] {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.tab-badge {
+  font-size: 0.7rem;
+  font-weight: 400;
+  line-height: 1.4;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+
+.shell-notices {
+  grid-area: notices;
+  padding: 0 var(--gutter);
+  min-width: 0;
+}
+
+.shell-main {
+  grid-area: main;
+  padding: 16px var(--gutter) 48px;
+  min-width: 0;
+}
+
+.shell-main > div:not(.narrow),
+.shell-notices > * {
+  max-width: var(--max-width);
+}
+
+/* サイドバーの開閉ボタン(1024px 未満・JS があるときだけ) */
+.sidebar-toggle {
+  flex: none;
+}
+
+.sidebar-toggle-icon {
+  display: inline-block;
+  width: 16px;
+  height: 2px;
+  background: currentColor;
+  box-shadow:
+    0 -5px 0 currentColor,
+    0 5px 0 currentColor;
+  margin: 0 2px;
+}
+
+/* ---------- サイドバーの中身 ---------- */
+
+.sidebar h2 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 0 0 6px;
+}
+
+.sidebar-section {
+  margin-bottom: 16px;
+}
+
+.sidebar-section > :last-child {
+  margin-bottom: 0;
+}
+
+.server-switch {
+  margin: 0;
+}
+
+.server-switch label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.server-switch-row {
+  display: flex;
+  gap: 8px;
+}
+
+.server-switch-row select {
+  flex: 1 1 0;
+  min-width: 0;
   /* iOS で入力時に拡大されないよう 16px 以上 */
   font-size: 16px;
 }
 
-@media (max-width: 639px) {
-  .brand {
-    flex: 1 1 auto;
+.sidebar-add {
+  margin: 8px 0 0;
+  font-size: 0.9rem;
+}
+
+.sidebar-card,
+.sidebar-match {
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.sidebar-kv {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 12px;
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+}
+
+.sidebar-kv dt {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  padding-top: 2px;
+}
+
+.sidebar-kv dd {
+  margin: 0;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.sidebar-kv .endpoint {
+  font-weight: 400;
+  word-break: break-all;
+}
+
+.sidebar-scores {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sidebar-scores li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar-scores .num {
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar-state {
+  margin: 0 0 4px;
+  font-size: 0.9rem;
+}
+
+/* 接続状態は文言 + 記号で示す(色だけに頼らない) */
+.sidebar-state-mark {
+  font-weight: 600;
+}
+
+.sidebar-state-mark::before {
+  display: inline-block;
+  width: 1.2em;
+  content: '○';
+}
+
+.sidebar-state-mark[data-state='ok'] {
+  color: var(--ok);
+}
+
+.sidebar-state-mark[data-state='ok']::before {
+  content: '●';
+}
+
+.sidebar-state-mark[data-state='unreachable'],
+.sidebar-state-mark[data-state='authFailed'],
+.sidebar-state-mark[data-state='error'] {
+  color: var(--danger);
+}
+
+.sidebar-state-mark[data-state='unreachable']::before,
+.sidebar-state-mark[data-state='authFailed']::before,
+.sidebar-state-mark[data-state='error']::before {
+  content: '✕';
+}
+
+.sidebar-state-mark[data-state='rateLimited']::before,
+.sidebar-state-mark[data-state='needsPassword']::before {
+  content: '▲';
+}
+
+.sidebar-state-mark[data-state='disabled']::before {
+  content: '−';
+}
+
+.sidebar-card .muted {
+  margin: 0 0 4px;
+}
+
+.sidebar-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sidebar-nav a {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border-left: 3px solid transparent;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.sidebar-nav a[aria-current='page'] {
+  background: var(--surface-2);
+  border-left-color: var(--accent);
+  font-weight: 600;
+}
+
+.sidebar-session {
+  margin-top: auto;
+  margin-bottom: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 0.875rem;
+}
+
+.sidebar-session p {
+  margin: 0 0 4px;
+}
+
+.sidebar-session form {
+  margin: 8px 0 0;
+}
+
+/* モバイルの要約行(閉じているときだけ見える) */
+.sidebar-summary {
+  display: none;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.sidebar-summary-name {
+  font-weight: 600;
+  min-width: 0;
+}
+
+@media (max-width: 1023.98px) {
+  /* 縦ナビはタブと重複するので出さない */
+  .sidebar-nav {
+    display: none;
   }
 
-  .server-switch {
-    order: 3;
-    flex: 1 1 100%;
+  .js .sidebar:not(.is-open) .sidebar-section {
+    display: none;
   }
 
-  .server-switch label {
-    flex: 1 1 100%;
+  .js .sidebar:not(.is-open) .sidebar-summary {
+    display: flex;
+  }
+}
+
+@media (min-width: 1024px) {
+  .shell {
+    grid-template-columns: 288px minmax(0, 1fr);
+    grid-template-rows: auto auto auto 1fr;
+    grid-template-areas:
+      'sidebar header'
+      'sidebar tabs'
+      'sidebar notices'
+      'sidebar main';
   }
 
-  .server-switch select {
-    flex: 1 1 0;
-    min-width: 0;
+  .sidebar {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    height: 100dvh;
+    overflow-y: auto;
+    border-bottom: none;
+    border-right: 1px solid var(--border);
   }
+
+  .sidebar-inner {
+    padding: 16px;
+  }
+
+  .sidebar-toggle {
+    display: none !important;
+  }
+}
+
+/* 操作の説明(「何が起きるか」。docs/ARCHITECTURE.md 9.4) */
+.action-help {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  margin: 0 0 8px;
 }
 
 /* ---------- 切り替えボタン(操作ログの種類) ---------- */
