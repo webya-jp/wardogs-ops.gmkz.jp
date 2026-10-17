@@ -110,9 +110,9 @@ function makeState(port, index) {
     players: BASE_PLAYERS.slice(0, count).map((p, i) => ({ ...p, name: `${p.name}-${port}`, steamId: fakeSteamId(port, i + 1) })),
     bans: [{ steamId: fakeSteamId(port, 99), bannedAtUtc: '2026-10-01T12:00:00Z', bannedBy: 'mock', reason: 'example ban' }],
     maps: [
-      { id: 'mock_map_alpha', displayName: 'Mock Map Alpha' },
-      { id: 'mock_map_bravo', displayName: 'Mock Map Bravo' },
-      { id: 'mock_map_charlie', displayName: 'Mock Map Charlie' },
+      { id: 'Zestafona', displayName: 'Zestafona' },
+      { id: 'Ozeti', displayName: 'Ozeti' },
+      { id: 'Bakurani', displayName: 'Bakurani' },
     ],
     startedAt: Date.now(),
   };
@@ -143,13 +143,14 @@ function newMatch(state) {
 /** ポートごとの experiences(架空) */
 const EXPERIENCE_SETS = [['mock_mode_conquest'], ['mock_mode_frontline', 'mock_mode_night'], []];
 
-const MAP_NAMES = { mock_map_alpha: 'Mock Map Alpha', mock_map_bravo: 'Mock Map Bravo', mock_map_charlie: 'Mock Map Charlie' };
+// 実際の WARDOGS のマップ名(2026-10-18 時点)。id の正式な形式は未確認なので表示名をそのまま使う
+const MAP_NAMES = { Zestafona: 'Zestafona', Ozeti: 'Ozeti', Bakurani: 'Bakurani' };
 const entry = (id) => ({ map: id, displayName: MAP_NAMES[id] });
 /** ポートごとのローテーション(件数と順番を変える) */
 const ROTATION_SETS = [
-  ['mock_map_alpha', 'mock_map_bravo', 'mock_map_charlie'].map(entry),
-  ['mock_map_bravo', 'mock_map_charlie', 'mock_map_alpha', 'mock_map_charlie'].map(entry),
-  ['mock_map_charlie', 'mock_map_alpha'].map(entry),
+  ['Zestafona', 'Ozeti', 'Bakurani'].map(entry),
+  ['Ozeti', 'Bakurani', 'Zestafona', 'Bakurani'].map(entry),
+  ['Bakurani', 'Zestafona'].map(entry),
 ];
 
 /** ローテーション位置を 1 つ進め、現在のマップをその位置のマップにする */

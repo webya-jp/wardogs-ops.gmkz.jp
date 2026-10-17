@@ -947,6 +947,7 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **R-9** `steamId` の形式(SteamID64 の 17 桁か)。
 - **R-10** kick / ban の `reason` の上限と省略可否。
 - **R-11** `/v1/catalog/maps` のルート名と `id` の形式、`POST /v1/match/map` で `experiences` 等が必須か。
+  - 2026-10-18: 運営者の確認により現行のマップは Zestafona / Ozeti / Bakurani の 3 つ。`src/lib/rcon/known-maps.ts` に既知の一覧として持ち、カタログが取得できない・空のときに `GET /api/maps` が `source: 'builtin'` で返す(表示名を id として使う。実 id の形式は未確認のまま)。
 - **R-12** `POST /v1/match/end` の本文の要否(空 JSON `{}` を送るか、本文無しか)。
 - **R-13** レート制限(600 リクエスト/分/IP、429 + `Retry-After`)の真偽。Workers の送信元 IP が他の利用者と共有される場合の影響。
 - **R-14** エラー応答の形式(JSON のフィールド名、ステータスの使い分け)。

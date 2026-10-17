@@ -417,6 +417,8 @@ export interface Ban {
 export interface MapsResponse {
   maps: { id: string; displayName: string | null }[];
   fetchedAt: number;
+  /** catalog = RCON の一覧 / builtin = 取得できない・空のため既知のマップ一覧(src/lib/rcon/known-maps.ts)で代替 */
+  source?: 'catalog' | 'builtin';
 }
 
 /** GET /api/audit?limit=&before= */

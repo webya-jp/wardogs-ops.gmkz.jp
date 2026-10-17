@@ -475,6 +475,7 @@ export const ja = {
   'status.mapChange.placeholder': '選んでください',
   'status.mapChange.submit': 'マップ変更を確認',
   'status.mapChange.unavailable': 'マップ一覧を取得できませんでした。',
+  'status.mapChange.builtin': 'サーバーからマップ一覧を取得できないため、既知のマップ一覧(Zestafona / Ozeti / Bakurani)を表示しています。',
   'status.dangerZone': '影響の大きい操作',
   'status.matchEnd.submit': '試合終了を確認',
 

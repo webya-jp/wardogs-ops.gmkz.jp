@@ -179,6 +179,7 @@ export default function StatusPanel({ language, timeZone, writesEnabled, server 
         <section className="card" aria-labelledby="map-title">
           <h2 id="map-title">{t('status.mapChange.title')}</h2>
           {maps.error && <ErrorView error={maps.error} t={t} lead={t('status.mapChange.unavailable')} />}
+          {maps.data?.source === 'builtin' && <p className="muted">{t('status.mapChange.builtin')}</p>}
           <form
             onSubmit={(e) => {
               e.preventDefault();
