@@ -1312,6 +1312,8 @@ D1 必須化(2026-10-16)で、登録サーバーが使えない段階は無く�
 
 ### 17.2 記録の開始・停止(二段階)
 
+記録操作の失敗(入力検証、`RECORDING_ALREADY_ACTIVE` 等の状態競合、確認トークンの不一致)は RCON を呼ばず D1 も変えないため、`settings_audit_log` には記録しない(QA 2026-10-17 killfeed M-4 での決定。書き込み操作の `audit_log` とは扱いが異なる)。成功した開始・停止・自動終了は必ず 1 行残す。
+
 既存の `POST /api/actions/prepare` / `execute`(4.3)に乗せる。確認トークンの形式・検証の順序(署名 → セッション → action と params のハッシュ → 対象サーバーと宛先 `sv` / `sh` → 期限)は同じで、`a` に `record_start` / `record_stop` を許す(`src/lib/confirm.ts` の `isWriteAction` を `ConfirmableAction` の判定に広げる)。`destructive` は常に false(ゲームサーバーに何も書き込まないため。通常の確認ダイアログ)。capabilities の判定はしない(`write` の対象外)。
 
 **prepare**

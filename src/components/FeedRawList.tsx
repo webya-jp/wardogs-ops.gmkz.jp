@@ -1,4 +1,4 @@
-// キルフィードタブの「受信した生データ(観測モード)」(docs/ARCHITECTURE.md 17.6・17.9、docs/API.md 9 章・7.3)。
+// キルフィードタブの「受信した生データ」(docs/ARCHITECTURE.md 17.6・17.9、docs/API.md 9 章・7.3)。
 // - 受信の状況(最後に受信・保存・拒否・捨てた時刻と理由、今日の件数)は GET /api/servers/:id/feed
 // - 生データは GET /api/feed/raw?server=&limit=20 の最新 20 件。手動更新(「再読み込み」)と「さらに読み込む」(before)
 // - 本文はゲームサーバーから届いた JSON 文字列のまま。**テキストとして**表示する(HTML として解釈しない。

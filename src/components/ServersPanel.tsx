@@ -4,7 +4,7 @@
 // - 操作: 編集・接続テスト・有効化/無効化・削除
 // - 追加・編集フォームは 4 項目(表示名 / ホスト名 / ポート / RCON パスワード)。保存後に接続テストの結果を出す
 // - 削除は確認ダイアログで表示名を入力させ、confirmName として送る
-// - 一覧の下に、サイドバーで選んでいるサーバーの「スコア記録」「キルフィード(観測モード)」の節(ServerExtraSettings。17.9)
+// - 一覧の下に、サイドバーで選んでいるサーバーの「スコア記録」「キルフィード」の節(ServerExtraSettings。17.9)
 // 運営者が入力した表示名・ホスト名と、RCON が返したサーバー名は翻訳しない。RCON パスワードは画面に表示しない(API も返さない)。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SubmitEvent } from 'react';

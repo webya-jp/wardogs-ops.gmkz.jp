@@ -317,28 +317,38 @@ export interface EndInput {
 
 /**
  * 記録を終える(manual 以外の理由。manual は actions.ts の record_stop が同じ形の UPDATE を batch で行う)。
- * UPDATE が行を返したときだけ record_end を書き、保持数を超えた試合を消す。終えた場合 true
+ * 終了の UPDATE と record_end の INSERT を 1 つの batch(1 トランザクション)で行い、監査行の無い終了を作らない(QA M-3)。
+ * INSERT は「この呼び出しの UPDATE で終わった行」(status = ended・ended_at・end_reason が今回の値)があり、
+ * その試合の record_end がまだ無いときだけ入る(UPDATE が空振りした二重実行では入らない)。
+ * 終えた場合は保持数を超えた試合を消して true
  */
 export async function endRecording(db: D1Database, e: EndInput): Promise<boolean> {
   const scores = e.lastScores === undefined ? null : JSON.stringify(e.lastScores.slice(0, MATCH_FACTIONS_MAX));
-  const row = await db
-    .prepare(
-      `UPDATE match_recordings SET status = 'ended', ended_at = ?2, end_reason = ?3, updated_at = ?2,
-              last_scores_json = COALESCE(?4, (SELECT faction_scores_json FROM match_samples
-                                                WHERE recording_id = ?1 ORDER BY bucket_minute DESC LIMIT 1))
-        WHERE id = ?1 AND status = 'recording'
-       RETURNING id, server_id, server_name`,
-    )
-    .bind(e.recordingId, e.now, e.reason, scores)
-    .first<{ id: number; server_id: number; server_name: string | null }>();
+  const [updated] = await db.batch<{ id: number; server_id: number }>([
+    db
+      .prepare(
+        `UPDATE match_recordings SET status = 'ended', ended_at = ?2, end_reason = ?3, updated_at = ?2,
+                last_scores_json = COALESCE(?4, (SELECT faction_scores_json FROM match_samples
+                                                  WHERE recording_id = ?1 ORDER BY bucket_minute DESC LIMIT 1))
+          WHERE id = ?1 AND status = 'recording'
+         RETURNING id, server_id`,
+      )
+      .bind(e.recordingId, e.now, e.reason, scores),
+    db
+      .prepare(
+        `INSERT INTO settings_audit_log (created_at, event, operator, session_tag, ip_hash, server_id, server_name, params_json)
+         SELECT ?2, 'record_end', NULL, NULL, NULL, r.server_id, r.server_name,
+                json_object('recordingId', CAST(r.id AS TEXT), 'reason', ?3)
+           FROM match_recordings r
+          WHERE r.id = ?1 AND r.status = 'ended' AND r.ended_at = ?2 AND r.end_reason = ?3
+            AND NOT EXISTS (SELECT 1 FROM settings_audit_log a
+                             WHERE a.event = 'record_end' AND a.server_id = r.server_id
+                               AND json_extract(a.params_json, '$.recordingId') = CAST(r.id AS TEXT))`,
+      )
+      .bind(e.recordingId, e.now, e.reason),
+  ]);
+  const row = updated?.results?.[0];
   if (!row) return false;
-  await db
-    .prepare(
-      `INSERT INTO settings_audit_log (created_at, event, operator, session_tag, ip_hash, server_id, server_name, params_json)
-       VALUES (?1, 'record_end', NULL, NULL, NULL, ?2, ?3, ?4)`,
-    )
-    .bind(e.now, Number(row.server_id), row.server_name, JSON.stringify({ recordingId: String(row.id), reason: e.reason }))
-    .run();
   await pruneEndedRecordings(db, Number(row.server_id), e.now);
   return true;
 }

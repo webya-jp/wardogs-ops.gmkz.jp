@@ -300,4 +300,40 @@ describe('buildKillfeedExport', () => {
     expect(ex.summary).toEqual(summarizeKills(kills, { origin: T0, end: T0 + 10 * MIN }));
     expect(JSON.parse(JSON.stringify(ex))).toEqual(ex);
   });
+
+  it('記録中の試合は summaryAt を終点にし、画面の集計と棒の数・幅が一致する', () => {
+    const kills = sample();
+    const match: MatchSummary = {
+      id: '13',
+      serverId: '3',
+      serverName: null,
+      status: 'recording',
+      startedAt: T0,
+      endedAt: null,
+      endReason: null,
+      map: 'TestMap',
+      scoreCap: 100,
+      scoreCapSource: 'default',
+      sampleCount: 0,
+      lastSampleAt: null,
+      lastScores: [],
+    };
+    const summaryAt = T0 + 30 * MIN;
+    const screen = summarizeKills(kills, { origin: T0, end: summaryAt });
+    const ex = buildKillfeedExport({
+      server: { id: '3', name: null },
+      scope: '13',
+      match,
+      samples: [],
+      kills,
+      truncated: false,
+      timeZone: 'Asia/Tokyo',
+      // 書き出しは画面の取得から 2 時間後(summaryAt を使わなければ棒の幅が変わる)
+      exportedAt: T0 + 150 * MIN,
+      summaryAt,
+    });
+    expect(ex.summary.timeline).toEqual(screen.timeline);
+    expect(ex.summary.timeline.bucketMinutes).toBe(1);
+    expect(ex.summary.timeline.buckets).toHaveLength(31);
+  });
 });

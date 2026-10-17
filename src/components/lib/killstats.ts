@@ -353,9 +353,14 @@ export interface BuildExportInput {
   truncated: boolean;
   timeZone: string;
   exportedAt: number;
+  /**
+   * 記録中の試合の集計の終点に使う時刻(画面と同じ値を渡す。画面はキルを最後に取得した時刻)。
+   * 省略時は exportedAt。終了済みの試合は終了時刻、記録外は最後のキルが終点なので使わない
+   */
+  summaryAt?: number;
 }
 
-/** 「JSON で書き出す」の中身。集計は summarizeKills を同じ起点・終点で計算し直す(画面と同じ数字になる) */
+/** 「JSON で書き出す」の中身。集計は summarizeKills を画面と同じ起点・終点で計算し直す(棒の数・幅も画面と一致する) */
 export function buildKillfeedExport(input: BuildExportInput): KillfeedExport {
   return {
     format: 'wardogs-ops.killfeed',
@@ -366,7 +371,7 @@ export function buildKillfeedExport(input: BuildExportInput): KillfeedExport {
     scope: input.scope,
     match: input.match,
     samples: [...input.samples],
-    summary: summarizeKills(input.kills, summarizeOptionsFor(input.match, input.exportedAt)),
+    summary: summarizeKills(input.kills, summarizeOptionsFor(input.match, input.summaryAt ?? input.exportedAt)),
     kills: [...input.kills],
     truncated: input.truncated,
   };

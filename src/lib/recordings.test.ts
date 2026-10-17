@@ -11,7 +11,7 @@ import type { CronSummary } from './cron';
 import type { FetchFn } from './rcon/client';
 import { resetCapabilitiesForTest } from './rcon/capabilities';
 import { resetRotationForTest } from './reads';
-import { buildSample, effectiveScoreCap, getMatchSamples, listMatches } from './recordings';
+import { buildSample, effectiveScoreCap, endRecording, getMatchSamples, listMatches } from './recordings';
 import { createServer, deleteServer, resetServersForTest, updateServer } from './servers';
 import type { MutationContext } from './servers';
 import { testKeys } from './testing/keys';
@@ -520,5 +520,22 @@ describe('陣営の付与用の観測(roster_json。キルフィード第 2 段�
     expect(all.length).toBe(3);
     expect(JSON.parse(all[1] ?? 'null')).toEqual(expected);
     expect(all[2]).toBeNull();
+  });
+});
+
+describe('終了と監査行の原子性(QA M-3)', () => {
+  it('終了の UPDATE と record_end は 1 つの batch。監査行の INSERT が失敗したら終了も取り消す', async () => {
+    const s = await setup();
+    const id = Number((await start(s, s.a)).match.id);
+    await s.db.prepare('ALTER TABLE settings_audit_log RENAME TO settings_audit_log_tmp').run();
+    await expect(endRecording(s.db, { recordingId: id, reason: 'empty', now: T0 + 60_000 })).rejects.toThrow();
+    await s.db.prepare('ALTER TABLE settings_audit_log_tmp RENAME TO settings_audit_log').run();
+    expect((await matchRow(s.db, String(id)))?.status).toBe('recording');
+    // やり直すと終了と record_end が 1 行ずつ。同じ時刻での二重実行でも増えない
+    expect(await endRecording(s.db, { recordingId: id, reason: 'empty', now: T0 + 120_000 })).toBe(true);
+    expect(await endRecording(s.db, { recordingId: id, reason: 'empty', now: T0 + 120_000 })).toBe(false);
+    const ends = (await settingsEvents(s.db)).filter((e) => e.event === 'record_end');
+    expect(ends.map((e) => JSON.parse(String(e.params_json)))).toEqual([{ recordingId: String(id), reason: 'empty' }]);
+    expect(await matchRow(s.db, String(id))).toMatchObject({ status: 'ended', end_reason: 'empty' });
   });
 });

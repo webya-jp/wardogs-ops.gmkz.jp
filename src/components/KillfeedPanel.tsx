@@ -310,16 +310,13 @@ function KillsBody({ i18n, server, scope, match, samples, feed, settingsHref }: 
   const [bucket, setBucket] = useState<TimeRange | null>(null);
   const kills = feed.data?.kills ?? [];
   const factions = feed.data?.factions ?? [];
-  const summaryAt = feed.updatedAt ?? 0;
   const startedAt = match?.startedAt ?? null;
   const endedAt = match?.endedAt ?? null;
-  // 起点・終点は試合の開始・終了(記録中は最後に取得した時刻)。記録外はキルから決める
+  // 起点・終点は試合の開始・終了(記録中は最後に取得した時刻)。記録外はキルから決める。
+  // 記録中の終点(summaryAt)は画面の集計と JSON の書き出しで同じ値を使う(棒の数・幅を一致させる)
+  const summaryAt = useMemo(() => feed.updatedAt ?? Date.now(), [feed.updatedAt]);
   const summary = useMemo(
-    () =>
-      summarizeKills(
-        kills,
-        summarizeOptionsFor(startedAt === null ? null : { startedAt, endedAt }, summaryAt || Date.now()),
-      ),
+    () => summarizeKills(kills, summarizeOptionsFor(startedAt === null ? null : { startedAt, endedAt }, summaryAt)),
     [kills, startedAt, endedAt, summaryAt],
   );
 
@@ -340,6 +337,7 @@ function KillsBody({ i18n, server, scope, match, samples, feed, settingsHref }: 
         truncated: feed.data?.truncated ?? false,
         timeZone: i18n.timeZone,
         exportedAt,
+        summaryAt,
       });
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);

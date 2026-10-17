@@ -200,10 +200,8 @@ export const ja = {
   'sidebar.session.operatorAnonymous': '操作者名なし(セッション {tag})',
   'sidebar.session.expires': 'ログインの有効期限 {time}',
 
-  // キルフィード(/killfeed。スコア記録の推移と観測モード。docs/ARCHITECTURE.md 9.6・17.9)
+  // キルフィード(/killfeed。スコア記録の推移・キルの集計・受信した生データ。docs/ARCHITECTURE.md 9.6・17.9・17.10)
   'killfeed.title': 'キルフィード',
-  'killfeed.comingSoon': 'キル数・ヘッドショット率などの集計は準備中です。',
-  'killfeed.why': 'いまは、スコア記録の推移のグラフと、ゲームサーバーから届いたデータをそのまま表示しています(観測モード)。届くデータの形式を実際のサーバーで確かめてから、集計を追加する予定です。',
   'killfeed.match.label': '表示する試合',
   'killfeed.match.current': '現在の試合(記録中)・{time} 開始・{map}',
   'killfeed.match.ended': '{time} 開始・{map}・{reason}',
@@ -283,8 +281,8 @@ export const ja = {
   'chart.table.toggle': '全 {count} 件の記録を表で見る',
 
   // キルフィードの受信(設定タブの節と、キルフィードタブの生データ。docs/ARCHITECTURE.md 17.6・17.9)
-  'feed.section': 'キルフィード(観測モード)',
-  'feed.intro': 'ゲームサーバーの WDServerFeed の送信先をこのパネルにすると、届いたデータを {days} 日間保存し、キルフィードタブにそのまま表示します。データの形式を確かめるための機能です。',
+  'feed.section': 'キルフィード',
+  'feed.intro': 'ゲームサーバーの WDServerFeed の送信先をこのパネルにすると、届いたキルを保存してキルフィードタブで集計します。届いたデータそのもの(生データ)も {days} 日間保存し、形式を確かめられます。',
   'feed.status.title': '受信の状況',
   'feed.status.notConfigured': '受信用トークンは未発行です。',
   'feed.status.lastReceived': '最後に受信',
@@ -328,7 +326,6 @@ export const ja = {
   'feed.notes.removeUrl': '形式を確かめたら、ゲーム側の設定から Url を消してください(このパネルで保存を止めても、送信は止まりません)。',
   'feed.notes.metrics': '実際のリクエスト数は Cloudflare のダッシュボード(Workers の Metrics)で確認できます。',
   'feed.raw.title': '受信した生データ',
-  'feed.raw.observation': 'キルフィードの集計は準備中です。ゲームサーバーから届いたデータを、解釈せずにそのまま表示しています(観測モード)。',
   'feed.raw.personalData': 'データには Steam ID やプレイヤー名が含まれる場合があります。',
   'feed.raw.retention': '保存期間は {days} 日です。',
   'feed.raw.notConfigured': '受信用トークンが未発行です。「設定」タブのキルフィードの節でトークンを発行し、ゲームサーバーに設定してください。',
