@@ -8,7 +8,7 @@ import type { ResolvedServer } from './servers';
 const T = 1_800_000_000_000;
 
 function server(id: string, host = 'rcon.example.com'): ResolvedServer {
-  return { id, auditServerId: Number(id), name: `S${id}`, rcon: { baseUrl: `http://${host}:7777`, password: 'dummy-password-0000' } };
+  return { id, auditServerId: Number(id), name: `S${id}`, rcon: { baseUrl: `http://${host}:7777`, password: 'dummy-password-0000' }, scoreCap: null };
 }
 
 interface Mock {

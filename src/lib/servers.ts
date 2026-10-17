@@ -8,6 +8,8 @@
 import {
   API_ERROR_CODES,
   MAX_SERVERS,
+  SCORE_CAP_MAX,
+  SCORE_CAP_MIN,
   SERVER_HOST_MAX_LENGTH,
   SERVER_ID_PATTERN,
   SERVER_NAME_MAX_LENGTH,
@@ -33,6 +35,7 @@ import type { RconConfig } from './config';
 import { isPlainObject } from './http';
 import type { ErrorOptions } from './http';
 import { b64urlToBytes, bytesToB64url } from './keys';
+import { invalidateFeedToken } from './feed';
 import { invalidateCapabilities } from './rcon/capabilities';
 import { rconRequest, READ_TIMEOUT_MS } from './rcon/client';
 import type { ClientDeps } from './rcon/client';
@@ -58,6 +61,8 @@ export interface ResolvedServer {
   /** 操作時点の表示名 */
   name: string;
   rcon: RconConfig;
+  /** スコア上限の設定値(servers.score_cap。null = 既定。docs/ARCHITECTURE.md 17.5) */
+  scoreCap: number | null;
 }
 
 export type ServerOutcome<T> = { ok: true; data: T } | { ok: false; code: ApiErrorCode; opts?: ErrorOptions };
@@ -138,9 +143,14 @@ export interface ServerRow {
   last_test_result: string | null;
   created_at: number;
   updated_at: number;
+  /** 0003。NULL = 既定 */
+  score_cap: number | null;
+  /** server_feeds に行があるか(0 / 1。列ではなく副問い合わせ) */
+  feed_configured: number;
 }
 
-const ROW_COLS = `id, name, host, port, scheme, rcon_password_enc, enabled, sort_order, last_test_at, last_test_result, created_at, updated_at`;
+const ROW_COLS = `id, name, host, port, scheme, rcon_password_enc, enabled, sort_order, last_test_at, last_test_result, created_at, updated_at,
+  score_cap, EXISTS (SELECT 1 FROM server_feeds f WHERE f.server_id = servers.id) AS feed_configured`;
 
 function endpointOf(row: Pick<ServerRow, 'scheme' | 'host' | 'port'>): Endpoint {
   return { scheme: row.scheme, host: row.host, port: Number(row.port) };
@@ -174,6 +184,10 @@ interface RowView {
   decrypted: DecryptResult;
 }
 
+function scoreCapOf(v: number | null | undefined): number | null {
+  return v === null || v === undefined ? null : Number(v);
+}
+
 async function viewRow(key: CryptoKey, row: ServerRow): Promise<RowView> {
   const decrypted = await decryptPassword(key, row.rcon_password_enc, endpointOf(row));
   const enabled = Number(row.enabled) === 1;
@@ -193,6 +207,8 @@ async function viewRow(key: CryptoKey, row: ServerRow): Promise<RowView> {
       lastTest: lastTestOf(row.last_test_at, row.last_test_result),
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
+      scoreCap: scoreCapOf(row.score_cap),
+      feedConfigured: Number(row.feed_configured) === 1,
     },
   };
 }
@@ -244,7 +260,10 @@ export async function resolveServer(sctx: ServerContext, id: ServerId): Promise<
   const baseUrl = baseUrlOf(ep);
   const d = await decryptPassword(sctx.key, row.rcon_password_enc, ep);
   if (!d.ok || !baseUrl) return fail('SERVER_NEEDS_PASSWORD');
-  return { ok: true, data: { id, auditServerId: Number(row.id), name: row.name, rcon: { baseUrl, password: d.plaintext } } };
+  return {
+    ok: true,
+    data: { id, auditServerId: Number(row.id), name: row.name, rcon: { baseUrl, password: d.plaintext }, scoreCap: scoreCapOf(row.score_cap) },
+  };
 }
 
 export interface Selection {
@@ -388,6 +407,14 @@ async function checkNotAdminPassword(db: D1Database, password: string): Promise<
 
 const SORT_ORDER_MIN = -1000;
 const SORT_ORDER_MAX = 1000;
+
+/** スコア上限(docs/API.md 7.2): 整数 1〜100,000、null で既定に戻す */
+function validateScoreCap(v: unknown): FieldResult<number | null> {
+  if (v === null) return { ok: true, value: null };
+  if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) return { ok: false, issue: 'invalid_format' };
+  if (v < SCORE_CAP_MIN || v > SCORE_CAP_MAX) return { ok: false, issue: 'out_of_range' };
+  return { ok: true, value: v };
+}
 
 function validateSortOrder(v: unknown): FieldResult<number> {
   if (typeof v !== 'number' || !Number.isFinite(v)) return { ok: false, issue: 'invalid_format' };
@@ -609,6 +636,10 @@ export async function updateServer(
     else fields.enabled = 'invalid_format';
   }
   const sortOrder = body.sortOrder === undefined ? Number(row.sort_order) : take('sortOrder', validateSortOrder(body.sortOrder));
+  const currentCap = scoreCapOf(row.score_cap);
+  const scoreCapResult = body.scoreCap === undefined ? ({ ok: true, value: currentCap } as const) : validateScoreCap(body.scoreCap);
+  if (!scoreCapResult.ok) fields.scoreCap = scoreCapResult.issue;
+  const scoreCap = scoreCapResult.ok ? scoreCapResult.value : currentCap;
 
   const endpointChanged = (host !== undefined && host !== row.host) || (port !== undefined && port !== Number(row.port));
   // 宛先を変えるときは保存済みのパスワードを新しい宛先へ送らない(15.6)
@@ -640,6 +671,7 @@ export async function updateServer(
   if (port !== Number(row.port)) params.port = port;
   if (enabled !== wasEnabled) params.enabled = enabled;
   if (sortOrder !== Number(row.sort_order)) params.sortOrder = sortOrder;
+  if (scoreCap !== currentCap) params.scoreCap = scoreCap;
   const passwordChanged = password !== undefined;
 
   if (Object.keys(params).length === 0 && !passwordChanged) {
@@ -655,10 +687,11 @@ export async function updateServer(
     await db.batch([
       db
         .prepare(
-          `UPDATE servers SET name = ?1, host = ?2, port = ?3, rcon_password_enc = ?4, enabled = ?5, sort_order = ?6, updated_at = ?7
+          `UPDATE servers SET name = ?1, host = ?2, port = ?3, rcon_password_enc = ?4, enabled = ?5, sort_order = ?6, updated_at = ?7,
+                  score_cap = ?9
             WHERE id = ?8`,
         )
-        .bind(name, host, port, encrypted, enabled ? 1 : 0, sortOrder, now, Number(row.id)),
+        .bind(name, host, port, encrypted, enabled ? 1 : 0, sortOrder, now, Number(row.id), scoreCap),
       settingsLog(db, { ...mctx.actor, now, event: 'server_update', serverId: Number(row.id), serverName: name, params }),
     ]);
   } catch (err) {
@@ -727,6 +760,8 @@ export async function deleteServer(
   const now = mctx.now ?? Date.now();
   await db.batch([
     db.prepare('DELETE FROM servers WHERE id = ?1').bind(Number(row.id)),
+    // 受信用トークンも消す(docs/API.md 7.2)。記録中の試合は消さない(次の Cron が server_unavailable で終える。17.7)
+    db.prepare('DELETE FROM server_feeds WHERE server_id = ?1').bind(Number(row.id)),
     settingsLog(db, {
       ...mctx.actor,
       now,
@@ -737,6 +772,7 @@ export async function deleteServer(
     }),
   ]);
   invalidateCapabilities(idr.data);
+  invalidateFeedToken(idr.data);
   testTimes.delete(idr.data);
   return { ok: true, data: { deletedId: idr.data } };
 }

@@ -1006,3 +1006,337 @@ export interface FeedRawResponse {
   entries: FeedRawEntry[];
   nextBefore: number | null;
 }
+
+// ============================================================
+// キルフィード 第 2 段階: 正規化・保存・画面(docs/ARCHITECTURE.md 17.10、docs/API.md 11 章。2026-10-17)
+// 第 1 段階(上の節)の型・定数は変えない。ここは追加のみ。
+// 届く本文の実際の項目名は未確認(要確認 K-1)。正規化の候補名の対応表は src/lib/killfeed/fields.ts の 1 か所に置く
+// ============================================================
+
+/** キルの一覧の対象: 試合(MatchId)か、スコア記録をしていない間のキル(記録外) */
+export const KILLFEED_UNRECORDED = 'unrecorded';
+export type KillfeedScope = MatchId | typeof KILLFEED_UNRECORDED;
+
+/** 1 試合で返すキルの上限(超えたら truncated = true。古い順に先頭からこの件数) */
+export const KILLFEED_MATCH_KILLS_MAX = 3000;
+/** 記録外で返すキルの件数(新しい方からこの件数を、古い順に並べて返す) */
+export const KILLFEED_UNRECORDED_MAX = 500;
+/** 差分の取得(after 指定)で 1 回に返す上限。超えたら truncated = true で、画面は全件を取り直す */
+export const KILLFEED_INCREMENT_MAX = 500;
+/** 記録中の試合・記録外を表示している間の差分の取得の間隔(秒)。POLL_MIN_INTERVAL_SEC と同じ */
+export const KILLFEED_POLL_SEC = 30;
+/** 1 回の受信(1 バッチ)から保存するキルの上限(超えた分は捨てて droppedKills に数える) */
+export const KILLFEED_MAX_KILLS_PER_BATCH = 100;
+/** 1 サーバーあたり 1 日(UTC)に保存するキルの上限 */
+export const KILLFEED_DAILY_MAX_KILLS = 3000;
+/** 全サーバー合計の 1 日のキルの上限(D1 の書き込み 10 万行/日の保護。docs/ARCHITECTURE.md 17.10.8) */
+export const KILLFEED_GLOBAL_DAILY_MAX_KILLS = 8000;
+/** 記録外のキルの保持日数(試合に属するキルは試合と同じ保持。RECORDING_KEEP_ENDED・RECORDING_RETENTION_DAYS) */
+export const KILLFEED_UNRECORDED_RETENTION_DAYS = 7;
+/** 陣営の付与に使う「直近のプレイヤー一覧の観測」(match_samples.roster_json)の鮮度の上限。これより古ければ陣営は不明 */
+export const KILLFEED_ROSTER_MAX_AGE_MS = 3 * 60_000;
+/** match_samples.roster_json に残すプレイヤー数の上限 */
+export const KILLFEED_ROSTER_MAX_PLAYERS = 128;
+/** プレイヤー名・陣営名の最大文字数(超えたら切り詰め。制御文字は除去) */
+export const KILLFEED_NAME_MAX_LENGTH = 64;
+/** 武器・乗り物の id と表示名の最大文字数 */
+export const KILLFEED_LABEL_MAX_LENGTH = 64;
+/** 距離として受け付ける上限(m)。これを超える・負の値は不明(null)にする */
+export const KILLFEED_DISTANCE_MAX_M = 100_000;
+
+/** 距離の階級の境界(m)。<10 / 10–25 / 25–50 / 50–100 / 100–200 / 200+(下限を含み上限を含まない) */
+export const KILL_DISTANCE_BIN_EDGES_M = [10, 25, 50, 100, 200] as const;
+/** フィルタ「100 m 以上」の境界 */
+export const KILL_LONG_DISTANCE_M = 100;
+/** 時間帯別の棒の幅の候補(分)。棒の数が KILL_TIME_BUCKETS_MAX 以下になる最小のものを使う */
+export const KILL_TIME_BUCKET_MINUTES = [1, 2, 5, 10, 15, 30, 60, 120, 360, 720, 1440] as const;
+export const KILL_TIME_BUCKETS_MAX = 36;
+/** 上位プレイヤー・武器の表示数 */
+export const KILLFEED_TOP_PLAYERS = 10;
+export const KILLFEED_TOP_WEAPONS = 10;
+/** キルログを 1 回に表示する行数(「さらに表示」で増やす。データは全件をブラウザが持つ) */
+export const KILLFEED_LOG_PAGE = 50;
+/** 検索語の最大文字数 */
+export const KILLFEED_SEARCH_MAX_LENGTH = 64;
+
+/** キルの印。画面はカタログ `killfeed.flag.<KillFlag>` で引く */
+export const KILL_FLAGS = ['headshot', 'penetration', 'roadkill', 'vehicleExplosion', 'suicide'] as const;
+export type KillFlag = (typeof KILL_FLAGS)[number];
+
+/**
+ * キルログのフィルタ。画面はカタログ `killfeed.filter.<KillFilter>` で引く。
+ * - kills: キラーがいて自殺でないもの / headshots: kills のうちヘッドショット / teamkills: teamkill === true
+ * - suicides: flags.suicide / long: distanceM >= KILL_LONG_DISTANCE_M / vehicle: 乗り物あり・roadkill・vehicleExplosion
+ * - penetration: flags.penetration
+ */
+export const KILL_FILTERS = ['all', 'kills', 'headshots', 'teamkills', 'suicides', 'long', 'vehicle', 'penetration'] as const;
+export type KillFilter = (typeof KILL_FILTERS)[number];
+
+/** 陣営をどこから得たか: event = イベント自体の項目、roster = 受信時の直近のプレイヤー一覧の観測 */
+export const KILL_FACTION_SOURCES = ['event', 'roster'] as const;
+export type KillFactionSource = (typeof KILL_FACTION_SOURCES)[number];
+
+/** キルの当事者(キラー・被害者) */
+export interface KillParty {
+  /** プレイヤー名(生データ。翻訳しない)。不明なら null */
+  name: string | null;
+  /** STEAM_ID_PATTERN に合うものだけ。合わない・不明なら null */
+  steamId: string | null;
+  /** 陣営名(生データ)。不明なら null(画面は「?」) */
+  faction: string | null;
+  factionSource: KillFactionSource | null;
+}
+
+/** 武器・原因(表示名と内部 ID。どちらも無ければ両方 null = 不明) */
+export interface KillWeapon {
+  id: string | null;
+  name: string | null;
+}
+
+/** 乗り物(乗り物の兵装によるキル、ロードキルなど) */
+export interface KillVehicle {
+  id: string | null;
+  name: string | null;
+}
+
+/**
+ * 正規化したキル 1 件(D1 feed_kills の 1 行)。届く本文の項目名は未確認のため、対応できなかった項目は null。
+ * 時刻は UTC epoch ミリ秒
+ */
+export interface KillEvent {
+  /** feed_kills.id(一意の番号。画面の key・詳細の表示用) */
+  id: number;
+  /** Worker が受信した時刻(時間帯別の集計・試合への割り当てはこれを使う) */
+  receivedAt: number;
+  /** イベント自体の時刻(本文にあり、受信時刻の前後 1 日以内のときだけ)。無ければ null */
+  eventAt: number | null;
+  /** ゲーム内時刻(試合開始からの経過秒。参考パネルの「GAME 52:31」に当たる)。無ければ null */
+  gameTimeSec: number | null;
+  /** キラー。環境による死亡・本文から読めないときは null */
+  killer: KillParty | null;
+  /** 被害者。読めないイベントは保存しないため通常は null にならない(名前・ID の一部が null はあり得る) */
+  victim: KillParty | null;
+  weapon: KillWeapon;
+  /** 乗り物が無い・不明なら null */
+  vehicle: KillVehicle | null;
+  flags: Record<KillFlag, boolean>;
+  /**
+   * 同じ陣営どうしのキル。キラーと被害者の陣営が両方分かり、自殺でないときだけ true / false。どちらかが不明なら null。
+   * 読み取り時に Worker が付ける(保存はしない)
+   */
+  teamkill: boolean | null;
+  /** 距離(m)。不明なら null */
+  distanceM: number | null;
+}
+
+/** 差分の取得の位置(`<receivedAt>-<id>`。画面は不透明な文字列として扱い、前回の応答の cursor をそのまま返す) */
+export type KillCursor = string;
+export const KILL_CURSOR_PATTERN = /^(0|[1-9][0-9]{0,15})-([1-9][0-9]{0,15})$/;
+
+/** 受信の正規化の件数(1 日〔UTC〕・サーバーごと。D1 feed_daily の 0004 の列) */
+export interface KillfeedIngestCounts {
+  /** 保存したキル */
+  kills: number;
+  /** killed 以外の種類のイベント(キルログには出さない) */
+  otherEvents: number;
+  /** killed だが被害者もキラーも読めなかったイベント(保存しない。対応表の見直しが必要な印) */
+  incomplete: number;
+  /** 上限(1 バッチ・1 日・全体)で捨てたキル */
+  droppedKills: number;
+}
+
+/** GET /api/killfeed/kills?server=&match=&after= */
+export interface KillfeedKillsResponse {
+  server: ServerId;
+  scope: KillfeedScope;
+  /** 試合を指定したときの要約(記録外は null) */
+  match: MatchSummary | null;
+  /** 陣営の表示順(試合の最後のサンプルの factionScores の順 → キルに現れた順。陣営名は生データ)。陣営の印の配色に使う */
+  factions: string[];
+  /** 古い順。after 指定時は、それより後のものだけ */
+  kills: KillEvent[];
+  /** 次の差分の取得に渡す位置(キルが 1 件も無ければ after をそのまま返す。after も無ければ null) */
+  cursor: KillCursor | null;
+  /** after を指定した差分の応答か */
+  incremental: boolean;
+  /** 上限(KILLFEED_MATCH_KILLS_MAX / KILLFEED_UNRECORDED_MAX / KILLFEED_INCREMENT_MAX)で打ち切った */
+  truncated: boolean;
+  /** 今日(UTC)の受信の正規化の件数(このサーバー) */
+  today: KillfeedIngestCounts;
+  /** 受信用トークンを発行済みか(未発行なら画面は設定タブへの案内を出す) */
+  configured: boolean;
+}
+
+/** 統計カード(ブラウザで KillEvent[] から計算する。src/components/lib/killstats.ts) */
+export interface KillfeedTotals {
+  /** キラーがいて自殺でないキル(チームキルを含む) */
+  kills: number;
+  /** 被害者がいるイベント(自殺・環境による死亡を含む) */
+  deaths: number;
+  suicides: number;
+  /** kills のうちヘッドショット */
+  headshots: number;
+  /** teamkill === true */
+  teamkills: number;
+  /** kills のうち陣営が不明で teamkill を判定できなかったもの */
+  teamkillUnknown: number;
+  /** キラー・被害者のユニークな Steam ID の数(Steam ID が無い当事者は数えない) */
+  playersInvolved: number;
+  /** kills のうち距離が分かるもの */
+  withDistance: number;
+}
+
+export interface KillTimeBucket {
+  /** 棒の始まり(UTC epoch ミリ秒)。起点(試合の開始時刻、記録外は最初のキルの受信時刻を分に切り捨てたもの)から bucketMinutes 刻み。キルの無い棒も含める */
+  start: number;
+  kills: number;
+  headshots: number;
+}
+
+export interface KillPlayerStat {
+  /** steamId、無ければ `name:<名前>` */
+  key: string;
+  name: string | null;
+  steamId: string | null;
+  /** 最後に観測した陣営 */
+  faction: string | null;
+  kills: number;
+  deaths: number;
+  /** kills / deaths(deaths = 0 なら kills) */
+  kd: number;
+}
+
+export interface KillWeaponStat {
+  /** 乗り物と武器の id(無ければ名前)を連結したもの */
+  key: string;
+  weapon: KillWeapon;
+  vehicle: KillVehicle | null;
+  kills: number;
+  headshots: number;
+}
+
+export interface KillDistanceBin {
+  /** 下限(m。含む) */
+  minM: number;
+  /** 上限(m。含まない)。最後の階級は null */
+  maxM: number | null;
+  kills: number;
+}
+
+/** 集計の結果(画面と JSON 出力で共通) */
+export interface KillfeedSummary {
+  totals: KillfeedTotals;
+  /** headshots / kills(kills = 0 なら null) */
+  headshotRate: number | null;
+  /** 距離が分かる kills のうち最長(同じ距離なら先のもの)。無ければ null */
+  longest: KillEvent | null;
+  /** 距離が分かる kills の平均(m)。無ければ null */
+  averageDistanceM: number | null;
+  timeline: { bucketMinutes: number; buckets: KillTimeBucket[] };
+  /** キル数の多い順(同数はデス数の少ない順)に KILLFEED_TOP_PLAYERS 件 */
+  topPlayers: KillPlayerStat[];
+  /** キル数の多い順に KILLFEED_TOP_WEAPONS 件 */
+  weapons: KillWeaponStat[];
+  /** KILL_DISTANCE_BIN_EDGES_M による 6 階級(距離不明は含めない) */
+  distance: KillDistanceBin[];
+}
+
+/** 「JSON で書き出す」の形(ブラウザで組み立ててダウンロードする。Worker の API は無い。docs/API.md 11.3) */
+export interface KillfeedExport {
+  format: 'wardogs-ops.killfeed';
+  version: 1;
+  exportedAt: number;
+  /** 画面の表示に使ったタイムゾーン(値の時刻はすべて UTC epoch ミリ秒) */
+  timeZone: string;
+  server: { id: ServerId; name: string | null };
+  scope: KillfeedScope;
+  match: MatchSummary | null;
+  /** 試合のサンプル(スコアの推移)。記録外・未取得なら空 */
+  samples: MatchSample[];
+  summary: KillfeedSummary;
+  /** フィルタ・検索をかける前の全件(古い順) */
+  kills: KillEvent[];
+  truncated: boolean;
+}
+
+/** 正規化の対応表の項目(src/lib/killfeed/fields.ts の KILL_FIELD_CANDIDATES のキー) */
+export const KILL_FIELD_NAMES = [
+  'type',
+  'eventAt',
+  'gameTimeSec',
+  'killerName',
+  'killerSteamId',
+  'killerFaction',
+  'victimName',
+  'victimSteamId',
+  'victimFaction',
+  'weaponId',
+  'weaponName',
+  'vehicleId',
+  'vehicleName',
+  'distanceM',
+  'headshot',
+  'penetration',
+  'roadkill',
+  'vehicleExplosion',
+  'suicide',
+  'flagList',
+] as const;
+export type KillFieldName = (typeof KILL_FIELD_NAMES)[number];
+
+/** 正規化の結果の種類: kill = 保存する / other = killed 以外 / incomplete = killed だが当事者を読めない / invalid = オブジェクトでない */
+export const FEED_NORMALIZE_RESULTS = ['kill', 'other', 'incomplete', 'invalid'] as const;
+export type FeedNormalizeResult = (typeof FEED_NORMALIZE_RESULTS)[number];
+
+/** 本文の外側の形: 配列 / events 配列を持つオブジェクト / 単独のイベント / それ以外 */
+export const FEED_ENVELOPES = ['array', 'events', 'single', 'unknown'] as const;
+export type FeedEnvelope = (typeof FEED_ENVELOPES)[number];
+
+/** 正規化の試行の 1 イベント分(GET /api/feed/raw/:id/normalized) */
+export interface FeedNormalizedEvent {
+  /** バッチ内の位置(0 始まり) */
+  index: number;
+  /** 種類の項目の値(生データ。64 文字まで)。無ければ null */
+  type: string | null;
+  result: FeedNormalizeResult;
+  /** result = kill のときの正規化の結果(id・teamkill は保存時・読み取り時に決まるため含めない。陣営は本文にあった場合だけ) */
+  kill: Omit<KillEvent, 'id' | 'teamkill'> | null;
+  /** 項目ごとに、対応表のどの候補名(パス)で値が取れたか。取れなかった項目は含めない */
+  matched: Partial<Record<KillFieldName, string>>;
+  /** どの候補にも使われなかった最上位のキー(対応表の見直し用。値は含めない。最大 32 件) */
+  unmappedKeys: string[];
+}
+
+/** 正規化の試行で返すイベントの上限 */
+export const FEED_NORMALIZE_PREVIEW_MAX = 50;
+
+/** GET /api/feed/raw/:id/normalized?server= — 保存済みの生データ 1 件に、今の対応表で正規化を試した結果(保存はしない) */
+export interface FeedNormalizePreviewResponse {
+  server: ServerId;
+  entryId: number;
+  receivedAt: number;
+  envelope: FeedEnvelope;
+  /** 先頭から最大 FEED_NORMALIZE_PREVIEW_MAX 件 */
+  events: FeedNormalizedEvent[];
+  /** バッチ全体の件数 */
+  counts: Record<FeedNormalizeResult, number>;
+  /** 引用符の無い 16 桁以上の整数(Steam ID の可能性)を文字列として読んだ数(JSON の数値の精度落ちを避けた印。17.10.2) */
+  bigIntegersQuoted: number;
+}
+
+/**
+ * 第 2 段階で ServerFeedStatus(GET /api/servers/:id/feed)に足す項目。第 1 段階の型は変えず、backend は
+ * `ServerFeedStatus & KillfeedFeedStatusExtra` を返す(画面は項目が無ければ第 1 段階の表示のまま)
+ */
+export interface KillfeedFeedStatusExtra {
+  /** 生データ(feed_raw_events)も保存する。false でもキルの正規化・保存は続ける(server_feeds.raw_enabled) */
+  rawEnabled: boolean;
+  /** 今日(UTC)の正規化の件数 */
+  killsToday: KillfeedIngestCounts;
+  killLimits: { dailyKills: number; globalDailyKills: number; perBatch: number; unrecordedRetentionDays: number };
+}
+
+/** 第 2 段階で PUT /api/servers/:id/feed の本文に足す項目(enabled は第 1 段階どおり必須。rawEnabled は省略時に変えない) */
+export interface KillfeedUpdateFeedExtra {
+  rawEnabled?: boolean;
+}

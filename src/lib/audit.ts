@@ -240,6 +240,8 @@ const REJECTED_EVENTS: ReadonlySet<string> = new Set(['server_update_rejected', 
 /**
  * 行の status / errorCode(docs/API.md 3 章): 拒否の 2 つは failed + VALIDATION_FAILED。
  * server_test は params.result が 'ok' なら succeeded、それ以外は failed で errorCode = params.result(RCON_*)。その他は succeeded
+ * (2026-10-17 の record_start / record_stop / record_end / feed_token_issue / feed_token_revoke / feed_settings_update もすべて succeeded。
+ *  失敗した記録の開始・停止は書かないため。docs/ARCHITECTURE.md 17.2。トークンの値・ハッシュは params に入れていない)
  */
 function settingsOutcome(event: string, params: Record<string, unknown>): { status: AuditStatus; errorCode: ApiErrorCode | null } {
   if (REJECTED_EVENTS.has(event)) return { status: 'failed', errorCode: 'VALIDATION_FAILED' };

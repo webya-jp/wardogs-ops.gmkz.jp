@@ -4,6 +4,7 @@
 // - 操作: 編集・接続テスト・有効化/無効化・削除
 // - 追加・編集フォームは 4 項目(表示名 / ホスト名 / ポート / RCON パスワード)。保存後に接続テストの結果を出す
 // - 削除は確認ダイアログで表示名を入力させ、confirmName として送る
+// - 一覧の下に、サイドバーで選んでいるサーバーの「スコア記録」「キルフィード(観測モード)」の節(ServerExtraSettings。17.9)
 // 運営者が入力した表示名・ホスト名と、RCON が返したサーバー名は翻訳しない。RCON パスワードは画面に表示しない(API も返さない)。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SubmitEvent } from 'react';
@@ -24,8 +25,14 @@ import type { I18nProps } from './lib/hooks';
 import { isMessageKey } from './lib/keys';
 import { serverLabel } from './lib/servers';
 import ErrorView, { errorText, fieldIssueText } from './ErrorView';
+import ServerExtraSettings from './ServerExtraSettings';
 
-type Props = I18nProps;
+interface Props extends I18nProps {
+  /** サイドバーで選んでいるサーバー(スコア記録・キルフィードの節の対象。0 台なら null。docs/ARCHITECTURE.md 17.9) */
+  serverId: string | null;
+  /** パネルの URL(origin)。キルフィードの ini の案内の Url に使う */
+  panelOrigin: string;
+}
 
 type FormMode = { type: 'add' } | { type: 'edit'; server: ServerSummary };
 
@@ -59,7 +66,7 @@ function portValue(raw: string): number {
   return (/^[0-9]+$/.test(s) ? Number(s) : s) as number;
 }
 
-export default function ServersPanel({ language, timeZone }: Props) {
+export default function ServersPanel({ language, timeZone, serverId, panelOrigin }: Props) {
   const i18n = useI18n({ language, timeZone });
   const { t, time, dateTime, num } = i18n;
   const list = useResource<ServersResponse>('/api/servers', null);
@@ -77,6 +84,7 @@ export default function ServersPanel({ language, timeZone }: Props) {
   const servers = data?.servers ?? [];
   const limit = data?.limit ?? 0;
   const limitReached = data !== null && servers.length >= limit;
+  const selectedServer = serverId ? (servers.find((s) => s.id === serverId) ?? null) : null;
 
   // サイドバーの「サーバーを追加」(/servers#add)から来たときは追加フォームを開き、最初の欄にフォーカスする(docs/ARCHITECTURE.md 9.2)
   const focusFirstField = useRef(false);
@@ -490,6 +498,9 @@ export default function ServersPanel({ language, timeZone }: Props) {
         }}
       />
     </section>
+    {selectedServer && (
+      <ServerExtraSettings i18n={i18n} server={selectedServer} panelOrigin={panelOrigin} onChanged={list.refresh} />
+    )}
     </>
   );
 }

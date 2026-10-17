@@ -2,13 +2,16 @@
 // - /api/status はサイドバーと共有のストアから読む(useSharedStatus。30 秒ごと、二重に取得しない。9.3)
 // - 各操作の直下に「何が起きるか」(action.help.*)を出し、ボタンの aria-describedby で結び付ける
 // - 操作の成功後はストアを取り直す(サイドバーの人数・マップもすぐ変わる)
+// - スコア記録の節(記録を開始 / 停止。二段階の確認ダイアログ。データ源は GET /api/matches。記録中は 60 秒ごと。17.9)
 // サーバー名・マップ名・陣営名・experiences は RCON の生データなので翻訳しない。
 import { Fragment, useMemo, useState } from 'react';
-import { MESSAGE_MAX_LENGTH, POLL_MIN_INTERVAL_SEC } from '../types/api';
-import type { MapsResponse } from '../types/api';
-import { useCapabilities, useI18n, useResource } from './lib/hooks';
+import { MESSAGE_MAX_LENGTH, POLL_MIN_INTERVAL_SEC, RECORDING_SAMPLE_INTERVAL_SEC } from '../types/api';
+import type { MapsResponse, MatchesResponse, MatchSummary } from '../types/api';
+import { useAutoRefresh, useCapabilities, useI18n, useResource } from './lib/hooks';
 import { useSharedStatus } from './lib/status-store';
-import type { I18nProps } from './lib/hooks';
+import type { I18n, I18nProps, ResourceState } from './lib/hooks';
+import { elapsedMinutes, scoreCapText, scoresLine } from './lib/matches';
+import { tCode } from './lib/keys';
 import { gateFor } from './lib/gate';
 import { withServer } from './lib/api';
 import ConfirmDialog from './ConfirmDialog';
@@ -30,6 +33,10 @@ export default function StatusPanel({ language, timeZone, writesEnabled, server 
   const status = useSharedStatus(server.id);
   const maps = useResource<MapsResponse>(withServer('/api/maps', server.id), null);
   const caps = useCapabilities(server.id);
+  // スコア記録(docs/ARCHITECTURE.md 17.9): 表示時に 1 回、操作の後、記録中は 60 秒ごと
+  const matches = useResource<MatchesResponse>(withServer('/api/matches', server.id), null);
+  const activeMatch = matches.data?.matches.find((m) => m.status === 'recording') ?? null;
+  useAutoRefresh(matches.refresh, activeMatch !== null, RECORDING_SAMPLE_INTERVAL_SEC);
   const [request, setRequest] = useState<ActionRequestSpec | null>(null);
   const [message, setMessage] = useState('');
   const [mapId, setMapId] = useState('');
@@ -213,6 +220,16 @@ export default function StatusPanel({ language, timeZone, writesEnabled, server 
         </section>
       </div>
 
+      <RecordingSection
+        i18n={i18n}
+        serverId={server.id}
+        matches={matches}
+        active={activeMatch}
+        writesEnabled={writesEnabled}
+        onStart={() => setRequest({ action: 'record_start', params: {} })}
+        onStop={(m) => setRequest({ action: 'record_stop', params: { recordingId: m.id } })}
+      />
+
       <section className="card danger-zone" aria-labelledby="danger-title">
         <h2 id="danger-title">{t('status.dangerZone')}</h2>
         <p id="help-match_end" className="action-help">{t('action.help.match_end')}</p>
@@ -234,13 +251,128 @@ export default function StatusPanel({ language, timeZone, writesEnabled, server 
         server={server}
         request={request}
         mapNames={mapNames}
-        onClose={() => setRequest(null)}
+        onClose={() => {
+          // 記録の開始・停止は応答を受け取れなかった場合も、取り直せば状態が分かる(docs/ARCHITECTURE.md 17.2)
+          if (request?.action === 'record_start' || request?.action === 'record_stop') matches.refresh();
+          setRequest(null);
+        }}
         onDone={(action) => {
           if (action === 'broadcast') setMessage('');
           if (action === 'map') setMapId('');
-          status.refresh();
+          // map / match_end の成功で記録中の試合は終わる(match_action)。記録の開始・停止も取り直す
+          if (action === 'map' || action === 'match_end' || action === 'record_start' || action === 'record_stop') {
+            matches.refresh();
+          }
+          if (action !== 'record_start' && action !== 'record_stop') status.refresh();
         }}
       />
     </>
+  );
+}
+
+interface RecordingSectionProps {
+  i18n: I18n;
+  serverId: string;
+  matches: ResourceState<MatchesResponse>;
+  active: MatchSummary | null;
+  writesEnabled: boolean;
+  onStart: () => void;
+  onStop: (match: MatchSummary) => void;
+}
+
+/** 概要タブの「スコア記録」の節(記録を開始 / 停止、記録中の状態。docs/ARCHITECTURE.md 17.9) */
+function RecordingSection({ i18n, serverId, matches, active, writesEnabled, onStart, onStop }: RecordingSectionProps) {
+  const { t, time, dateTime, num } = i18n;
+  const data = matches.data;
+  const lastEnded = data?.matches.find((m) => m.status === 'ended') ?? null;
+  const limitReached = data !== null && active === null && data.activeCount >= data.activeLimit;
+  const killfeedHref = `/killfeed?server=${encodeURIComponent(serverId)}`;
+
+  return (
+    <section className="card recording" aria-labelledby="recording-title">
+      <div className="toolbar">
+        <h2 id="recording-title">{t('recording.title')}</h2>
+        {active && <span className="badge badge-ok">{t('recording.recording')}</span>}
+        <span className="spacer" />
+        <button type="button" className="button-small" onClick={matches.refresh} disabled={matches.loading}>
+          {matches.loading ? t('common.loading') : t('common.refresh')}
+        </button>
+      </div>
+      <p className="muted">
+        {matches.updatedAt !== null && <>{t('common.lastUpdated', { time: time(matches.updatedAt) })} </>}
+        {active ? t('common.autoRefresh', { seconds: RECORDING_SAMPLE_INTERVAL_SEC }) : t('common.manualRefresh')}
+      </p>
+      {matches.error && <ErrorView error={matches.error} t={t} />}
+      {!data && !matches.error && <p aria-live="polite">{t('common.loading')}</p>}
+
+      {data && active && (
+        <>
+          <dl className="kv">
+            <dt>{t('recording.startedAt')}</dt>
+            <dd>{dateTime(active.startedAt)}</dd>
+            <dt>{t('recording.elapsed')}</dt>
+            <dd>{t('recording.elapsedValue', { minutes: num(elapsedMinutes(active, Date.now())) })}</dd>
+            <dt>{t('recording.scoreCap')}</dt>
+            <dd>{scoreCapText(active, i18n)}</dd>
+            <dt>{t('recording.lastSample')}</dt>
+            <dd>{active.lastSampleAt !== null ? time(active.lastSampleAt) : t('recording.noSample')}</dd>
+            <dt>{t('recording.sampleCount')}</dt>
+            <dd>{t('recording.sampleCountValue', { count: num(active.sampleCount) })}</dd>
+            <dt>{t('recording.lastScores')}</dt>
+            <dd>{scoresLine(active.lastScores, i18n)}</dd>
+          </dl>
+          <p className="muted">{t('recording.lastSampleHelp')}</p>
+          <p id="help-record_stop" className="action-help">{t('action.help.record_stop')}</p>
+          <div className="button-row">
+            <a className="button" href={killfeedHref}>
+              {t('recording.toKillfeed')}
+            </a>
+            <button
+              type="button"
+              className="push-end"
+              aria-describedby="help-record_stop"
+              disabled={!writesEnabled}
+              onClick={() => onStop(active)}
+            >
+              {t('recording.stop')}
+            </button>
+          </div>
+        </>
+      )}
+
+      {data && !active && (
+        <>
+          <p>
+            <strong>{t('recording.notRecording')}</strong>
+          </p>
+          <p>{t('recording.intro')}</p>
+          <p className="muted">{t('recording.autoEnd')}</p>
+          {lastEnded && (
+            <p className="muted">
+              {t('recording.lastEnded', {
+                time: dateTime(lastEnded.endedAt ?? lastEnded.startedAt),
+                reason: lastEnded.endReason ? tCode(t, `match.endReason.${lastEnded.endReason}`) : t('common.unknown'),
+              })}{' '}
+              <a href={killfeedHref}>{t('recording.toKillfeed')}</a>
+            </p>
+          )}
+          <p className="muted">{t('recording.activeCount', { count: num(data.activeCount), limit: num(data.activeLimit) })}</p>
+          {limitReached && <p className="alert alert-warn">{t('recording.limitReached')}</p>}
+          {!writesEnabled && <p className="muted">{t('gate.writesDisabled')}</p>}
+          <p id="help-record_start" className="action-help">{t('action.help.record_start')}</p>
+          <div className="button-row">
+            <button
+              type="button"
+              className="button-primary push-end"
+              aria-describedby="help-record_start"
+              disabled={!writesEnabled || limitReached}
+              onClick={onStart}
+            >
+              {t('recording.start')}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
   );
 }

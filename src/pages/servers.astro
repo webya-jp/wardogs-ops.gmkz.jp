@@ -1,5 +1,6 @@
 ---
 // サーバー設定(/servers)。docs/ARCHITECTURE.md 15.7。サーバーの一覧・追加・編集・有効/無効・接続テスト・削除。手動更新。
+// 選択中のサーバーのスコア上限とキルフィードの受信設定(17.9)。ini の Url の案内にはパネル自身の origin を渡す。
 export const prerender = false;
 import OpsLayout from '../layouts/OpsLayout.astro';
 import { getPageContext } from '../layouts/page-context';
@@ -8,5 +9,11 @@ import ServersPanel from '../components/ServersPanel';
 const ctx = await getPageContext(Astro.request, Astro.locals, Astro.response);
 ---
 <OpsLayout title={ctx.t('tabs.settings')} language={ctx.language} ctx={ctx} active="settings">
-  <ServersPanel client:load language={ctx.language} timeZone={ctx.timeZone} />
+  <ServersPanel
+    client:load
+    language={ctx.language}
+    timeZone={ctx.timeZone}
+    serverId={ctx.serverNotFound ? null : ctx.serverId}
+    panelOrigin={Astro.url.origin}
+  />
 </OpsLayout>

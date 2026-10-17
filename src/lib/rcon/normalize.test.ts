@@ -38,6 +38,8 @@ describe('normalize', () => {
       ],
       rotation: { nowIndex: 0, nextIndex: 1, count: null, nextMap: null, nextMapName: null },
       experiences: [],
+      scoreCap: null,
+      matchSeconds: null,
       fetchedAt: T,
     });
     expect(normalizeStatus({}, T)?.experiences).toEqual([]);

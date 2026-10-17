@@ -1,7 +1,26 @@
 // 書き込み操作の入力検証と正規化。docs/ARCHITECTURE.md 7.2、docs/API.md 4 章。
 // 接続中かどうか(not_online)・マップ一覧にあるか(unknown_map)は RCON の結果が要るため actions 側で判定する。
-import { AUDIT_KINDS, MESSAGE_MAX_LENGTH, REASON_MAX_LENGTH, SERVER_ID_PATTERN, STEAM_ID_PATTERN, WRITE_ACTIONS } from '../types/api';
-import type { ActionParamsMap, ActionRequest, AuditKind, ServerId, ValidationIssue, WriteAction } from '../types/api';
+import {
+  AUDIT_KINDS,
+  MATCH_ID_PATTERN,
+  MESSAGE_MAX_LENGTH,
+  REASON_MAX_LENGTH,
+  RECORDING_ACTIONS,
+  SERVER_ID_PATTERN,
+  STEAM_ID_PATTERN,
+  WRITE_ACTIONS,
+} from '../types/api';
+import type {
+  ActionParamsMap,
+  ActionRequest,
+  AuditKind,
+  ConfirmableAction,
+  RecordingAction,
+  RecordingActionRequest,
+  ServerId,
+  ValidationIssue,
+  WriteAction,
+} from '../types/api';
 import { isPlainObject } from './http';
 
 export const MAP_ID_PATTERN = /^[A-Za-z0-9_./-]{1,128}$/;
@@ -11,6 +30,16 @@ const CONTROL_RE = /[\p{Cc}\u2028\u2029]/u;
 
 export function isWriteAction(v: unknown): v is WriteAction {
   return typeof v === 'string' && (WRITE_ACTIONS as readonly string[]).includes(v);
+}
+
+/** スコア記録の開始・停止(docs/ARCHITECTURE.md 17.2。WriteAction とは別系列) */
+export function isRecordingAction(v: unknown): v is RecordingAction {
+  return typeof v === 'string' && (RECORDING_ACTIONS as readonly string[]).includes(v);
+}
+
+/** prepare / execute が受け付ける操作(確認トークンの `a`) */
+export function isConfirmableAction(v: unknown): v is ConfirmableAction {
+  return isWriteAction(v) || isRecordingAction(v);
 }
 
 export function isSteamId(v: unknown): v is string {
@@ -118,6 +147,29 @@ export function validateActionRequest(body: unknown): ActionValidation {
     return { ok: false, fields: Object.keys(fields).length > 0 ? fields : { params: 'invalid_format' } };
   }
   return { ok: true, request: { action, params } as ActionRequest };
+}
+
+export type RecordingValidation =
+  | { ok: true; request: RecordingActionRequest }
+  | { ok: false; fields: Record<string, ValidationIssue> };
+
+/**
+ * { action: record_start | record_stop, params } を検証する(docs/API.md 4.1)。
+ * record_start の params は空に正規化する(余分な項目は捨てる)。record_stop は recordingId(MATCH_ID_PATTERN)が必須
+ */
+export function validateRecordingRequest(body: unknown): RecordingValidation {
+  if (!isPlainObject(body)) return { ok: false, fields: { action: 'required' } };
+  const action = body.action;
+  if (!isRecordingAction(action)) {
+    return { ok: false, fields: { action: action === undefined ? 'required' : 'invalid_format' } };
+  }
+  const p = body.params === undefined ? {} : body.params;
+  if (!isPlainObject(p)) return { ok: false, fields: { params: 'invalid_format' } };
+  if (action === 'record_start') return { ok: true, request: { action, params: {} } };
+  const id = p.recordingId;
+  if (id === undefined || id === null || id === '') return { ok: false, fields: { recordingId: 'required' } };
+  if (typeof id !== 'string' || !MATCH_ID_PATTERN.test(id)) return { ok: false, fields: { recordingId: 'invalid_format' } };
+  return { ok: true, request: { action, params: { recordingId: id } } };
 }
 
 /** 対象プレイヤーがいる操作か */

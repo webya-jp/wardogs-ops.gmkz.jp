@@ -269,3 +269,60 @@
 
 - 単体テスト: `pnpm test` 14 ファイル・116 件すべて成功。`pnpm check` のエラーは frontend 担当のファイル(`src/layouts/OpsLayout.astro`、`src/pages/*.astro`、`src/components/{StatusPanel,ServersPanel}.tsx`)のみで、backend のファイルは 0 件
 - 未確認: dev サーバー経由の `/api/status` の応答(frontend の作業後に確認する)、実サーバーの `/v1/rotation` の形式と `experiences` の意味(R-19)
+
+## 7. スコア記録と受信(2026-10-17)
+
+`docs/ARCHITECTURE.md` 第 17 章、`docs/API.md` 4.1・7.2・7.3・8〜10 章。値(パスワード・Cookie・受信用トークン・本文)は記録しない。
+
+### 7.1 確認環境
+
+| 項目 | 内容 |
+|---|---|
+| RCON | `MOCK_RCON_PORTS=7776,7777 MOCK_SCORE_STEP_SEC=3 pnpm mock:rcon`(スコアが 3 秒ごとに増え、1 台目は `scoreCap: 100` を返す。2 台目は返さない) |
+| Worker | `pnpm dev --host 127.0.0.1 --port 4322`。Cron は `/cdn-cgi/handler/scheduled` で起こした(astro dev でも `src/worker.ts` の `scheduled` が呼ばれ、Workers Logs 相当の出力に `{ kind: 'cron', … }` が出ることを確認) |
+| D1 | 既存のローカル D1 に `pnpm db:migrate:local` で `0003_recordings.sql` を適用。確認のため管理者の行を消して登録し直し、確認後に適用直後の D1 へ戻した |
+| 手段 | Node の `fetch` の確認スクリプト(リポジトリ外)と curl(受信用トークンはヘッダファイル経由で渡し、出力しない。確認後に削除) |
+| 単体テスト | `pnpm test`(vitest、16 ファイル・159 件すべて成功)。`pnpm check` 0 件、`pnpm build` 成功(`dist/server/entry.mjs` に `scheduled`、`dist/server/wrangler.json` に `triggers.crons`) |
+
+### 7.2 スコア記録
+
+| # | 操作 | 期待 | 結果 |
+|---|---|---|---|
+| R-1 | `prepare` `record_start`(server 1) | 200、`map`・`scoreCap: 100`・`scoreCapSource: "status"`・`destructive: false`。RCON は `/v1/status` だけ(capabilities を見ない) | OK |
+| R-2 | `execute` `record_start` | 200、`auditKind: "settings"`、`match.status: "recording"`・`sampleCount: 1` | OK |
+| R-3 | 同じトークンで再送 / もう一度 `prepare` | 409 `ALREADY_EXECUTED` / 409 `RECORDING_ALREADY_ACTIVE` | OK |
+| R-4 | `GET /api/matches?server=1` | 記録中が先頭、`activeCount: 1`。`server` 省略は 400 `fields.server = required` | OK |
+| R-5 | `GET /api/matches/:id/samples?server=1` / `?server=2` | 200(陣営スコア・人数・`cashTotal`・陣営別の人数と cash。名前・Steam ID なし)/ 404 `MATCH_NOT_FOUND` | OK |
+| R-6 | 開始と同じ分に Cron 1 回 | `sampled: 1` だがサンプルは 1 行のまま(主キーで無視) | OK |
+| R-7 | 次の分に Cron を 2 回続けて | サンプルは 1 行だけ増える(1 分バケットが重複しない) | OK |
+| R-8 | スコアが 100 に達した後の Cron | `status: "ended"`・`endReason: "score_cap"`、`lastScores` が終了時の値。`/api/audit?kind=settings` に `record_end`(`operator: null`、`params: { recordingId, reason }`) | OK |
+| R-9 | server 2(`scoreCap` を返さない)で開始 → `record_stop` | `scoreCapSource: "default"`、停止は 200・`endReason: "manual"` | OK |
+| R-10 | 設定変更ログ | `record_start`(`params: { recordingId, map }`)・`record_stop`・`record_end` が `succeeded` で残る | OK |
+
+### 7.3 受信(`POST /api/ingest/events`)
+
+| # | 操作 | 期待 | 結果 |
+|---|---|---|---|
+| F-1 | `POST /api/servers/1/feed-token`(`{}`) | 200、`reissued: false`、`tokenHint` 4 文字、`status.configured: true` | OK |
+| F-2 | 正しいトークンで `killed` 1 件のバッチ(Origin・Cookie なし) | 204。`feed_raw_events` に 1 行、`feed_daily`(サーバー・全体)が 1 加算 | OK |
+| F-3 | 誤ったトークン / トークンなし | 401 `FEED_TOKEN_INVALID`(`WWW-Authenticate: Bearer`)。行は増えない | OK |
+| F-4 | 空のバッチ(`[]`、本文なし) | 204。`feed_raw_events`・`feed_daily` とも増えない(D1 の行数で確認: 保存 2 行・日次 2 件のまま) | OK |
+| F-5 | `Content-Type: text/plain` / GET | 415 / 405 | OK |
+| F-6 | パスの例外の範囲: 末尾 `/` / `//api/ingest/events` / `/api/INGEST/events` | 204(例外の対象)/ 403(例外の対象外。CSRF 検査で拒否) / 403 `FORBIDDEN_ORIGIN` | OK |
+| F-7 | 204 の応答ヘッダ | `Cache-Control: no-store`、CSP・`X-Frame-Options`・`X-Content-Type-Options`、`Set-Cookie` なし | OK |
+| F-8 | 受信の状況・生データ | `GET /api/servers/1/feed` に `lastReceivedAt`・`lastStoredAt`・`today`、`GET /api/feed/raw` に `eventCount`・受信時に記録中の試合(`matchId`)。応答にトークンが含まれない | OK |
+| F-9 | モックの送信モード(`MOCK_FEED_URL` / `MOCK_FEED_TOKEN`、2 秒ごと) | `killed` バッチと空のバッチが交互に 204。保存は `killed` の分だけ | OK |
+| F-10 | `DELETE /api/servers/1/feed-token` → 同じトークンで送信 | 200 `configured: false` → 401 | OK |
+| F-11 | dev サーバーのログ | トークン・本文を含まない(`wof1.` の出現 0 件) | OK |
+
+### 7.4 単体テストで確認した項目
+
+- `src/lib/recordings.test.ts`: 上限の優先順位(status → 設定 → 既定)、サンプルの陣営別集計、開始の batch と nonce の 1 回限り、並行した開始は部分 UNIQUE 索引で 1 本だけ、RCON 失敗時は記録しない(同じトークンでやり直せる)、players 失敗時も開始、トークンの検証(別サーバー・別系列・期限切れ)、全体の上限、停止と既に終わった試合、`match_end` 成功で `match_action`、Cron の二重実行(サンプル 1 行・`record_end` 1 行)、各終了条件(`score_cap`・`map_changed`〔サンプルを保存しない〕・`empty`〔途中で人が来たら戻す〕・`max_duration`・`server_unavailable`〔無効化・削除〕)、RCON に届かない分は何もしない、D1 が無い・0003 未適用で例外を投げない、保持数(6 試合目で最古をサンプルごと削除)、毎時の掃除、`scoreCap` の検証と変更ログ
+- `src/lib/feed.test.ts`: トークンの形式・ハッシュ保存(平文・ハッシュを応答・変更ログに出さない)、不一致・形式不正・別サーバー・取り消し後・再発行後の旧トークンは 401、空のバッチで D1 に書かない、既知外の JSON の保存と `event_count`、Content-Type・サイズ・JSON の検証、受信の状況の 1 分間引き、1 分 90 回(不一致のトークンは枠を使わない)、保存停止・サーバー無効・1 日の上限(サーバー・全体)で 204 のまま捨てる、サーバー削除で受信設定も消える、ログにトークン・本文を出さない
+- `src/lib/config.test.ts`: 0003 の表が欠けた D1 は `not_migrated`
+
+### 7.5 未確認
+
+- 本番(Workers Builds・Deploy ボタン経由)での Cron の起動(C-10・C-22)、本番 D1 での `WITHOUT ROWID`・部分索引・batch の原子性(C-23)、Cron 1 回の CPU 時間(C-24)
+- 実サーバーのキルフィードの本文の形式・送信間隔・空のバッチを送るか・再送の挙動(K-1・K-3・K-6)、`scoreCap` / `matchSeconds` / `cash` の意味(R-21・R-22)
+- `wrangler dev`(本番ビルド)での同じ確認は未実施(astro dev のみ)

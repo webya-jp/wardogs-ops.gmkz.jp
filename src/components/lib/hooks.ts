@@ -4,6 +4,7 @@
 // - useCapabilities: /api/capabilities を画面表示時に 1 回だけ取る
 // - useI18n: サーバーで決めた言語・タイムゾーンから t と日時・数値の整形関数を作る
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { POLL_MIN_INTERVAL_SEC } from '../../types/api';
 import type { CapabilitiesResponse, ServerId } from '../../types/api';
 import { formatDateTime, formatNumber, getTranslator, toLocale } from '../../i18n';
 import type { Language, Translator } from '../../i18n';
@@ -58,6 +59,21 @@ export function useResource<T>(path: string, pollSec: number | null): ResourceSt
 }
 
 const getInitialSnapshot = (): PollerSnapshot<never> => INITIAL_SNAPSHOT;
+
+/**
+ * enabled の間だけ sec 秒ごとに refresh を呼ぶ(タブが非表示の間は呼ばない。POLL_MIN_INTERVAL_SEC 未満は切り上げる)。
+ * 「記録中の試合だけ 60 秒ごと」のように、取得した内容によって自動更新を切り替えるときに使う(useResource は手動更新で作る)
+ */
+export function useAutoRefresh(refresh: () => void, enabled: boolean, sec: number): void {
+  useEffect(() => {
+    if (!enabled) return;
+    const ms = Math.max(sec, POLL_MIN_INTERVAL_SEC) * 1000;
+    const id = setInterval(() => {
+      if (document.visibilityState !== 'hidden') refresh();
+    }, ms);
+    return () => clearInterval(id);
+  }, [refresh, enabled, sec]);
+}
 
 /** capabilities は画面表示時に 1 回だけ取る(Worker 側でサーバーごとに 10 分キャッシュ)。取れなければ null のまま */
 export function useCapabilities(serverId: ServerId): CapabilitiesResponse | null {

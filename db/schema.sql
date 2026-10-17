@@ -1,6 +1,6 @@
 -- wardogs-ops の現行スキーマ(参照用のまとめ)。docs/ARCHITECTURE.md 第 5 章・第 8 章・第 15 章。
 -- 本番への適用は db/migrations/ を `wrangler d1 migrations apply DB --remote` で行う。
--- このファイルは migrations をすべて適用した後の状態と一致させること(0001_init.sql + 0002_servers.sql + 0003_recordings.sql)。
+-- このファイルは migrations をすべて適用した後の状態と一致させること(0001_init.sql + 0002_servers.sql + 0003_recordings.sql + 0004_killfeed.sql)。
 -- 列の順序は ALTER TABLE ADD COLUMN の結果(末尾に追加)に合わせてある。
 -- 時刻はすべて UTC epoch ミリ秒(INTEGER)。
 
@@ -148,6 +148,8 @@ CREATE TABLE IF NOT EXISTS match_samples (
   faction_scores_json TEXT    NOT NULL DEFAULT '[]',
   cash_total          REAL,
   faction_stats_json  TEXT    NOT NULL DEFAULT '[]',
+  -- 0004: 陣営の付与用の観測({"f":[陣営名...],"p":{"<SteamID>":添字}}。名前は入れない)。取れなければ NULL
+  roster_json         TEXT,
   PRIMARY KEY (recording_id, bucket_minute)
 ) WITHOUT ROWID;
 
@@ -165,7 +167,9 @@ CREATE TABLE IF NOT EXISTS server_feeds (
   last_dropped_at      INTEGER,
   last_dropped_reason  TEXT,
   created_at           INTEGER NOT NULL,
-  updated_at           INTEGER NOT NULL
+  updated_at           INTEGER NOT NULL,
+  -- 0004: 生データ(feed_raw_events)も保存する(0 でもキルの保存は続ける)
+  raw_enabled          INTEGER NOT NULL DEFAULT 1 CHECK (raw_enabled IN (0, 1))
 );
 
 -- 0003: 受信した生データ(観測モード。保持 7 日)
@@ -188,5 +192,49 @@ CREATE TABLE IF NOT EXISTS feed_daily (
   day       INTEGER NOT NULL,
   batches   INTEGER NOT NULL DEFAULT 0,
   bytes     INTEGER NOT NULL DEFAULT 0,
+  -- 0004: 正規化の件数(kills は上限の判定にも使う)
+  kills         INTEGER NOT NULL DEFAULT 0,
+  other_events  INTEGER NOT NULL DEFAULT 0,
+  incomplete    INTEGER NOT NULL DEFAULT 0,
+  dropped_kills INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (server_id, day)
 ) WITHOUT ROWID;
+
+-- 0004: 正規化したキル(1 キル = 1 行。recording_id = 0 は記録外。flags は 1 headshot / 2 penetration / 4 roadkill / 8 vehicleExplosion / 16 suicide)
+CREATE TABLE IF NOT EXISTS feed_kills (
+  id               INTEGER PRIMARY KEY,
+  server_id        INTEGER NOT NULL,
+  recording_id     INTEGER NOT NULL DEFAULT 0,
+  received_at      INTEGER NOT NULL,
+  event_at         INTEGER,
+  game_time_sec    REAL,
+  killer_name      TEXT,
+  killer_steam_id  TEXT,
+  killer_faction   TEXT,
+  killer_faction_source TEXT,
+  victim_name      TEXT,
+  victim_steam_id  TEXT,
+  victim_faction   TEXT,
+  victim_faction_source TEXT,
+  weapon_id        TEXT,
+  weapon_name      TEXT,
+  vehicle_id       TEXT,
+  vehicle_name     TEXT,
+  flags            INTEGER NOT NULL DEFAULT 0,
+  distance_m       REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_feed_kills_scope ON feed_kills (server_id, recording_id, received_at);
+
+-- 0004: 試合・サーバーの削除に合わせてキルを消すトリガー
+CREATE TRIGGER IF NOT EXISTS trg_match_recordings_delete_kills
+AFTER DELETE ON match_recordings
+BEGIN
+  DELETE FROM feed_kills WHERE server_id = OLD.server_id AND recording_id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_servers_delete_unrecorded_kills
+AFTER DELETE ON servers
+BEGIN
+  DELETE FROM feed_kills WHERE server_id = OLD.id AND recording_id = 0;
+END;

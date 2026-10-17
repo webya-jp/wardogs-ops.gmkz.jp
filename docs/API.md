@@ -1,6 +1,6 @@
 # Worker 内部 API 契約
 
-作成日: 2026-10-15(JST)/ 更新: 2026-10-17(スコア記録とキルフィードの観測モード: 1 章の例外、4.1、7.2〜7.4、8〜10 章、5 章のコード。ARCHITECTURE 第 17 章)、2026-10-17(`/api/status` に `experiences`・次のマップを追加。3 章)、2026-10-16(複数サーバー対応: 1.2、3・4 章の `server`、5 章のコード、7 章。Worker Secrets の廃止: 1 章、2 章の `/setup`、5 章、既定サーバーの削除)/ 担当: architect。型の正本は `src/types/api.ts`(本書と食い違ったら司令塔に報告)。
+作成日: 2026-10-15(JST)/ 更新: 2026-10-17(キルフィード第 2 段階: 11 章。第 1 段階の契約は変えず追加のみ。ARCHITECTURE 17.10)、2026-10-17(スコア記録とキルフィードの観測モード: 1 章の例外、4.1、7.2〜7.4、8〜10 章、5 章のコード。ARCHITECTURE 第 17 章)、2026-10-17(`/api/status` に `experiences`・次のマップを追加。3 章)、2026-10-16(複数サーバー対応: 1.2、3・4 章の `server`、5 章のコード、7 章。Worker Secrets の廃止: 1 章、2 章の `/setup`、5 章、既定サーバーの削除)/ 担当: architect。型の正本は `src/types/api.ts`(本書と食い違ったら司令塔に報告)。
 構成・認証の詳細は `docs/ARCHITECTURE.md`。RCON の確度は第 6 章と `docs/research/wardogs-rcon.md`。
 
 ## 1. 共通
@@ -42,7 +42,7 @@
 | `GET /api/status` `players` `bans` `maps` `capabilities` | クエリ `?server=<id>` | Cookie(`__Host-wo_server`)→ 表示順で最初に使えるサーバー(更新前から開いていたタブとの互換用。画面は常に明示して送る) |
 | `POST /api/actions/prepare` `execute` | 本文 `server` | **不可**(400 `VALIDATION_FAILED`、`fields.server = required`) |
 | `GET /api/audit` | クエリ `?server=<id>` または `all` | `all`(全サーバー) |
-| `GET /api/matches`、`GET /api/feed/raw` | クエリ `?server=<id>`(必須) | **不可**(400 `VALIDATION_FAILED`、`fields.server = required`)。RCON は呼ばない。削除済みのサーバーの id でもエラーにせず 0 件を返す(`/api/audit` と同じ) |
+| `GET /api/matches`、`GET /api/feed/raw`、`GET /api/killfeed/kills`、`GET /api/feed/raw/:id/normalized` | クエリ `?server=<id>`(必須) | **不可**(400 `VALIDATION_FAILED`、`fields.server = required`)。RCON は呼ばない。削除済みのサーバーの id でもエラーにせず 0 件を返す(`/api/audit` と同じ) |
 | `GET /api/matches/:id/samples` | パスの試合 id(`server` は任意。指定して試合のサーバーと違えば 404 `MATCH_NOT_FOUND`) | − |
 | `/api/servers/*` | パスの `:id` | − |
 
@@ -516,3 +516,99 @@ Content-Type: application/json
 
 [{"type":"killed", "...": "..."}]
 ```
+
+## 11. キルフィードの集計(第 2 段階。2026-10-17)
+
+ログイン必須。RCON は呼ばない(D1 だけ)。設計の正本は ARCHITECTURE 17.10、型は `src/types/api.ts` の「キルフィード 第 2 段階」の節。第 1 段階(9・10 章、7.3)の契約は変えない。
+
+**集計・JSON 出力の API は無い**。キルの一覧(11.1)をブラウザが受け取り、統計カード・時間帯別・武器別・距離・上位・最長・絞り込み・検索・JSON 出力をブラウザで計算する(ARCHITECTURE 17.10.6。型 `KillfeedSummary` / `KillfeedExport` は画面と出力で共通)。
+
+### 11.1 `GET /api/killfeed/kills?server=<id>&match=<id|unrecorded>&after=<cursor>` → `KillfeedKillsResponse`
+
+| クエリ | 値 | 既定 |
+|---|---|---|
+| `server` | `ServerId`(必須) | − |
+| `match` | `MatchId`(`MATCH_ID_PATTERN`)または `unrecorded`(記録外。`KILLFEED_UNRECORDED`)。必須 | − |
+| `after` | 前回の応答の `cursor`(`KILL_CURSOR_PATTERN`)。指定すると、それより後のキルだけを返す(差分) | − |
+
+- `server` が無い → 400 `VALIDATION_FAILED`(`fields.server = required`)、形式不正 → `invalid_format`。削除済みのサーバーの id は 0 件で 200(1.2 と同じ)。
+- `match` が無い → 400(`fields.match = required`)、形式不正 → `invalid_format`。試合が無い・`server` と違う → 404 `MATCH_NOT_FOUND`。
+- `after` の形式不正 → 400(`fields.after = invalid_format`)。
+- 全件(`after` なし): 試合は古い順に最大 `KILLFEED_MATCH_KILLS_MAX`(3,000)件、記録外は新しい方から `KILLFEED_UNRECORDED_MAX`(500)件を古い順に並べて返す。超えたら `truncated: true`。
+- 差分(`after` あり): `(receivedAt, id)` が `after` より後のものを古い順に最大 `KILLFEED_INCREMENT_MAX`(500)件。超えたら `truncated: true`(画面は `after` なしで取り直す)。記録外の差分も同じ。
+- `cursor`: 返した最後のキルの位置。キルが 0 件なら `after` をそのまま返す(`after` も無ければ null)。
+- `match`: 試合の要約(`GET /api/matches` と同じ `MatchSummary`)。記録外は null。記録中の試合が終わると `status: 'ended'` になり、画面は差分の取得をやめる。
+- `factions`: 陣営の表示順(試合の最後のサンプルの `factionScores` の順 → キルに現れた順)。陣営の印の配色に使う。
+- `kills[].teamkill`: 両者の陣営が同じ出所(`factionSource`)で分かり、自殺でないときだけ true / false。それ以外は null。
+- `today`: 今日(UTC)の正規化の件数(保存したキル・キル以外のイベント・読み取れなかったキル・上限で捨てたキル)。
+- `configured`: 受信用トークンを発行済みか(未発行でも保存済みのキルは返す)。
+- **Steam ID・プレイヤー名を含む**。画面はテキストとして表示する(HTML として解釈しない)。
+- 画面は記録中の試合・記録外を表示している間、`KILLFEED_POLL_SEC`(30 秒)ごとに差分を取る。終了済みの試合は 1 回だけ。
+
+例(値はダミー):
+
+```jsonc
+{
+  "ok": true,
+  "data": {
+    "server": "3",
+    "scope": "12",
+    "match": { "id": "12", "status": "recording", "map": "<マップ>", "...": "..." },
+    "factions": ["Blue", "Red"],
+    "kills": [
+      {
+        "id": 501,
+        "receivedAt": 1792233600000,
+        "eventAt": null,
+        "gameTimeSec": 3151,
+        "killer": { "name": "TestPlayerA", "steamId": "<17 桁>", "faction": "Blue", "factionSource": "roster" },
+        "victim": { "name": "TestPlayerB", "steamId": "<17 桁>", "faction": "Red", "factionSource": "roster" },
+        "weapon": { "id": "WEPN_031", "name": null },
+        "vehicle": null,
+        "flags": { "headshot": true, "penetration": false, "roadkill": false, "vehicleExplosion": false, "suicide": false },
+        "teamkill": false,
+        "distanceM": 37.2
+      }
+    ],
+    "cursor": "1792233600000-501",
+    "incremental": false,
+    "truncated": false,
+    "today": { "kills": 120, "otherEvents": 0, "incomplete": 0, "droppedKills": 0 },
+    "configured": true
+  }
+}
+```
+
+### 11.2 `GET /api/feed/raw/:id/normalized?server=<id>` → `FeedNormalizePreviewResponse`
+
+保存済みの生データ(`feed_raw_events`)1 件に、**今の対応表**(`src/lib/killfeed/fields.ts`)で正規化を試した結果を返す。**何も保存しない**。対応表の見直し用(観測で本物の形を見た後、どの項目が読めていないかを確かめる)。
+
+- `:id` は 9 章の `FeedRawEntry.id`(正の整数)。形式不正 → 400(`fields.id = invalid_format`)。`server` は必須(1.2)。生データが無い(保持期間切れ・別サーバー)→ 404 `NOT_FOUND`。
+- `envelope`: 本文の外側の形(`array` / `events` / `single` / `unknown`)。
+- `events`: 先頭から最大 `FEED_NORMALIZE_PREVIEW_MAX`(50)件。各件に結果(`kill` / `other` / `incomplete` / `invalid`)、正規化した値(`kill`)、項目ごとに使った候補名(`matched`)、どの候補にも使われなかった最上位のキー(`unmappedKeys`。値は含めない)。
+- `counts`: バッチ全体の件数。`bigIntegersQuoted`: 引用符の無い 16 桁以上の整数を文字列として読んだ数(K-10)。
+- 正規化の値は Steam ID・プレイヤー名を含む(9 章の生データと同じ扱い)。
+
+### 11.3 JSON で書き出す(API なし)
+
+ブラウザが 11.1 の全件と `GET /api/matches/:id/samples` のサンプルから `KillfeedExport`(`format: 'wardogs-ops.killfeed'`、`version: 1`)を組み立て、`Blob` でダウンロードさせる。ファイル名は `killfeed-s<サーバー id>-<試合 id または unrecorded>-<YYYYMMDD-HHmm>.json`(日時は `TIMEZONE`)。絞り込み・検索の前の全件を入れる。Steam ID・プレイヤー名を含むことを画面に書く。
+
+### 11.4 受信設定の追加(`GET` / `PUT /api/servers/:id/feed`。7.3 への追加)
+
+- `GET` / `PUT` の応答は `ServerFeedStatus & KillfeedFeedStatusExtra`(第 1 段階の項目はそのまま):
+  - `rawEnabled`: 生データ(`feed_raw_events`)も保存するか(既定 true)。false でもキルの正規化・保存は続ける。`enabled = false` のときは従来どおり何も保存しない。
+  - `killsToday`: 今日(UTC)の正規化の件数(11.1 の `today` と同じ)。
+  - `killLimits`: `dailyKills`(3,000)、`globalDailyKills`(8,000)、`perBatch`(100)、`unrecordedRetentionDays`(7)。
+- `PUT` の本文は `UpdateFeedRequest & KillfeedUpdateFeedExtra`。`enabled` は従来どおり必須、`rawEnabled` は任意(省略時は変えない。真偽以外は 400 `fields.rawEnabled = invalid_format`)。`settings_audit_log` の `feed_settings_update` の `params` に `rawEnabled` を足す(変えたときだけ)。
+
+### 11.5 受信(10 章)の処理の追加
+
+HTTP の契約(認証・上限・応答のコード)は 10 章のまま。保存の中身だけが増える(ARCHITECTURE 17.10.3):
+
+- 空でないバッチを正規化し、`killed` のイベントを `feed_kills` に保存する(1 バッチ 100 件まで、1 日サーバーごと 3,000 件・全体 8,000 件。超えた分は 204 で受けて捨て、`droppedKills` に数える)。
+- 生データの保存は `rawEnabled` が true のときだけ。生データの 1 日の上限(10 章)はキルの保存を止めない。
+- `killed` 以外のイベント・読み取れなかったキルは保存せず、件数だけ数える。
+
+### 11.6 エラーコード
+
+新しいコードは無い(400 `VALIDATION_FAILED`、404 `MATCH_NOT_FOUND` / `NOT_FOUND`、503 `NOT_CONFIGURED` 等の既存のコードを使う)。0004 のマイグレーションが未適用の D1 は、他の API と同じく 503 `NOT_CONFIGURED`(ARCHITECTURE 7.4)。

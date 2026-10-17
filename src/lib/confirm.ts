@@ -4,12 +4,13 @@
 //                              sv:ServerId, sh:SHA-256(対象サーバーの baseUrl) 先頭 128 bit })
 //   sig     = base64url(HMAC-SHA256(confirm 鍵, "v1.<payload>"))
 // 中身は秘密ではないが改ざんできない。1 回限りの保証は audit_log.confirm_nonce の UNIQUE で行う(D1 必須)。
+// a には record_start / record_stop も入る(17.2。その 1 回限りは settings_audit_log.confirm_nonce の UNIQUE)。
 // t(対象名)は監査ログの target_name に使う。sv / sh は別サーバーへのすり替えと prepare 後の宛先変更を検出する(ARCHITECTURE 15.6)。
 import { CONFIRM_TTL_MS } from '../types/api';
 import { SERVER_ID_PATTERN } from '../types/api';
-import type { ServerId, WriteAction } from '../types/api';
+import type { ConfirmableAction, ServerId } from '../types/api';
 import { b64urlToBytes, b64urlToUtf8, bytesToB64url, hmac, randomB64url, sha256, timingSafeEqualBytes, utf8ToB64url } from './keys';
-import { isWriteAction } from './validate';
+import { isConfirmableAction } from './validate';
 
 const MAX_TOKEN_LENGTH = 1024;
 const TARGET_NAME_MAX = 64;
@@ -39,7 +40,7 @@ export async function paramsHash(params: unknown): Promise<string> {
 
 interface Payload {
   v: 1;
-  a: WriteAction;
+  a: ConfirmableAction;
   h: string;
   s: string;
   e: number;
@@ -50,7 +51,8 @@ interface Payload {
 }
 
 export interface IssueInput {
-  action: WriteAction;
+  /** 書き込み操作、またはスコア記録の開始・停止(docs/ARCHITECTURE.md 17.2。形式・検証の順序は同じ) */
+  action: ConfirmableAction;
   params: unknown;
   sid: string;
   targetName?: string | null;
@@ -109,7 +111,7 @@ async function decode(key: CryptoKey, token: unknown): Promise<Payload | null> {
   const o = p as Record<string, unknown>;
   if (
     o.v !== 1 ||
-    !isWriteAction(o.a) ||
+    !isConfirmableAction(o.a) ||
     typeof o.h !== 'string' ||
     typeof o.s !== 'string' ||
     typeof o.e !== 'number' ||
@@ -126,7 +128,7 @@ async function decode(key: CryptoKey, token: unknown): Promise<Payload | null> {
 }
 
 export interface BaseExpect {
-  action: WriteAction;
+  action: ConfirmableAction;
   params: unknown;
   sid: string;
 }

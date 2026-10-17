@@ -29,7 +29,7 @@ describe('config', () => {
     expect(d1Warning(s.d1)).toBe('D1_MISSING');
   });
 
-  it('D1 の判定は 0002 の表・列(admins / settings を含む)まで。0001 だけなら not_migrated', async () => {
+  it('D1 の判定は 0003 の表・列まで(admins / settings を含む)。0001 だけなら not_migrated', async () => {
     resetD1Cache();
     const old = await makeD1({ migrations: ['0001_init.sql'] });
     expect(await probeD1(old)).toBe('not_migrated');
@@ -50,6 +50,18 @@ describe('config', () => {
 
   it('admins または settings が欠けた D1 は not_migrated', async () => {
     for (const table of ['admins', 'settings']) {
+      resetD1Cache();
+      const db = await makeD1();
+      await db.prepare(`DROP TABLE ${table}`).run();
+      expect(await probeD1(db)).toBe('not_migrated');
+    }
+    resetD1Cache();
+  });
+
+  it('0003 の表・列が無い D1(0002 まで)は not_migrated', async () => {
+    resetD1Cache();
+    expect(await probeD1(await makeD1({ migrations: ['0001_init.sql', '0002_servers.sql'] }))).toBe('not_migrated');
+    for (const table of ['match_recordings', 'match_samples', 'server_feeds', 'feed_raw_events', 'feed_daily']) {
       resetD1Cache();
       const db = await makeD1();
       await db.prepare(`DROP TABLE ${table}`).run();

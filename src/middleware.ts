@@ -5,6 +5,8 @@
 //    0 行 → ページは /setup へ 303(/setup 自身は登録フォーム)、API は 503 SETUP_REQUIRED
 // 4. ログイン Cookie の検証(未ログイン → ページは /login へ 303、API は 401 UNAUTHENTICATED)
 // 5. 応答にセキュリティヘッダと Cache-Control: no-store
+// 例外: POST /api/ingest/events(キルフィードの受信。正規化したパスの完全一致だけ)は「D1 の判定 → ヘッダ」だけ行い、
+//   CSRF・管理者の有無・ログイン Cookie を見ない(受信用トークンで認証する。5.5・5.8・17.6。locals.session は null のまま)。
 // 例外: /login・/setup は未ログインで通す。/setup は D1 の不備・未登録でも通す(登録済みのときの誘導は setup.astro が行う)。
 // 静的アセット(/_astro/*)は本来ここを通らない(念のため除外。それ以外は除外しない)。
 // D1 の呼び出しが失敗したら 500(API は INTERNAL_ERROR)にし、D1 の判定のキャッシュを捨てる。
@@ -18,6 +20,7 @@ import { getEnv, IS_DEV } from './lib/runtime';
 import { attachSession, cookieName, readCookie, toSessionInfo, verifySession } from './lib/session';
 import type { SessionData } from './lib/session';
 import { getTranslator, resolveLanguage } from './i18n';
+import { FEED_INGEST_PATH } from './types/api';
 
 const PUBLIC_PATHS = new Set(['/login', '/setup']);
 
@@ -71,6 +74,9 @@ export const onRequest = defineMiddleware(async (context, next) => {
     await discardBody(context.request);
     return withSecurityHeaders(isApi ? jsonError('NOT_CONFIGURED') : redirect('/setup'));
   }
+
+  // 受信エンドポイント(完全一致のみ。前方一致・大文字小文字の違い・//api/... は通常の /api/* として扱う)
+  if (pathname === FEED_INGEST_PATH) return withSecurityHeaders(await next());
 
   // 2. CSRF
   if (!checkSameOrigin(context.request)) {

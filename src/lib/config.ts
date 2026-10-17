@@ -63,8 +63,8 @@ export function invalidateD1Cache(): void {
 }
 
 /**
- * 最新のマイグレーション(0002)で作った表・列をすべて参照する 1 文。どれかが無ければ失敗する(15.8)。
- * 0001 の login_throttle も参照する
+ * 最新のマイグレーション(0003)までで作った表・列をすべて参照する 1 文。どれかが無ければ失敗する(15.8)。
+ * 0001 の login_throttle も参照する。0003: servers.score_cap、settings_audit_log.confirm_nonce、スコア記録・キルフィードの 5 表(17.1)
  */
 const PROBE_SQL = `SELECT
   (SELECT server_id FROM audit_log LIMIT 1) AS a,
@@ -74,7 +74,14 @@ const PROBE_SQL = `SELECT
   (SELECT 1 FROM settings_audit_log LIMIT 1) AS e,
   (SELECT 1 FROM login_throttle LIMIT 1) AS f,
   (SELECT session_stamp FROM admins LIMIT 1) AS g,
-  (SELECT value FROM settings LIMIT 1) AS h`;
+  (SELECT value FROM settings LIMIT 1) AS h,
+  (SELECT score_cap FROM servers LIMIT 1) AS i,
+  (SELECT confirm_nonce FROM settings_audit_log LIMIT 1) AS j,
+  (SELECT score_cap_source FROM match_recordings LIMIT 1) AS k,
+  (SELECT faction_stats_json FROM match_samples LIMIT 1) AS l,
+  (SELECT token_hash FROM server_feeds LIMIT 1) AS m,
+  (SELECT recording_id FROM feed_raw_events LIMIT 1) AS n,
+  (SELECT bytes FROM feed_daily LIMIT 1) AS o`;
 
 export async function probeD1(db: D1Database | undefined, now = Date.now()): Promise<D1State> {
   if (!db) return 'missing';

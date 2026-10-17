@@ -9,6 +9,20 @@
 //                       パネルの「サーバー設定」(/servers)でサーバーを追加するときに、この値を RCON パスワードとして入力する
 //   MOCK_RCON_PASSWORDS ポートごとのパスワード(カンマ区切り、MOCK_RCON_PORTS と同じ順。空の要素は MOCK_RCON_PASSWORD)
 //
+//   MOCK_SCORE_STEP_SEC 陣営スコアを増やす間隔(秒。既定 60、0 で増やさない)。1 回ごとに 1 陣営目 +2・2 陣営目 +1、
+//                       プレイヤーの cash も +10 する。スコアは上限(scoreCap、無ければ 100)で止まる。
+//                       ブラウザで「上限到達で記録が終わる」を数分で確かめるなら 3〜5 程度にする
+//   MOCK_SCORE_CAP      1 台目(MOCK_RCON_PORTS の先頭)の status に入れる scoreCap(既定 100。0 で入れない)。
+//                       2 台目以降は scoreCap を返さない(パネル側の設定値・既定値の経路を確かめるため。ビルドによって無い。R-21)
+//   MOCK_FEED_URL       与えるとキルフィードの送信モード: 2 秒ごとに <MOCK_FEED_URL>/api/ingest/events へ
+//                       ダミーの killed バッチと空のバッチを交互に POST する(MOCK_FEED_URL はパネルの URL。例 http://127.0.0.1:4322)
+//   MOCK_FEED_TOKEN     その送信に使う受信用トークン(パネルの設定タブで発行したもの。ログに出さない)
+//   MOCK_FEED_SEC       送信の間隔(秒。既定 2)
+//
+// 試合: POST /v1/match/map・/v1/match/end で新しい試合になり、スコアと cash を初期値に戻す(マップも変わる)。
+// キルフィードの本文の形({ type: 'killed', killer, victim, weapon, distance, headshot, time } の配列)は
+// docs/research/wardogs-rcon.md 2.4 からの**推測**で、実サーバーの形式は未検証(K-1)。
+//
 // 127.0.0.1 と ::1 だけで待ち受ける。サーバー名は "Mock Server <ポート>"。
 // プレイヤー名・Steam ID は架空(Steam ID は 0 始まりの 17 桁で、実在の SteamID64 の形式ではない)。
 // ポートごとにプレイヤー名(末尾に "-<ポート>")・Steam ID・人数・experiences・ローテーションを変え、
@@ -40,6 +54,23 @@ function parsePorts() {
 const PORTS = parsePorts();
 const PASSWORDS = (process.env.MOCK_RCON_PASSWORDS || '').split(',');
 
+function envNumber(name, fallback) {
+  const raw = (process.env[name] || '').trim();
+  if (raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    console.error(`${name} must be a number >= 0`);
+    process.exit(1);
+  }
+  return n;
+}
+
+const SCORE_STEP_SEC = envNumber('MOCK_SCORE_STEP_SEC', 60);
+const SCORE_CAP = envNumber('MOCK_SCORE_CAP', 100);
+const FEED_URL = (process.env.MOCK_FEED_URL || '').trim().replace(/\/+$/, '');
+const FEED_TOKEN = (process.env.MOCK_FEED_TOKEN || '').trim();
+const FEED_SEC = envNumber('MOCK_FEED_SEC', 2);
+
 const BASE_PLAYERS = [
   { name: 'TestPlayerA', faction: 'Blue', kills: 12, deaths: 3, cash: 1500, pingMs: 24 },
   { name: 'TestPlayerB', faction: 'Red', kills: 7, deaths: 9, cash: 800, pingMs: 41 },
@@ -61,10 +92,13 @@ function makeState(port, index) {
     serverName: `Mock Server ${port}`,
     map: ROTATION_SETS[index % ROTATION_SETS.length][0].map,
     maxPlayers: 64,
-    factionScores: [
-      { faction: 'Blue', score: 120 + index * 10 },
-      { faction: 'Red', score: 95 + index * 10 },
+    // 試合の初期値(時間とともに増える。currentScores)
+    baseScores: [
+      { faction: 'Blue', score: 10 + index * 5 },
+      { faction: 'Red', score: 5 + index * 5 },
     ],
+    scoreCap: index === 0 && SCORE_CAP > 0 ? SCORE_CAP : null,
+    matchStartedAt: Date.now(),
     experiences: EXPERIENCE_SETS[index % EXPERIENCE_SETS.length],
     rotationEntries: ROTATION_SETS[index % ROTATION_SETS.length],
     rotation: { nowIndex: 0, nextIndex: 1 },
@@ -77,6 +111,28 @@ function makeState(port, index) {
     ],
     startedAt: Date.now(),
   };
+}
+
+/** 試合開始からの経過で増えたスコア(上限で止める) */
+function steps(state) {
+  if (SCORE_STEP_SEC <= 0) return 0;
+  return Math.floor((Date.now() - state.matchStartedAt) / (SCORE_STEP_SEC * 1000));
+}
+
+function currentScores(state) {
+  const n = steps(state);
+  const cap = state.scoreCap ?? 100;
+  return state.baseScores.map((s, i) => ({ faction: s.faction, score: Math.min(cap, s.score + n * (i === 0 ? 2 : 1)) }));
+}
+
+function currentPlayers(state) {
+  const n = steps(state);
+  return state.players.map((p) => ({ ...p, cash: p.cash + n * 10 }));
+}
+
+/** 新しい試合(マップ変更・試合終了の後) */
+function newMatch(state) {
+  state.matchStartedAt = Date.now();
 }
 
 /** ポートごとの experiences(架空) */
@@ -193,12 +249,14 @@ function makeHandler(state) {
         alternator: false,
         scoreTick: 1,
         players: { current: state.players.length, max: state.maxPlayers },
-        factionScores: state.factionScores,
+        factionScores: currentScores(state),
         rotation: state.rotation,
+        matchSeconds: Math.floor((Date.now() - state.matchStartedAt) / 1000),
+        ...(state.scoreCap === null ? {} : { scoreCap: state.scoreCap }),
       });
     }
     if (method === 'GET' && path === '/v1/players') {
-      return reply(200, { players: state.players, count: state.players.length });
+      return reply(200, { players: currentPlayers(state), count: state.players.length });
     }
     if (method === 'GET' && path === '/v1/health') {
       return reply(200, {
@@ -265,10 +323,12 @@ function makeHandler(state) {
       if (!found) return reply(400, { error: 'unknown map' });
       advanceRotation(state);
       state.map = found.id;
+      newMatch(state);
       return reply(200, { ok: true });
     }
     if (method === 'POST' && path === '/v1/match/end') {
       advanceRotation(state);
+      newMatch(state);
       return reply(200, { ok: true });
     }
     return reply(404, { error: 'route not found' });
@@ -276,8 +336,10 @@ function makeHandler(state) {
 }
 
 // ループバックだけで待ち受ける(localhost が IPv4 / IPv6 のどちらに解決されても届くように両方)
+const states = [];
 PORTS.forEach((port, index) => {
   const state = makeState(port, index);
+  states.push(state);
   const handler = makeHandler(state);
   createServer(handler)
     .on('error', (err) => {
@@ -291,3 +353,48 @@ PORTS.forEach((port, index) => {
     .on('error', () => undefined)
     .listen(port, '::1');
 });
+
+// ---- キルフィードの送信モード(MOCK_FEED_URL / MOCK_FEED_TOKEN)。本文の形は資料からの推測(K-1) ----
+if (FEED_URL !== '') {
+  if (FEED_TOKEN === '') {
+    console.error('MOCK_FEED_TOKEN is required when MOCK_FEED_URL is set');
+    process.exit(1);
+  }
+  const target = `${FEED_URL}/api/ingest/events`;
+  let tick = 0;
+  const send = async () => {
+    tick += 1;
+    // 1 回おきに空のバッチ(ゲームが空のときも送るかは未検証 K-3)
+    const state = states[0];
+    let body = '[]';
+    if (tick % 2 === 1 && state && state.players.length >= 2) {
+      const a = state.players[tick % state.players.length];
+      const b = state.players[(tick + 1) % state.players.length];
+      body = JSON.stringify([
+        {
+          type: 'killed',
+          time: new Date().toISOString(),
+          killer: { name: a.name, steamId: a.steamId, faction: a.faction },
+          victim: { name: b.name, steamId: b.steamId, faction: b.faction },
+          weapon: 'mock_rifle',
+          distance: 50 + (tick % 7) * 25,
+          headshot: tick % 3 === 0,
+        },
+      ]);
+    }
+    try {
+      const res = await fetch(target, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${FEED_TOKEN}`, 'Content-Type': 'application/json' },
+        body,
+      });
+      await res.arrayBuffer().catch(() => undefined);
+      // トークン・本文は出さない
+      console.log(`${new Date().toISOString()} feed POST /api/ingest/events (${body === '[]' ? 'empty' : 'killed x1'}) -> ${res.status}`);
+    } catch (err) {
+      console.log(`${new Date().toISOString()} feed POST /api/ingest/events -> error (${err && err.name ? err.name : 'Error'})`);
+    }
+  };
+  setInterval(send, Math.max(0.5, FEED_SEC) * 1000);
+  console.log(`mock feed: posting every ${FEED_SEC}s to ${FEED_URL}/api/ingest/events (token not shown)`);
+}

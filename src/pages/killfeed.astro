@@ -1,17 +1,17 @@
 ---
-// キルフィード(/killfeed)。docs/ARCHITECTURE.md 9.6。今は「準備中」の案内だけ(API・D1 は使わない。アイランドなし)。
-// ログイン済みの人にだけ見える(middleware の認証を通る)。
+// キルフィード(/killfeed)。docs/ARCHITECTURE.md 9.6・17.9。スコア記録の推移のグラフと、受信した生データ(観測モード)。
+// 中身はアイランド(KillfeedPanel)。選択中のサーバーが使えないときは ServerGate の案内だけを出す。
 export const prerender = false;
 import OpsLayout from '../layouts/OpsLayout.astro';
 import { getPageContext } from '../layouts/page-context';
+import KillfeedPanel from '../components/KillfeedPanel';
+import ServerGate from '../components/ServerGate.astro';
+import { serverLabel } from '../components/lib/servers';
 
 const ctx = await getPageContext(Astro.request, Astro.locals, Astro.response);
-const { t } = ctx;
+const server = ctx.server && !ctx.serverNotFound && ctx.server.usable ? { id: ctx.server.id, label: serverLabel(ctx.server, ctx.t) } : null;
 ---
-<OpsLayout title={t('tabs.killfeed')} language={ctx.language} ctx={ctx} active="killfeed">
-  <section class="card" aria-labelledby="killfeed-title">
-    <h1 id="killfeed-title">{t('killfeed.title')} <span class="badge">{t('tabs.comingSoon')}</span></h1>
-    <p><strong>{t('killfeed.comingSoon')}</strong></p>
-    <p>{t('killfeed.why')}</p>
-  </section>
+<OpsLayout title={ctx.t('tabs.killfeed')} language={ctx.language} ctx={ctx} active="killfeed">
+  <ServerGate ctx={ctx} />
+  {server && <KillfeedPanel client:load language={ctx.language} timeZone={ctx.timeZone} server={server} />}
 </OpsLayout>

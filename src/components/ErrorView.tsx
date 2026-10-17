@@ -4,6 +4,8 @@ import {
   MESSAGE_MAX_LENGTH,
   POLL_MIN_INTERVAL_SEC,
   REASON_MAX_LENGTH,
+  SCORE_CAP_MAX,
+  SCORE_CAP_MIN,
   SERVER_HOST_MAX_LENGTH,
   SERVER_NAME_MAX_LENGTH,
   SERVER_PASSWORD_MAX_LENGTH,
@@ -26,6 +28,9 @@ const FIELD_LABELS: Record<string, MessageKey> = {
   kind: 'field.kind',
   enabled: 'field.enabled',
   sortOrder: 'field.sortOrder',
+  scoreCap: 'field.scoreCap',
+  recordingId: 'field.recordingId',
+  id: 'field.id',
 };
 
 const FIELD_MAX: Record<string, number> = {
@@ -42,11 +47,22 @@ export function errorText(error: ClientError, t: Translator): string {
   return t(key, { seconds: error.retryAfterSec ?? POLL_MIN_INTERVAL_SEC });
 }
 
+/** 項目ごとに文言を差し替える理由(validation.out_of_range はポート番号向けの文言のため) */
+const FIELD_ISSUE_OVERRIDES: Record<string, { key: MessageKey; params: Record<string, number> }> = {
+  'scoreCap:out_of_range': { key: 'settings.recording.outOfRange', params: { min: SCORE_CAP_MIN, max: SCORE_CAP_MAX } },
+};
+
+function issueText(field: string, issue: string, t: Translator): string {
+  const override = FIELD_ISSUE_OVERRIDES[`${field}:${issue}`];
+  if (override) return t(override.key, override.params);
+  const key = `validation.${issue}`;
+  return isMessageKey(key) ? t(key, { max: FIELD_MAX[field] ?? '' }) : t('error.VALIDATION_FAILED');
+}
+
 export function fieldIssueText(field: string, error: ClientError | null, t: Translator): string | null {
   const issue = error?.fields?.[field];
   if (!issue) return null;
-  const key = `validation.${issue}`;
-  return isMessageKey(key) ? t(key, { max: FIELD_MAX[field] ?? '' }) : t('error.VALIDATION_FAILED');
+  return issueText(field, issue, t);
 }
 
 interface Props {
@@ -68,9 +84,8 @@ export default function ErrorView({ error, t, lead, inlineFields = [] }: Props) 
         <ul>
           {fields.map(([name, issue]) => {
             const label = FIELD_LABELS[name];
-            const issueKey = `validation.${issue}`;
-            const issueText = isMessageKey(issueKey) ? t(issueKey, { max: FIELD_MAX[name] ?? '' }) : t('error.VALIDATION_FAILED');
-            return <li key={name}>{label ? t('common.fieldLine', { field: t(label), issue: issueText }) : issueText}</li>;
+            const text = issueText(name, issue, t);
+            return <li key={name}>{label ? t('common.fieldLine', { field: t(label), issue: text }) : text}</li>;
           })}
         </ul>
       )}

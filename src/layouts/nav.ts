@@ -21,7 +21,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: 'bans', href: '/bans', label: 'tabs.bans', inSidebar: true, comingSoon: false },
   { id: 'audit', href: '/audit', label: 'tabs.audit', inSidebar: true, comingSoon: false },
   { id: 'settings', href: '/servers', label: 'tabs.settings', inSidebar: true, comingSoon: false },
-  { id: 'killfeed', href: '/killfeed', label: 'tabs.killfeed', inSidebar: false, comingSoon: true },
+  { id: 'killfeed', href: '/killfeed', label: 'tabs.killfeed', inSidebar: true, comingSoon: false },
 ];
 
 /** ページ内リンクに選択中のサーバーを付ける(docs/ARCHITECTURE.md 15.5)。hash は ? の後ろに付ける */

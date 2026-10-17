@@ -1147,3 +1147,186 @@ dialog.confirm-dialog::backdrop {
 .outcome .alert:last-of-type {
   margin-bottom: 12px;
 }
+
+/* ---------- スコア記録のグラフ(ScoreChart。docs/ARCHITECTURE.md 17.9) ---------- */
+/* 陣営の色は 3 色 + その他。色だけで区別させないよう、線の種類(実線・破線・点線・一点鎖線)と凡例の名前を組み合わせる */
+
+:root {
+  --chart-1: #1f5fbf;
+  --chart-2: #c2410c;
+  --chart-3: #2f855a;
+  --chart-other: #7a5aa6;
+  --chart-total: #1b1f24;
+  --chart-grid: #e3e6ea;
+  --chart-cap: #b42318;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --chart-1: #6ea8ff;
+    --chart-2: #f59e5b;
+    --chart-3: #6fd08c;
+    --chart-other: #c4a5f0;
+    --chart-total: #e6e8eb;
+    --chart-grid: #2f353c;
+    --chart-cap: #ff7b72;
+  }
+}
+
+.score-chart {
+  min-width: 0;
+}
+
+/* SVG は描画領域の幅に合わせて viewBox を作り直す(幅 100%。はみ出さない) */
+.chart-box {
+  width: 100%;
+  min-width: 0;
+}
+
+.chart-svg {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.chart-grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+}
+
+.chart-axis {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.chart-tick {
+  fill: var(--text-muted);
+  font-family: var(--font);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-cap {
+  stroke: var(--chart-cap);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+}
+
+.chart-cap-label {
+  fill: var(--chart-cap);
+  font-family: var(--font);
+}
+
+.chart-axis-title {
+  margin: 0 0 4px;
+}
+
+.chart-axis-x {
+  text-align: right;
+}
+
+.chart-legend {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 0;
+  margin: 0 0 12px;
+  font-size: 0.9rem;
+}
+
+.chart-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chart-legend-swatch {
+  flex: none;
+}
+
+.chart-legend-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-details {
+  margin: 12px 0 0;
+}
+
+.chart-details summary,
+.feed-raw-list summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.chart-details .table-wrap {
+  margin-top: 8px;
+  max-height: 28em;
+  overflow-y: auto;
+}
+
+.chart-table th,
+.chart-table td {
+  white-space: nowrap;
+}
+
+.match-select {
+  margin-top: 12px;
+}
+
+/* ---------- キルフィードの生データ・受信設定(FeedRawList・ServerExtraSettings。17.6・17.9) ---------- */
+
+.feed-raw-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+
+.feed-raw-list li {
+  border-top: 1px solid var(--border);
+  padding: 2px 0;
+}
+
+.feed-raw-list li:last-child {
+  border-bottom: 1px solid var(--border);
+}
+
+/* 受信した本文・ini の例はテキストとして折り返して表示する(長い 1 行の JSON でも横にはみ出さない) */
+.feed-raw-body,
+.code-block {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 4px 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  max-height: 24em;
+  overflow-y: auto;
+}
+
+.feed-status h3,
+.feed-settings h3 {
+  margin-top: 16px;
+}
+
+.copy-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.copy-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.copy-row button {
+  flex: none;
+}

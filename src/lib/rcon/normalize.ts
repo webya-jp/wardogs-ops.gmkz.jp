@@ -77,8 +77,21 @@ export function normalizeStatus(data: unknown, fetchedAt: number): StatusRespons
       nextMapName: null,
     },
     experiences: normalizeExperiences(data.experiences),
+    // ビルドによって無い(要確認 R-21)。scoreCap は正の数、matchSeconds は 0 以上の数のときだけ
+    scoreCap: positive(data.scoreCap),
+    matchSeconds: nonNegative(data.matchSeconds),
     fetchedAt,
   };
+}
+
+function positive(v: unknown): number | null {
+  const n = num(v);
+  return n !== null && n > 0 ? n : null;
+}
+
+function nonNegative(v: unknown): number | null {
+  const n = num(v);
+  return n !== null && n >= 0 ? n : null;
 }
 
 /** status.experiences[]: 文字列の要素だけを先頭から上限件数・上限文字数まで(要確認 R-19) */
@@ -158,6 +171,27 @@ export function normalizePlayers(data: unknown, fetchedAt: number): PlayersRespo
     });
   }
   return { players, count: players.length, fetchedAt };
+}
+
+/**
+ * スコア記録用のプレイヤー(陣営と cash だけ。名前・Steam ID は持たない)。docs/ARCHITECTURE.md 17.1・17.3。
+ * 画面用の PlayersResponse には cash を出さない(docs/API.md 3 章)ので、別の関数で読む。cash の意味は未検証(R-22)
+ */
+export interface RecordingPlayer {
+  faction: string | null;
+  cash: number | null;
+}
+
+/** GET /v1/players を記録用に読む。最上位の形が想定と違えば null(呼び出し側で「取れなかった」扱い) */
+export function normalizeRecordingPlayers(data: unknown): RecordingPlayer[] | null {
+  const list = isObj(data) ? data.players : Array.isArray(data) ? data : undefined;
+  if (!Array.isArray(list)) return null;
+  const out: RecordingPlayer[] = [];
+  for (const p of list.slice(0, MAX_PLAYERS)) {
+    if (!isObj(p)) continue;
+    out.push({ faction: faction(p.faction), cash: num(p.cash) });
+  }
+  return out;
 }
 
 /** bannedAtUtc: ISO 文字列 / epoch(秒またはミリ秒)を epoch ミリ秒に */

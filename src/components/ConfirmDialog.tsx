@@ -5,20 +5,34 @@
 // - destructive(ban / map / match_end)は強調し、確認チェックを入れるまで実行ボタンを押せない
 // - 実行中は閉じられず、二重送信しない。RCON_TIMEOUT は「結果不明」として自動で再実行しない
 // - 対象サーバー(server)を prepare・execute の両方に明示して送り、ダイアログにサーバー名を出す(docs/ARCHITECTURE.md 15.5・15.6)
+// - スコア記録の開始・停止(RecordingAction)も同じ二段階で確認する(docs/ARCHITECTURE.md 17.2、docs/API.md 4.1)。
+//   確認内容は RecordingPrepareResponse のマップ・上限・止める試合。destructive は常に false(ゲームサーバーに書き込まない)
 import { useEffect, useRef, useState } from 'react';
 import type { SubmitEvent } from 'react';
 import { MESSAGE_MAX_LENGTH, REASON_MAX_LENGTH } from '../types/api';
-import type { ExecuteRequest, ExecuteResponse, PrepareRequest, PrepareResponse, ServerId, WriteAction } from '../types/api';
+import { RECORDING_ACTIONS } from '../types/api';
+import type {
+  AnyExecuteResponse,
+  AnyPrepareResponse,
+  ConfirmableAction,
+  ExecuteRequest,
+  PrepareRequest,
+  RecordingAction,
+  RecordingPrepareResponse,
+  ServerId,
+} from '../types/api';
 import { apiPost } from './lib/api';
 import type { ClientError } from './lib/api';
 import type { I18n } from './lib/hooks';
+import { tCode } from './lib/keys';
 import ErrorView, { fieldIssueText } from './ErrorView';
 
 export type InputKind = 'reason' | 'message';
 
 export interface ActionRequestSpec {
-  action: WriteAction;
-  /** 入力欄以外のパラメータ(steamId・map など) */
+  /** 書き込み操作(WriteAction)か、スコア記録の開始・停止(RecordingAction。docs/ARCHITECTURE.md 17.2) */
+  action: ConfirmableAction;
+  /** 入力欄以外のパラメータ(steamId・map・recordingId など) */
   params: Record<string, string>;
   /** 確認の前に入力させる項目 */
   input?: InputKind;
@@ -40,7 +54,17 @@ interface Props {
   /** map の id → displayName(RCON の生データ。表示用) */
   mapNames?: Record<string, string | null>;
   onClose: () => void;
-  onDone: (action: WriteAction) => void;
+  onDone: (action: ConfirmableAction, result: AnyExecuteResponse) => void;
+}
+
+const RECORDING: ReadonlySet<string> = new Set(RECORDING_ACTIONS);
+
+export function isRecordingAction(action: string): action is RecordingAction {
+  return RECORDING.has(action);
+}
+
+function isRecordingPrepare(p: AnyPrepareResponse): p is RecordingPrepareResponse {
+  return isRecordingAction(p.action);
 }
 
 type Step = 'input' | 'preparing' | 'confirm' | 'executing' | 'done' | 'failed';
@@ -54,13 +78,13 @@ const UNKNOWN_RESULT: ReadonlySet<string> = new Set(['NETWORK', 'INTERNAL_ERROR'
 const NO_RETRY: ReadonlySet<string> = new Set([...UNKNOWN_RESULT, 'ALREADY_EXECUTED']);
 
 export default function ConfirmDialog({ i18n, server, request, mapNames = {}, onClose, onDone }: Props) {
-  const { t, time } = i18n;
+  const { t, time, dateTime, num } = i18n;
   const dialogRef = useRef<HTMLDialogElement>(null);
   const busy = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const [step, setStep] = useState<Step>('input');
   const [text, setText] = useState('');
-  const [prepared, setPrepared] = useState<PrepareResponse | null>(null);
+  const [prepared, setPrepared] = useState<AnyPrepareResponse | null>(null);
   const [error, setError] = useState<ClientError | null>(null);
   const [failedPhase, setFailedPhase] = useState<'prepare' | 'execute'>('prepare');
   const [ack, setAck] = useState(false);
@@ -81,7 +105,7 @@ export default function ConfirmDialog({ i18n, server, request, mapNames = {}, on
     setAck(false);
     setPrepared(null);
     const body = { server: server.id, action: spec.action, params: buildParams(spec, value) } as PrepareRequest;
-    const r = await apiPost<PrepareResponse>('/api/actions/prepare', body, ctrl.signal);
+    const r = await apiPost<AnyPrepareResponse>('/api/actions/prepare', body, ctrl.signal);
     if (ctrl.signal.aborted) return;
     if (r.ok) {
       setPrepared(r.data);
@@ -140,11 +164,11 @@ export default function ConfirmDialog({ i18n, server, request, mapNames = {}, on
       params: prepared.params,
       confirmToken: prepared.confirmToken,
     } as ExecuteRequest;
-    const r = await apiPost<ExecuteResponse>('/api/actions/execute', body);
+    const r = await apiPost<AnyExecuteResponse>('/api/actions/execute', body);
     busy.current = false;
     if (r.ok) {
       setStep('done');
-      onDone(prepared.action);
+      onDone(prepared.action, r.data);
     } else {
       setError(r.error);
       setFailedPhase('execute');
@@ -168,12 +192,48 @@ export default function ConfirmDialog({ i18n, server, request, mapNames = {}, on
   };
 
   const p = (prepared?.params ?? {}) as Record<string, string | undefined>;
-  const targetName = prepared?.targetName ?? t('confirm.unknownTarget');
+  const targetName = (prepared && !isRecordingPrepare(prepared) ? prepared.targetName : null) ?? t('confirm.unknownTarget');
   const mapId = p.map ?? '';
   const mapDisplay = mapNames[mapId] ?? null;
+  const recordingRequest = isRecordingAction(request.action);
+
+  /** スコア記録の開始・停止の確認内容(prepare が返したマップ・上限・止める試合。docs/API.md 4.1) */
+  const renderRecordingSummary = (rp: RecordingPrepareResponse) => {
+    const recMapDisplay = rp.map ? (mapNames[rp.map] ?? null) : null;
+    return (
+      <>
+        <p className="confirm-sentence">{t(`confirm.${rp.action}`)}</p>
+        <dl className="kv">
+          <dt>{t('confirm.server')}</dt>
+          <dd>{server.label}</dd>
+          <dt>{t('confirm.operation')}</dt>
+          <dd>{t(`action.${rp.action}`)}</dd>
+          <dt>{t('confirm.mapLabel')}</dt>
+          <dd>
+            {rp.map === null
+              ? t('common.unknown')
+              : recMapDisplay
+                ? t('confirm.mapValue', { name: recMapDisplay, id: rp.map })
+                : rp.map}
+          </dd>
+          <dt>{t('confirm.scoreCap')}</dt>
+          <dd>
+            {t('recording.scoreCapValue', { cap: num(rp.scoreCap), source: tCode(t, `recording.capSource.${rp.scoreCapSource}`) })}
+          </dd>
+          {rp.match && (
+            <>
+              <dt>{t('confirm.recordingStartedAt')}</dt>
+              <dd>{dateTime(rp.match.startedAt)}</dd>
+            </>
+          )}
+        </dl>
+      </>
+    );
+  };
 
   const renderSummary = () => {
     if (!prepared) return null;
+    if (isRecordingPrepare(prepared)) return renderRecordingSummary(prepared);
     return (
       <>
         <p className="confirm-sentence">
@@ -352,15 +412,17 @@ export default function ConfirmDialog({ i18n, server, request, mapNames = {}, on
             <p>
               <strong>{t('confirm.unknownResult', { action: actionLabel })}</strong>
             </p>
-            <p>{t('confirm.unknownResultHelp')}</p>
+            <p>{recordingRequest ? t('recording.unknownResultHelp') : t('confirm.unknownResultHelp')}</p>
           </div>
           <div className="button-row">
             <button type="button" onClick={close} autoFocus>
               {t('common.close')}
             </button>
-            <a className="button push-end" href={`/audit?server=${encodeURIComponent(server.id)}`}>
-              {t('confirm.toAudit')}
-            </a>
+            {!recordingRequest && (
+              <a className="button push-end" href={`/audit?server=${encodeURIComponent(server.id)}`}>
+                {t('confirm.toAudit')}
+              </a>
+            )}
           </div>
         </>
       )}

@@ -169,7 +169,7 @@ describe('追加・一覧・解決', () => {
 
     expect(await resolveServer(sctx, '1')).toEqual({
       ok: true,
-      data: { id: '1', auditServerId: 1, name: 'Server A', rcon: { baseUrl: 'http://rcon-a.example.com:7777', password: PW } },
+      data: { id: '1', auditServerId: 1, name: 'Server A', rcon: { baseUrl: 'http://rcon-a.example.com:7777', password: PW }, scoreCap: null },
     });
   });
 

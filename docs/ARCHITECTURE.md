@@ -1,6 +1,6 @@
 # wardogs-ops 構成(正本)
 
-作成日: 2026-10-15(JST)/ 更新: 2026-10-17(スコア記録とキルフィードの観測モード、第 17 章。Cron の同居、受信エンドポイントの認証の例外 5.8)、2026-10-17(画面構成をサイドバー + ヘッダータブに。第 9 章・13.8・15.5)、2026-10-16(複数サーバー対応、第 15 章。Worker Secrets の廃止、第 5 章・第 16 章)/ 担当: architect
+作成日: 2026-10-15(JST)/ 更新: 2026-10-17(キルフィード第 2 段階: 正規化・保存・集計・画面、17.10・8.14。第 1 段階の契約は変えず追加のみ)、2026-10-17(スコア記録とキルフィードの観測モード、第 17 章。Cron の同居、受信エンドポイントの認証の例外 5.8)、2026-10-17(画面構成をサイドバー + ヘッダータブに。第 9 章・13.8・15.5)、2026-10-16(複数サーバー対応、第 15 章。Worker Secrets の廃止、第 5 章・第 16 章)/ 担当: architect
 上位の正本: `docs/PLAN.md`(2026-10-15 改訂版)。契約: `docs/API.md`、`src/types/api.ts`、`src/types/env.ts`、`db/schema.sql`、`db/migrations/`、`wrangler.jsonc`。
 RCON の仕様は非公式資料ベース(`docs/research/wardogs-rcon.md`)。本書の「未検証」「要確認」は第 14 章の番号(R-n / C-n / I-n / M-n / K-n / U-n)で参照する。
 
@@ -437,7 +437,7 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 
 ## 8. D1 スキーマ
 
-正本は `db/migrations/`(`0001_init.sql`、`0002_servers.sql`、`0003_recordings.sql`)。`db/schema.sql` は全マイグレーション適用後の参照用のまとめ。時刻はすべて UTC epoch ミリ秒。**本番稼働後のマイグレーションは追加のみ**(表・列・インデックスの追加。表の作り直し・列の削除・CHECK の変更はしない。C-5 のとおり新しいコードがマイグレーションより一瞬先に動くため)。
+正本は `db/migrations/`(`0001_init.sql`、`0002_servers.sql`、`0003_recordings.sql`、`0004_killfeed.sql`)。`db/schema.sql` は全マイグレーション適用後の参照用のまとめ。時刻はすべて UTC epoch ミリ秒。**本番稼働後のマイグレーションは追加のみ**(表・列・インデックスの追加。表の作り直し・列の削除・CHECK の変更はしない。C-5 のとおり新しいコードがマイグレーションより一瞬先に動くため)。
 
 **0002 の書き換え(2026-10-16)**: 0002 はどの本番にも未適用(作者の本番は 0001 のみ)で利用者もまだいないため、複数サーバー(servers 等)に管理者(`admins`)と設定(`settings`)を足して 1 本に書き換えた。ローカルで旧 0002 を適用済みの D1 は作り直す(README「開発者向け」)。本番に適用した後は 0002 を変更しない。
 
@@ -556,6 +556,14 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 
 - `feed_raw_events`: `id`、`server_id`、`received_at`、`bytes`、`event_count`、`recording_id`(受信時に記録中だった試合)、`body`(受けた JSON 文字列のまま。最大 64 KiB)。索引 `(server_id, id)`、`received_at`。保持 7 日。**Steam ID・プレイヤー名を含み得る**ため、ログイン済みの運営者にだけ返す。
 - `feed_daily`(WITHOUT ROWID): 主キー `(server_id, day)`(`day` = UTC の日。`server_id = 0` は全体)、`batches`、`bytes`。1 日の上限の判定用(17.6)。
+
+### 8.14 feed_kills と 0004 で足した列(キルフィード第 2 段階。17.10)
+
+- `feed_kills`: 正規化したキル 1 件 = 1 行。`id`(INTEGER PRIMARY KEY、AUTOINCREMENT なし)、`server_id`、`recording_id`(受信時に記録中だった試合。**0 = 記録外**)、`received_at`、`event_at`、`game_time_sec`、キラー・被害者の `name`・`steam_id`・`faction`・`faction_source`、`weapon_id`・`weapon_name`、`vehicle_id`・`vehicle_name`、`flags`(ビット)、`distance_m`。索引は `(server_id, recording_id, received_at)` の 1 本。**Steam ID・プレイヤー名を含む**ためログイン済みの運営者にだけ返す。
+- トリガー: `trg_match_recordings_delete_kills`(試合の削除でその試合のキルを消す)、`trg_servers_delete_unrecorded_kills`(サーバーの削除で記録外のキルを消す)。
+- `match_samples.roster_json`: 陣営の付与用の観測(Steam ID → 陣営の添字。名前は入れない)。
+- `server_feeds.raw_enabled`(既定 1): 生データも保存するか(0 でもキルは保存する)。
+- `feed_daily` の `kills`・`other_events`・`incomplete`・`dropped_kills`: 正規化の件数(`kills` は 1 日の上限の判定にも使う)。
 
 ## 9. 画面一覧
 
@@ -708,6 +716,7 @@ kick / ban / unban / broadcast / message / map 変更 / 試合終了(`WRITE_ACTI
 - 2026-10-17 までは「準備中」の案内だけのページだった(RCON HTTP API にはキル・接続のイベントを取るルートが無く、資料上はゲームサーバーから外部へ送る `WDServerFeed` だけのため。`docs/research/wardogs-rcon.md` 2.4、未検証)。
 - 2026-10-17 のユーザー決定で、キルフィードタブは (1) スコア記録の推移のグラフ(17.9)と、(2) キルフィードの**第 1 段階: 観測モード**(受信した生データをそのまま表示。17.6)になった。キル数・ヘッドショット率などの集計は**第 2 段階**で、実サーバーで形式を確かめた後に設計する(17.10)。
 - 旧版の検討事項(受信エンドポイント、ゲーム側の設定、量の見積り、届け方)は 17.6・17.8・17.9 で決めた(14 章 K-1〜K-5 の更新を参照)。
+- 2026-10-17 のユーザー要望(参考パネルのキルフィード画面と同等の表示)で、**第 2 段階**(キルの正規化・保存・集計・画面)を 17.10 で確定した。届く本文の項目名は未確認のまま、候補名の対応表で読む。
 
 ### 9.7 frontend-pages への引き継ぎ(ファイル単位)
 
@@ -978,6 +987,9 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **C-22** Cron Triggers の環境(`env.gmkz`)への引き継ぎの有無(引き継がない前提で両方に書いた)と、配送の性質(同じ分に 2 回起き得るか・取りこぼしがあるか。どちらでも壊れない設計。17.3)。設定の反映に最大 15 分かかる(公式)ため、デプロイ直後の数分は Cron が動かないことがある。
 - **C-23** 本番の D1 で `WITHOUT ROWID` の表・部分 UNIQUE 索引(`WHERE status = 'recording'`)・`INSERT ... ON CONFLICT DO UPDATE ... WHERE ... RETURNING` が使えること(ローカルでは確認済み)。`db.batch()` の各文が「Worker 呼び出し 1 回あたりのクエリ数 50」に 1 つずつ数えられるか(数えられる前提で上限を決めた。17.3)。
 - **C-24** 本番での Cron 1 回の CPU 時間(記録中 8 台で 10 ms に収まるか)と、受信 1 件の CPU 時間(64 KiB の JSON.parse を含む)。
+- **C-25**(第 2 段階)D1 で `INSERT ... SELECT ... FROM json_each(?)` が使えるか、バインドする JSON 文字列の大きさの上限(1 バッチ 100 キルで 40 KB 程度)。使えない場合は 1 文あたりのバインド変数 100 個に収まるよう 4 行ずつの複数行 INSERT を `db.batch` で送る(クエリ数が増えるため、1 バッチの上限を下げる)。
+- **C-26**(第 2 段階)`wrangler d1 migrations apply` と D1 本番でトリガー(`CREATE TRIGGER ... BEGIN ...; END;`)が作れて動くか。トリガー内の削除の行数が書き込み行数に数えられること。動かない場合の代わりは 17.10.9。
+- **C-27**(第 2 段階)受信 1 件の正規化(長い整数の走査 + `JSON.parse` + 対応表の照合)の CPU 時間。`GET /api/killfeed/kills` で 3,000 行を返すときの CPU 時間と応答の大きさ。
 - **C-19** 本文を読まずに返した応答の直後、同じ接続の次のリクエストが 500 になる事象(開発サーバーで観測。`docs/API_TEST.md` 4 章)が本番の Workers でも起きるか。Astro 標準の origin 検査は無効化し、middleware と API は拒否前に本文を読み捨てる対策をしたが、他の早期応答(アダプタ・アセット等)で起きないかを含めて確認する。
 
 ### 多言語化(13 章)
@@ -1009,6 +1021,12 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **K-6** 受信に 4xx / 5xx を返したときのゲームの挙動(再送するか、間隔を空けるか、送信をやめるか)。設計は「上限・無効で捨てるときも 204」にしてある(17.6)。429(1 分 90 回超)・401(トークン違い)で再送が増えないかを確認する。
 - **K-7** ゲームの送信が HTTPS(workers.dev の証明書)に対応しているか。HTTP で送ってくる場合に workers.dev・カスタムドメインがどう応答するか(リダイレクトに従わない送信元だと届かない)。
 - **K-8** 1 回の送信の大きさ(64 KiB で足りるか)と頻度(約 2 秒か。1 分 90 回の上限で足りるか)。
+- **K-9**(第 2 段階。17.10.2)`killed` イベントの実際の項目名と値の形(キラー・被害者・武器・乗り物・印・距離・時刻)。17.10.2 の対応表の候補はすべて推測。特に**距離の単位**(m か、Unreal Engine の既定の cm か)と、キルごとの得点が含まれるか。観測で確かめ、`src/lib/killfeed/fields.ts` を直す。
+- **K-10** Steam ID が文字列か数値か。数値(17 桁)で届く場合は `JSON.parse` で桁が落ちるため、16 桁以上の整数を文字列として読む前処理を入れてある(17.10.2 の 1)。前処理で囲んだ数(`bigIntegersQuoted`)で確かめる。
+- **K-11** イベントに陣営(チーム)が含まれるか。含まれない場合はプレイヤー一覧の観測から付ける(記録中のみ。17.10.4)。含まれる場合、`/v1/players` の `faction` と同じ表記か(違えばチームキルの判定は出所が同じものだけで行う)。
+- **K-12** 自殺・環境による死亡・チームキルの表し方(キラーが空か、被害者と同じか、専用の項目があるか)。
+- **K-13** ゲーム内時刻(参考パネルの `GAME 52:31`)の項目と意味(試合開始からの経過か、残り時間か)。
+- **K-14** `killed` 以外の種類のイベントが届くか、届くならその量(キル以外は保存せず件数だけ数える。17.10.2)。
 
 ### 設計上の判断(ユーザー確認事項)
 
@@ -1042,6 +1060,16 @@ Secrets 廃止前(2026-10-16 午前)との比較: 以前は RCON パスワード
 - **U-22** サイドバーの試合の要点に陣営ごとの人数を足すか(9.4 の注記。今回は実装しない)。
 - **U-23** サイドバーに「記録中」の印を出すか(出すと `/api/matches` の取得が 30 秒ごとに増える。今回は出さない。17.9)。
 - **U-24** 同時に記録できるのは 8 台まで(Cron 1 回の D1 クエリ数の上限から。17.3)。キルフィードの生データの保存上限(サーバーごと 1 日 1,000 件・4 MiB、全体 4,000 件・16 MiB、7 日)。
+
+以下は 2026-10-17 のキルフィード第 2 段階(17.10)で architect が決めた点(ユーザー確認待ち。推奨どおりなら決定事項として扱う)。
+
+- **U-25** 集計はブラウザで行い、集計用・JSON 出力用の API は作らない(キルの一覧の API 1 本。17.10.6)。推奨: このまま(リクエストが少なく、画面と JSON の数字が必ず一致する)。
+- **U-26** 正規化したキルを受信時に `feed_kills` に保存し、生データの保存は別のスイッチで止められる(既定オン)。推奨: 形式を確かめたら生データの保存をオフにする(書き込み・容量の節約)。
+- **U-27** 陣営は「イベントの値 → 記録中のサンプルのプレイヤー一覧(3 分以内)」の順で付け、記録外のキルは陣営不明(「?」)。推奨: このまま(記録外でも陣営を付けるには Cron が常にプレイヤー一覧を取る必要があり、RCON とクエリが増える)。
+- **U-28** 記録外のキルは直近 500 件・7 日だけ見せる。試合に属するキルは試合と同じ保持(直近 5 試合 + 記録中・30 日)。
+- **U-29** キルの保存の上限: 1 バッチ 100 件、1 日サーバーごと 3,000 件・全体 8,000 件(超えた分は捨てて件数だけ数える)。
+- **U-30** 現在のスコアはサイドバーと共有の 30 秒ごとの取得を使う(参考パネルの約 15 秒ごとより遅い)。キルの差分も 30 秒ごと。推奨: このまま(リクエスト数を増やさない)。
+- **U-31** 対応表を直した後に、保存済みの生データ(7 日以内)からキルを作り直す機能は入れない(必要なら第 3 段階。書き込みが一度に増えるため、上限と確認の設計が要る)。
 
 以下は 2026-10-16 の Worker Secrets 廃止に関するもの。U-11 はユーザー決定、U-12 以降は architect が決めた点(ユーザー確認待ち。推奨どおりなら決定事項として扱う)。
 
@@ -1255,7 +1283,7 @@ D1 必須化(2026-10-16)で、登録サーバーが使えない段階は無く�
 | 保持 | サーバーごとに記録中 1 + 終了済み 5 試合。それより古い試合・30 日より古い試合はサンプルごと削除(17.7) |
 | 人数スナップショットとの関係 | **併存**(`server_snapshots` は変えない。17.1) |
 | Cron の置き場所 | **Astro の Worker に同居**(`src/worker.ts` を `main` にし、`fetch` は Astro の `handle` に委譲、`scheduled` を足す。17.4) |
-| キルフィード | **第 1 段階: 観測モード**。`POST /api/ingest/events`(サーバーごとのトークンで認証。ログイン・CSRF 検査の対象外)で受けた本文を、上限付きでそのまま `feed_raw_events` に 7 日保存し、キルフィードタブで最新の生データを見せる。集計(第 2 段階)は実サーバーで形式を確かめてから(17.10) |
+| キルフィード | **第 1 段階: 観測モード**。`POST /api/ingest/events`(サーバーごとのトークンで認証。ログイン・CSRF 検査の対象外)で受けた本文を、上限付きでそのまま `feed_raw_events` に 7 日保存し、キルフィードタブで最新の生データを見せる。集計(第 2 段階)は 17.10 で確定(本文の項目名は未確認のまま、候補名の対応表で読む。第 1 段階の契約は変えず追加のみ) |
 | 操作の記録先 | `record_start` / `record_stop` / 自動終了 / トークンの発行・取り消しは `settings_audit_log`(操作ログの「設定変更」タブ)。`audit_log.event` の CHECK に値を足せないため(8.1、M-6。要確認 U-19) |
 
 ### 17.1 データモデル(0003)
@@ -1513,27 +1541,272 @@ Token=<発行したトークン>
 
 **カタログ**(frontend-pages が足すもの。architect が足したものは 17.11): `recording.*`(概要タブの節)、`killfeed.*`(タブ。`killfeed.comingSoon` / `killfeed.why` は観測モードの説明に書き換え)、`chart.*`(切り替え・軸・凡例・表)、`feed.*`(設定タブの節と生データ)、`settings.recording.*`。
 
-### 17.10 第 2 段階(集計)の想定 — 実サーバーで形式を確かめた後
+### 17.10 第 2 段階: キルの正規化・集計・画面(2026-10-17)
 
-**想定するイベントの項目**(資料に形式の記載は無い。**すべて要確認 K-1**。観測モードで集めた生データで確定させる):
+2026-10-17 のユーザー要望(参考パネルのキルフィード画面と同等の表示)を受けて確定した。**第 1 段階(17.6 の受信の HTTP 契約・トークン・`feed_raw_events`・`GET /api/feed/raw`)は変えず、追加のみ**。契約は `src/types/api.ts`(「キルフィード 第 2 段階」の節)、`db/migrations/0004_killfeed.sql`、`docs/API.md` 11 章。届く本文の実際の項目名は**未確認のまま**(K-1、K-9〜K-14)で、本節は「候補名の対応表で読み、読めない項目は null」にして、観測で本物を見たら対応表の 1 か所を直せば済む形にする。
 
-| 項目 | 想定 | 使い道 |
+#### 17.10.0 決定の要約
+
+| 項目 | 決定 |
+|---|---|
+| 正規化 | 受信時に本文を `normalizeFeedBatch(body)`(`src/lib/killfeed/normalize.ts`)で `KillEvent` に変換する。項目ごとに**候補名の対応表**(`src/lib/killfeed/fields.ts` の `KILL_FIELD_CANDIDATES`。1 か所)を先頭から試し、読めない項目は null。`killed` 以外の種類は保存せず件数だけ数える(17.10.2) |
+| 保存 | **正規化したキルを `feed_kills` に 1 キル 1 行で保存**する(生データから都度計算しない)。生データの保存は別のスイッチ(`server_feeds.raw_enabled`)で止められる(17.10.3) |
+| 陣営 | イベントに陣営があればそれ、無ければ**受信時の直近のプレイヤー一覧の観測**(Cron がサンプルと同じ行に書く `match_samples.roster_json`。3 分以内)から Steam ID で引く。どちらも無ければ不明(画面は「?」)。チームキルは両方の陣営が同じ出所で分かるときだけ判定(17.10.4) |
+| 試合への割り当て | 受信時に記録中の試合(`match_recordings`)に割り当てる(第 1 段階の `recording_id` と同じ判定)。記録していない間のキルは**記録外**(`recording_id = 0`)として直近 500 件・7 日だけ見られる(17.10.5) |
+| 集計 | **ブラウザで計算する**。API は試合のキルの一覧(最大 3,000 件)を 1 回で返し、記録中は 30 秒ごとに差分だけ取る。統計カード・時間帯別・武器別・距離・上位・最長・フィルタ・検索・JSON 出力はすべてブラウザ側(`src/components/lib/killstats.ts`)。集計用・出力用の API は作らない(17.10.6) |
+| API(追加) | `GET /api/killfeed/kills`(一覧と差分)、`GET /api/feed/raw/:id/normalized`(保存済みの生データに今の対応表で正規化を試す。対応表の見直し用)、`PUT /api/servers/:id/feed` の `rawEnabled`(API.md 11 章) |
+| 画面 | 参考パネルと同じ並び: 試合の選択 → 現在のスコア・推移 → 統計カード 5 枚 → 時間帯別 → 最長キル → 上位のプレイヤー・武器 → 距離 → キルログ(フィルタ 8 種・検索・JSON 出力)→ 生データ(観測モード)。外部ライブラリ無しの SVG、375px 対応(17.10.7) |
+| 上限 | 1 バッチ 100 キル、1 日サーバーごと 3,000 キル・全体 8,000 キル(超えた分は 204 で受けて捨て、件数を数える)(17.10.8) |
+| 保持 | 試合に属するキルは試合と同じ(直近 5 試合 + 記録中・30 日。試合の削除でトリガーが消す)。記録外は 7 日(17.10.9) |
+
+#### 17.10.1 想定スキーマ(`KillEvent`)
+
+参考パネルの表示(項目名は参考パネルの表示で、本文のフィールド名ではない)から、1 キルに要る項目を決めた。型の正本は `src/types/api.ts` の `KillEvent`。
+
+| 項目 | 型 | 参考パネルの表示 | 備考 |
+|---|---|---|---|
+| `receivedAt` | 受信時刻 | 受信時刻(UTC) | Worker の時刻。時間帯別・試合への割り当てはこれ |
+| `eventAt` | 時刻 / null | − | 本文に時刻があり、受信の前後 1 日以内のときだけ |
+| `gameTimeSec` | 秒 / null | `GAME 52:31` | 試合開始からの経過と見られる(K-13) |
+| `killer` / `victim` | `{ name, steamId, faction, factionSource }` / null | 名前 + 陣営アイコン | `steamId` は `STEAM_ID_PATTERN` に合うものだけ。`killer = null` は環境による死亡・読めない |
+| `weapon` | `{ id, name }` | 武器名、または `WEPN_031` のような内部 ID | 両方 null = 不明 |
+| `vehicle` | `{ id, name }` / null | `TNK_01 · Anti Air`(乗り物 + 兵装) | 表示は「乗り物 · 武器」 |
+| `flags` | `headshot` `penetration` `roadkill` `vehicleExplosion` `suicide` | HEADSHOT 等の印 | `KILL_FLAGS` |
+| `teamkill` | 真偽 / null | TEAMKILLS | 読み取り時に Worker が付ける(17.10.4) |
+| `distanceM` | m / null | 距離(不明あり) | 単位は要確認(K-9) |
+
+キルごとの得点は持たない(参考パネルにも「フィードに無い」とある。届くかは K-9 で確認)。
+
+#### 17.10.2 正規化層(`src/lib/killfeed/`)
+
+**入口**: `normalizeFeedBatch(bodyText, opts) → { envelope, kills: NormalizedKill[], counts: { kill, other, incomplete, invalid }, bigIntegersQuoted, diagnostics? }`。1 イベントは `normalizeFeedEvent(value) → FeedNormalizedEvent`(型は `src/types/api.ts`)。純粋関数で D1・時刻に依存しない(受信時刻は引数)。受信(17.10.3)と正規化の試行の API(API.md 11.2)が同じ関数を使う。
+
+**1. 本文を読む(長い整数を守る)**: 17 桁の Steam ID が引用符無しの数値で届くと、`JSON.parse` で桁が落ちる(2^53 を超えるため。K-10)。そこで JSON の文字列の外にある **16 桁以上の整数**(小数点・指数が続かないもの)を、解析の前に引用符で囲む(文字列の内外とエスケープを追う 1 回の走査。64 KiB で 1 ms 未満の見込み)。囲んだ数を `bigIntegersQuoted` に数える。生データの保存(`feed_raw_events.body`)は受けた文字列のまま(変えない)。
+
+**2. 外側の形**(`envelope`): 配列 → 各要素 / `events` 配列を持つオブジェクト → 各要素 / 種類の項目を持つオブジェクト → 1 件(`single`)/ それ以外 → 0 件(`unknown`)。オブジェクトでない要素は `invalid`。
+
+**3. 種類の判定**: 種類の候補(下表 `type`)の値を、英数字以外を除いて小文字にし、`killed` `kill` `playerkilled` `death` `playerdied`(`KILL_EVENT_TYPES`)なら kill。それ以外の値は `other`(キルログに出さず件数だけ)。種類の項目が**どの候補にも無く**、被害者が読めるなら kill とみなす(資料では種類は `killed` だけのため)。
+
+**4. 対応表**(`KILL_FIELD_CANDIDATES: Record<KillFieldName, readonly FieldCandidate[]>`。`FieldCandidate = string | { path: string; scale?: number }`。パスはドット区切り。**先頭から試し、型の検証に通った最初の値を使う**。下の候補はすべて推測で、観測で確定させる):
+
+| 項目(`KillFieldName`) | 候補(この順) | 検証・変換 |
 |---|---|---|
-| 種類 | `killed`(資料ではこれのみ) | 種類ごとに振り分け |
-| 時刻 | UTC の ISO 8601 か epoch | 時間帯別、試合への割り当て(無ければ受信時刻で代用) |
-| 倒した人 | 名前・Steam ID・陣営 | キル数、キルログ |
-| 倒された人 | 名前・Steam ID・陣営 | デス数、キルログ |
-| 武器 | id または名前 | 武器別 |
-| 距離 | m などの数値 | 最長キル、距離分布 |
-| ヘッドショット | 真偽 | ヘッドショット率 |
-| 同じ陣営か(フレンドリーファイア) | 真偽、または陣営の比較 | 除外・別集計 |
+| `type` | `type` `event` `eventType` `kind` `action` | 文字列(64 文字まで) |
+| `eventAt` | `timestamp` `time` `at` `occurredAt` `createdAt` `utc` `ts` | ISO 8601 の文字列、または数値(10^12 以上はミリ秒、10^9 以上は秒)。受信の前後 1 日を外れたら null |
+| `gameTimeSec` | `gameTime` `gameTimeSec` `matchTime` `matchSeconds` `elapsed` `elapsedSec` `roundTime` | 0〜86,400 の数値(秒)、または `m:ss` / `h:mm:ss` の文字列 |
+| `killerName` | `killer.name` `killer.playerName` `killer.displayName` `killer.nick` `attacker.name` `attacker.playerName` `instigator.name` `killerName` `killer_name` `attackerName` `attacker_name` `killer`(文字列で 17 桁でないとき) | 文字列。制御文字を除き 64 文字まで。空なら null |
+| `killerSteamId` | `killer.steamId` `killer.steamID` `killer.steam_id` `killer.steamId64` `killer.playerId` `killer.uniqueId` `killer.id` `attacker.steamId` `attacker.id` `instigator.steamId` `killerSteamId` `killer_steam_id` `killerId` `attackerSteamId` `killer`(文字列で 17 桁のとき) | 文字列にして `STEAM_ID_PATTERN`。合わなければ次の候補 |
+| `killerFaction` | `killer.faction` `killer.team` `killer.teamName` `killer.side` `attacker.faction` `attacker.team` `killerFaction` `killerTeam` `killer_team` `attackerTeam` | 文字列(数値は 10 進の文字列にする)。64 文字まで |
+| `victimName` / `victimSteamId` / `victimFaction` | 上の 3 行の `killer` を `victim` `killed` `target` `dead` `player` に、`attacker` / `instigator` を除き、平らな名前を `victimName` `victim_name` `victimSteamId` `victim_steam_id` `victimId` `victimFaction` `victimTeam` `victim_team` にしたもの | 同上 |
+| `weaponId` | `weapon.id` `weapon.code` `weapon.class` `weaponId` `weapon_id` `weaponClass` `damageType` | 文字列。64 文字まで |
+| `weaponName` | `weapon.name` `weapon.displayName` `weaponName` `weapon_name` `weapon`(文字列のとき) `vehicleWeapon` `seatWeapon` `cause` `causeName` | 同上 |
+| `vehicleId` | `vehicle.id` `vehicle.code` `vehicleId` `vehicle_id` `killerVehicle.id` | 同上 |
+| `vehicleName` | `vehicle.name` `vehicle.displayName` `vehicleName` `vehicle_name` `vehicle`(文字列のとき) `killerVehicle.name` | 同上 |
+| `distanceM` | `distanceM` `distance_m` `distanceMeters` `distance` `range` `{ path: 'distanceCm', scale: 0.01 }` `{ path: 'distance_cm', scale: 0.01 }` | 0 以上 `KILLFEED_DISTANCE_MAX_M` 以下の数値(文字列の数値も可)。小数第 1 位に丸める。`distance` の単位(m か cm か)は K-9 |
+| `headshot` | `headshot` `isHeadshot` `headShot` `hs` | 真偽: `true`/`false`、`1`/`0`、`"true"`/`"false"` |
+| `penetration` | `penetration` `isPenetration` `penetrated` `wallbang` | 同上 |
+| `roadkill` | `roadkill` `isRoadkill` `roadKill` | 同上 |
+| `vehicleExplosion` | `vehicleExplosion` `isVehicleExplosion` `vehicle_explosion` | 同上 |
+| `suicide` | `suicide` `isSuicide` | 同上 |
+| `flagList` | `flags` `tags` `modifiers` `hitFlags` | 文字列の配列、または区切り文字を含む 1 つの文字列。各語を大文字・英数字だけにして `HEADSHOT` / `PENETRATION`・`WALLBANG` / `ROADKILL` / `VEHICLEEXPLOSION` / `SUICIDE` を印に足す(個別の真偽の項目と OR) |
 
-**集計の方針**(案):
+**5. 組み立て**:
 
-- 受信時に本文を解釈し、1 キル 1 行の `feed_kills`(0004 で追加。`recording_id`、時刻、倒した人・倒された人の Steam ID と名前と陣営、武器、距離、ヘッドショット)に入れる。生データの保存(`feed_raw_events`)は観測が終わったら止められるようにする。
-- 集計(キル数・ヘッドショット率・最長キル・時間帯別・武器別・距離分布)は**読み取り時に SQL で**行う(試合 1 つ分。事前集計の表は作らない)。キルログは新しい順のページ送り。JSON 出力は `GET /api/matches/:id/kills.json`(ログイン必須。ダウンロード用の `Content-Disposition`)。
-- 書き込みの見積り: 64 人の試合で 3 時間に数千キル → 1 試合数千〜1 万行(索引込み)。上限 8 台が同時に記録すると D1 の書き込み枠の大半を使うため、「キルを保存するのは記録中の試合だけ」「1 日の上限」を設ける。
-- Steam ID・プレイヤー名を保存するため、保持期間は試合と同じ(直近 5 試合・30 日)にする。
+- 当事者は「名前・Steam ID のどちらかがある」ときだけオブジェクトにする(両方無ければ null)。陣営を本文から得たら `factionSource = 'event'`。
+- **自殺**: `suicide` の印、または両者の Steam ID が分かって同じ。自殺のときは `killer` を残す(画面は「自殺」の印)。
+- **incomplete**: kill と判定したが被害者もキラーも読めない → 保存しない(`incomplete` に数える。対応表の見直しの印)。
+- 1 バッチの kill は先頭から `KILLFEED_MAX_KILLS_PER_BATCH`(100)件まで。超えた分は `droppedKills`。
+- 試行の API 用に、項目ごとに使った候補(`matched`)と、どの候補にも使われなかった最上位のキー(`unmappedKeys`、値は含めない)を返せるようにする(`opts.diagnostics`)。受信の処理では作らない(CPU の節約)。
+
+**直し方**(観測の後): キルフィードタブの「受信した生データ」で 1 件を選び「正規化の結果」(API.md 11.2)を見る → 読めていない項目の実際のキー名を `fields.ts` の該当行の**先頭**に足す → テスト(`normalize.test.ts` に本物の形のダミーを 1 件足す)→ デプロイ。直す前に保存したキルは直らない(生データからの作り直しは要確認 U-31)。
+
+#### 17.10.3 受信の処理の追加と保存(`feed_kills`)
+
+17.6 の表の 1〜10(トークン・レート制限・形式・空のバッチ・`enabled`)は**そのまま**。応答(204 / 4xx / 5xx)も変えない。10 の後を次のようにする:
+
+| 順 | 処理 | 備考 |
+|---|---|---|
+| 11 | `normalizeFeedBatch`(17.10.2) | CPU のみ。8 の JSON の解析をこれに置き換えてよい(`event_count` の数え方は変えない) |
+| 12 | **生データ**: `raw_enabled = 1` なら 17.6 の 11・12(1 日の上限 → `feed_raw_events` に INSERT)。上限で断られたら**生データだけ**捨てる(`last_dropped_reason` は従来どおり) | 第 1 段階では上限でバッチ全体を捨てていたが、キルの保存は次の 13 の上限に従う |
+| 13 | **キル**: kill が 1 件以上なら、日次カウンタ(`feed_daily.kills`)をサーバー → 全体(`server_id = 0`)の順に `INSERT ... ON CONFLICT (server_id, day) DO UPDATE SET kills = kills + excluded.kills WHERE kills + excluded.kills <= ?上限 RETURNING kills` で足す。行が返らなければそのバッチのキルを全部捨てる(`droppedKills`) | 一部だけ保存はしない(単純さ優先) |
+| 14 | 陣営を付ける(17.10.4)。記録中の試合があり、陣営の無い当事者がいるときだけサンプルを 1 行読む | isolate 内に 30 秒キャッシュ |
+| 15 | `INSERT INTO feed_kills (...) SELECT json_extract(value, '$.…'), … FROM json_each(?)` の **1 文**でまとめて入れる(バインドは JSON の文字列 1 つ) | D1 のバインド変数の上限(1 文 100 個)を避けるため。`json_each` の可否・大きさの上限は C-25 |
+| 16 | `other` / `incomplete` / `droppedKills` の件数は isolate 内で足し、受信の状況の更新(1 分に 1 回まで。17.6)と同じ機会に `feed_daily` の `other_events` / `incomplete` / `dropped_kills` に UPSERT で足す | 1 イベントごとに書かない(キル以外のイベントが 2 秒ごとに届いても書き込みが増えない) |
+
+- D1 の失敗(12・13・15)は従来どおり 500 `INTERNAL_ERROR`。13 で数えた後に 15 が失敗すると、その分だけ上限が早く来る(害は無い)。
+- Workers Logs は従来の 1 行に `kills`(保存数)・`other`・`incomplete` の件数だけを足す(名前・Steam ID は出さない)。
+- `enabled = 0`・サーバーが無効のときは従来どおり何も保存しない。
+
+**`feed_kills` の列**(0004。8.14): `id`(INTEGER PRIMARY KEY。AUTOINCREMENT にしない)、`server_id`、`recording_id`(0 = 記録外)、`received_at`、`event_at`、`game_time_sec`、キラーと被害者の `name`・`steam_id`・`faction`・`faction_source`、`weapon_id`・`weapon_name`、`vehicle_id`・`vehicle_name`、`flags`(ビット: 1 headshot / 2 penetration / 4 roadkill / 8 vehicleExplosion / 16 suicide)、`distance_m`。索引は `(server_id, recording_id, received_at)` の **1 本だけ**(一覧・差分・試合の削除・記録外の期限切れの削除をすべてこれで引く。書き込みは 1 キル = 本体 1 + 索引 1)。
+
+**生データから都度計算しない理由**: (1) 陣営は「受信した時点のプレイヤー一覧」で決まるので、受信時に決めて残す必要がある。(2) 生データは 7 日・観測が終われば止める前提で、試合(30 日)より短い。(3) 1 試合 300 キルでも本文は数十〜数百行あり、表示のたびに解析すると読み取り行数と CPU が表示回数に比例して増える。(4) 1 キル 1 行なら一覧の読み取りは索引の範囲検索 1 回で済む。
+
+#### 17.10.4 陣営の付与
+
+参考パネルと同じく、イベントに陣営が無い場合は**直近のプレイヤー一覧の観測**から付ける。
+
+- **観測の置き場所**: Cron(17.3)が記録中の試合ごとに毎分 `GET /v1/players` を取っているので、そのサンプルの行に `roster_json`(0004 で `match_samples` に足した列)として `{"f":["<陣営名>",…],"p":{"<SteamID>":<f の添字>,…}}` を書く(**プレイヤー名は入れない**。最大 `KILLFEED_ROSTER_MAX_PLAYERS` 人。`/v1/players` が取れない・陣営が無ければ NULL)。**同じ INSERT の列が 1 つ増えるだけで、Cron のクエリ数は増えない**(17.3 の上限 50 に対して余裕が無いため、別の表にはしない)。
+- **引き方**: 受信時、記録中の試合があれば `SELECT taken_at, roster_json FROM match_samples WHERE recording_id = ? ORDER BY bucket_minute DESC LIMIT 1`(主キーで 1 行)。`taken_at` が受信時刻から `KILLFEED_ROSTER_MAX_AGE_MS`(3 分)以内なら、Steam ID で陣営を引き `factionSource = 'roster'`。見つからない・古い・記録外 → null(画面は「?」)。
+- **チームキル**(`teamkill`、読み取り時に付ける): 自殺でなく、両者の陣営が null でなく、**出所が同じ**(両方 `event` か両方 `roster`)なら「同じ陣営か」。それ以外は null(イベントの陣営とプレイヤー一覧の陣営の表記が同じとは限らないため。R-22 と同種)。統計カードには判定できなかった件数も出す。
+- 記録外のキルは陣営が付かない(Cron がプレイヤー一覧を取っていないため)。これは画面の注記で説明する。記録外でも陣営を付けたい場合は第 3 段階(要確認 U-27)。
+
+#### 17.10.5 試合との紐づけ・記録外
+
+- 受信時に記録中の試合(第 1 段階で `feed_raw_events.recording_id` を決めているのと同じ判定)があればその id、無ければ 0(記録外)。イベント自体の時刻(`eventAt`)では割り当て直さない(届かない可能性が高く、時計のずれもあり得るため)。
+- 試合の開始前・終了後の数秒のずれ(Cron は 1 分ごと、受信は約 2 秒ごと)で、境目のキルが記録外に入ることがある。許容する(画面の注記には出さない)。
+- 記録外は、試合の選択に「記録外のキル」として常に出し、直近 `KILLFEED_UNRECORDED_MAX`(500)件を見せる(集計も 500 件で行う)。
+
+#### 17.10.6 集計(ブラウザで行う)
+
+**判断**: `GET /api/killfeed/kills` が試合のキルを全件(上限 3,000、通常 300 程度・100 KB 前後)返し、集計・絞り込み・検索・JSON 出力は**ブラウザで**行う。集計用(summary)・出力用(export)の API は作らない。根拠:
+
+1. **リクエストが 1 本で済む**。SQL で集計すると「統計・時間帯・武器・距離・上位・最長」の 6 種類のクエリ(または 6 本の API)になり、絞り込みや棒の選択のたびに取り直しが要る。ブラウザなら手元の配列を数え直すだけ。
+2. **D1 の読み取り行数はほぼ同じ**。SQL の集計でも試合のキルを全部走査するので、1 試合 300 行を読むのはどちらも同じ。差分の取得(30 秒ごと)は新しい行だけを読む。
+3. 集計の定義(何をキルに数えるか、チームキルの判定)を 1 か所(`src/components/lib/killstats.ts`)に置け、JSON 出力と画面の数字が必ず一致する。単体テストもしやすい(純粋関数)。
+4. 上限の 3,000 件でも 1 MB 程度で、集計は数 ms。それを超える試合は 3 時間・上限 3,000/日のため想定しない(超えたら `truncated` と表示)。
+
+**定義**(`summarizeKills(kills, { origin, end })` → `KillfeedSummary`):
+
+| 項目 | 定義 |
+|---|---|
+| キル | キラーがいて自殺でないイベント(チームキルを含む) |
+| デス | 被害者がいるイベント(自殺・環境による死亡を含む) |
+| 自殺 | `flags.suicide` |
+| ヘッドショット率 | キルのうち `flags.headshot` の割合(キル 0 なら「−」)。分子の件数も出す |
+| 最長キル | 距離が分かるキルの最大(同じなら先のもの)。距離が分かる件数も出す |
+| 関わったプレイヤー | キラー・被害者のユニークな Steam ID の数(Steam ID が無い当事者は数えない) |
+| チームキル | `teamkill === true` の件数。判定できなかった(null の)キルの件数も出す |
+| 時間帯別 | 起点(試合の開始時刻。記録外は最初のキルの受信時刻)を分に切り捨て、`KILL_TIME_BUCKET_MINUTES` のうち棒が 36 本以下になる最小の幅で区切る。終点は試合の終了時刻(記録中は現在、記録外は最後のキル)。キルとヘッドショットの数。キルの無い棒も出す |
+| 上位のプレイヤー | キラーの Steam ID(無ければ名前)ごとにキル、被害者ごとにデス。キル数の多い順、同数はデスの少ない順に 10 人。K/D = キル ÷ デス(デス 0 ならキル数) |
+| 武器・原因 | 「乗り物 id(名前)+ 武器 id(名前)」ごとのキル数とヘッドショット数。多い順に 10 件 |
+| 距離 | `<10` `10–25` `25–50` `50–100` `100–200` `200+`(m。下限を含む)。距離不明は除き、平均も出す |
+
+**絞り込み**(`filterKills(kills, filter, query, bucket)`): `KILL_FILTERS` の 8 種(1 つ選択)× 検索語(NFKC・小文字にして、名前・Steam ID・武器と乗り物の id と名前の部分一致。64 文字まで)× 時間帯の棒(選んだときだけ)。集計(統計カード等)は**絞り込み前の全件**で計算する(参考パネルと同じ。絞り込みはキルログだけに効く)。
+
+**JSON 出力**(`buildKillfeedExport(...)` → `KillfeedExport`): 試合の要約・サンプル(推移)・集計・全件のキル。`Blob`(`application/json`)を `a[download]` で保存する。ファイル名は `killfeed-s<サーバー id>-<試合 id または unrecorded>-<YYYYMMDD-HHmm>.json`(日時は `TIMEZONE`)。サーバー名はファイル名に入れない。ボタンの近くに「Steam ID とプレイヤー名が含まれます」と書く。
+
+#### 17.10.7 画面(キルフィードタブ `/killfeed`)
+
+`src/components/KillfeedPanel.tsx` に第 2 段階の節を足す(第 1 段階の推移のグラフ・生データの一覧はそのまま使う)。上から:
+
+1. **試合の選択**(既存): 「現在の試合(記録中)」+ 直近 5 試合 + **「記録外のキル」**(トークン発行済みのとき)。
+2. **現在のスコア**: 記録中の試合はサイドバーと共有の `/api/status`(`useSharedStatus`。30 秒ごと。**追加のリクエストは無い**)の `factionScores`。終了済みは `match.lastScores`(「試合終了時のスコア」)。記録外は出さない。参考パネルの約 15 秒ごとではなく 30 秒ごと(`POLL_MIN_INTERVAL_SEC`)。
+3. **スコアの推移**(既存の `ScoreChart`)。
+4. **統計カード 5 枚**: キル(デス・自殺)、ヘッドショット率(件数)、最長キル(距離が分かる件数)、関わったプレイヤー(Steam ID の数)、チームキル(判定できない件数)。幅 768px 以上は 5 列、未満は 2 列(5 枚目は全幅)。
+5. **時間帯別のキル**(`KillTimelineChart.tsx`、SVG): キルの棒にヘッドショットを重ねた積み上げ(ヘッドショットは塗り + 斜線の模様で、色だけで区別させない)。棒は `<g role="button" tabindex="0" aria-pressed>`(Enter / Space で選択・解除)。選ぶとキルログを絞り込み、「{start}〜{end} のキルを表示しています」と解除ボタンを出す。横軸は時刻(`formatTime`、`TIMEZONE`)、目盛り 4〜6 本。下に表(折りたたみ)を置く。
+6. **記録された最長キル**: 距離、キラー → 被害者(陣営の印付き)、武器・原因、時刻、印。
+7. **上位のプレイヤー**(表: プレイヤー・K・D・K/D。見出しの略号には `abbr title` で「キル」等)と**武器・原因**(表: 武器・キル・HS)。768px 以上は横に 2 つ、未満は縦に並べる。
+8. **距離**(`KillDistanceChart.tsx`、SVG の横棒 6 本 + 数値のラベル)と平均、「距離が分からないキルは含めていません」。
+9. **キルログ**: フィルタのボタン 8 個(`aria-pressed`、横に折り返す)、検索欄(`type="search"`、200 ms で反映)、「JSON で書き出す」、件数(「{shown} / {total} 件」)。新しい順に 50 行ずつ(「さらに表示」)。
+   - 1 行: 受信時刻(秒まで)とゲーム内時刻(`m:ss`。あれば)/ キラー(陣営の印 + 名前)/ 武器・原因(乗り物があれば「乗り物 · 武器」、名前が無ければ内部 ID)/ 印(ヘッドショット等。チームキルも印として出す)/ 被害者(陣営の印 + 名前)/ 距離(「距離不明」)/「詳細」。
+   - 768px 以上は列を揃えた行(CSS grid)、未満はカード(1 行目: 時刻、2 行目: キラー → 被害者、3 行目: 武器・印・距離)。横スクロールを出さない。長い名前は折り返す(`overflow-wrap: anywhere`)。
+   - 「詳細」は `<details>` でその場に開く: Steam ID(全桁。U-3)、陣営と出所(`killfeed.factionSource.*`)、武器・乗り物の内部 ID、イベントの時刻、番号。
+   - キラーが null は「(環境・不明)」、名前が null は「(名前不明)」。
+10. **今日の受信**: 保存したキル・キル以外・読み取れなかったキル・上限で捨てた件数(`today`)。読み取れなかったキルがあれば対応表の見直しを促す文(`killfeed.ingest.incompleteHelp`)。
+11. **受信した生データ**(既存の `FeedRawList`): 各件に「正規化の結果」ボタンを足し、押すと `GET /api/feed/raw/:id/normalized` の結果(本文の形・件数・イベントごとの結果と読み取れた項目・使われなかった項目名)を表で見せる。
+12. **この画面について**(注記): キルごとの得点は出していない、陣営の付け方と「?」、距離は分かるものだけ、項目名は未確認、時間帯は受信時刻。
+
+**陣営の印**: `factions`(応答。試合の最後のサンプルの陣営の順)の添字で、推移のグラフと同じ配色(最大 3 + その他。`ops.css` のトークン)の小さな印に、陣営名の先頭 2 文字(`Array.from` で数える)を書く。`title` と読み上げ用の文字に陣営名の全体。不明は「?」(読み上げは「陣営不明」)。
+
+**更新**: 記録中の試合・記録外を表示している間、`KILLFEED_POLL_SEC`(30 秒)ごとに `after=<cursor>` で差分を取り、配列の末尾に足して集計し直す(表示中のタブが隠れている間は止める。既存の `useAutoRefresh` に従う)。差分が `truncated` なら全件を取り直す。応答の `match.status` が `ended` になったら更新を止める。終了済みの試合は 1 回だけ取る。
+
+**文言**: すべてカタログ(`killfeed.scope.*` `killfeed.score.*` `killfeed.stats.*` `killfeed.timeline.*` `killfeed.longest.*` `killfeed.top.*` `killfeed.weapons.*` `killfeed.distance.*` `killfeed.log.*` `killfeed.filter.*` `killfeed.flag.*` `killfeed.faction.*` `killfeed.factionSource.*` `killfeed.export.*` `killfeed.notes.*` `killfeed.ingest.*` `killfeed.normalize.*` `killfeed.normalizeResult.*` `killfeed.envelope.*` `killfeed.field.*`、設定タブの `feed.rawEnabled.*` `feed.kills.*`。architect が追加済み。型で全コード必須のものあり)。参考パネルの英語の見出し(`PLAYER KILLS` 等)はそのまま使わず日本語にする。数値・割合・時刻は `Intl`(13.4)。「スポンサー」等の表記・意匠は出さない。
+
+**設定タブ**(`/servers` のキルフィードの節に追加): 「受信した生データも保存する」(`rawEnabled`。既定オン。説明 `feed.rawEnabled.help`)、今日保存したキルと上限(`feed.kills.todayValue`)、保持(`feed.kills.retention`)。
+
+#### 17.10.8 無料枠の見積り(17.8 への追加)
+
+**D1 の書き込み(10 万行/日)**
+
+| 発生源 | 計算 | 1 日の最大 |
+|---|---|---|
+| キルの行 | 1 キル = 本体 1 + 索引 1。全体の上限 8,000 キル | 16,000 |
+| キルの日次カウンタ | キルを含むバッチごとにサーバー・全体の 2 行(最悪 1 バッチ 1 キル) | 16,000 |
+| その他の件数 | 1 台 1 分 1 回まで | 1 台 1,440 |
+| サンプルの `roster_json` | 既存の行に列が増えるだけ(行数は増えない) | 0 |
+| 試合の削除(トリガー) | 削除するキルの行 + 索引(1 試合 300 キルなら 600) | 数千 |
+
+- キルの分の最悪は約 3.4 万行。17.8 の最悪(生データ約 2 万を含めて約 4.7 万)と合わせて**約 8.1 万行**で上限の内側。**形式を確かめたら生データの保存をオフ**(`rawEnabled = false`)にすると約 6.1 万行になる。設定タブと README で案内する。
+- 通常(1 台、1 日 3 試合 × 300 キル): キル 1,800 + カウンタ最大 1,800 ≒ 3,600 行。
+
+**D1 の読み取り(500 万行/日)**: 全件の取得は 1 試合 300〜3,001 行 + 数行。差分の取得は新しい行 + 数行(30 秒ごと、1 タブ 8 時間で約 960 回 × 10 行 ≒ 1 万行)。受信はサンプル 1 行(30 秒キャッシュ)。記録外の期限切れの削除は消す行数分だけ(17.10.9)。いずれも上限に遠い。
+
+**Workers のリクエスト(10 万/日)**: キルフィードタブは推移 60 秒(1,440/日)+ キルの差分 30 秒(2,880/日)= **1 タブ開きっぱなしで約 4,300/日**(17.8 の 1,440 から増える)。スコアはサイドバーと共有なので増えない。受信 1 台常時(約 4.3 万)+ パネル(〜1.8 万)と合わせて約 6.5 万/日。
+
+**ストレージ(500 MB)**: 1 キル約 300 バイト(索引込み)。全体の上限 8,000 キル/日 × 30 日 = 最大 24 万行 ≒ 72 MB(実際は「直近 5 試合 + 記録中」で切られるので大幅に少ない)。`roster_json` は 1 行 1.5 KB 程度 × 181 行 × 6 試合 × 20 台 ≒ 33 MB(最悪)。生データ(最大約 112 MiB)と合わせても 250 MB 未満。
+
+**CPU(10 ms)**: 受信 1 件 = 長い整数の走査(64 KiB)+ `JSON.parse` + 100 件までの対応表の照合で 1〜2 ms の見込み(C-27 で実測)。一覧の API は最大 3,000 行の JSON 化(数 ms)。集計はブラウザ。
+
+#### 17.10.9 保持と掃除(17.7 への追加)
+
+| 対象 | いつ | 規則 |
+|---|---|---|
+| 試合に属するキル | 試合を削除したとき(17.7 の終了時・毎時の削除) | **トリガー** `trg_match_recordings_delete_kills`(0004)が同じ文の中で消す。Cron・API のクエリ数は増えない(17.3 の上限 50 に余裕が無いため) |
+| 記録外のキル(サーバーの削除) | `DELETE /api/servers/:id` | トリガー `trg_servers_delete_unrecorded_kills` が消す(試合に属するキルは試合の保持に従う) |
+| 記録外のキル(期限) | Cron の毎時 17 分 | `DELETE FROM feed_kills WHERE server_id IN (SELECT id FROM servers) AND recording_id = 0 AND received_at < ?(7 日前)` の 1 文(索引で消す行だけを読む)。17.3 の最悪 47 → 48 クエリ |
+| `feed_daily` の 0004 の列 | 既存(8 日より前の行を削除) | 変えない |
+
+トリガーが D1(`wrangler d1 migrations apply`)で作れない場合の代わり: 17.7 の削除の `db.batch` に `DELETE FROM feed_kills WHERE server_id = ? AND recording_id IN (…)` を足し、同時に記録できる台数(`MAX_ACTIVE_RECORDINGS`)を 7 に下げてクエリ数を収める(C-26)。
+
+#### 17.10.10 モック(`scripts/mock-rcon.mjs`。実装は backend)
+
+第 1 段階の送信モード(`MOCK_FEED_URL` / `MOCK_FEED_TOKEN`)に、環境変数 `MOCK_FEED_SHAPE` を足す。
+
+| 値 | 本文 |
+|---|---|
+| `basic`(既定) | 第 1 段階のまま(`{ type: 'killed', killer, victim, weapon, distance, headshot, time }` の配列) |
+| `mixed` | 下の変種を順番に混ぜる(正規化の対応表の確認用) |
+
+`mixed` の変種(プレイヤーは既存の架空の `TestPlayerA` 等、Steam ID は既存の `fakeSteamId` のダミー。**実在の名前・ID は使わない**):
+
+1. 入れ子: `{ type: 'killed', killer: { name, steamId, faction }, victim: { … }, weapon: { id: 'WEPN_031', name: 'Test Rifle' }, distanceM: 37.2, headshot: true, gameTime: 3151 }`
+2. 平ら: `{ event: 'kill', killerName, killerSteamId, victimName, victimSteamId, weaponName: 'Test Pistol', distance: 12, isHeadshot: false, flags: ['PENETRATION'] }`(陣営なし → 記録中なら roster から付く)
+3. 乗り物: `{ type: 'killed', attacker: { … }, victim: { … }, vehicle: { id: 'TNK_01', name: 'Test Tank' }, weapon: 'Anti Air', range: 180, tags: 'ROADKILL' }`
+4. 自殺・距離不明: `{ type: 'killed', killer: <A>, victim: <A>, weapon: { id: 'GRENADE_TEST' } }`
+5. チームキル: 同じ陣営の 2 人(`faction` 付き)
+6. 数値の Steam ID: `killer.steamId` を**引用符無しの 17 桁の数値**で書いた本文(本文の文字列を手で組み立てる。`JSON.stringify` を使わない)
+7. 環境による死亡: `{ type: 'killed', victim: { … }, cause: 'Test Fall' }`(キラーなし)
+8. 種類違い: `{ type: 'test_unknown_event', foo: 1 }`(`other` に数えられ、キルログに出ないこと)
+9. 読めないキル: `{ type: 'killed', a: 1 }`(`incomplete`)
+10. `events` で包んだオブジェクト: `{ events: [変種 1, 変種 2] }`
+
+送信の頻度・空のバッチの混ぜ方は第 1 段階と同じ。1 バッチ 1〜3 件。ログには変種の番号と応答の状態だけを出す(トークン・本文は出さない)。
+
+#### 17.10.11 実装の分担(ファイル単位)
+
+**architect(済み)**: 本節、8.14、14 章(K-9〜K-14、C-25〜C-27、U-25〜U-31)、`docs/API.md` 11 章、`src/types/api.ts`(第 2 段階の節。追加のみ)、`db/migrations/0004_killfeed.sql`、`db/schema.sql`、`src/i18n/ja.ts`(17.10.7 のキー。`killfeed.filter.*` `killfeed.flag.*` `killfeed.factionSource.*` `killfeed.normalizeResult.*` `killfeed.envelope.*` `killfeed.field.*` は型で全コード必須)。新しいエラーコードは無い(`src/lib/http.ts` の `DEV_MESSAGES` は変更なし)。
+
+**backend**(第 1 段階の実装が終わってから)
+
+| ファイル | 作業 |
+|---|---|
+| `src/lib/killfeed/fields.ts`(新規) | `KILL_FIELD_CANDIDATES`・`KILL_EVENT_TYPES`・印の語の表(17.10.2 の表。**対応表はこの 1 か所**) |
+| `src/lib/killfeed/normalize.ts`(新規) | 長い整数を守る解析、`normalizeFeedBatch` / `normalizeFeedEvent`、診断(`matched` / `unmappedKeys`) |
+| `src/lib/killfeed/store.ts`(新規) | 日次カウンタの UPSERT、陣営の付与(roster の取得と 30 秒キャッシュ)、`json_each` の INSERT、一覧と差分の読み取り(`KillEvent` への変換、`teamkill` の付与、`factions` の順)、その他の件数の間引き書き込み |
+| `src/lib/feed.ts` / `src/pages/api/ingest/events.ts` | 17.10.3 の 11〜16。`raw_enabled` を読む |
+| `src/lib/recordings.ts` / `src/lib/cron.ts` | サンプルに `roster_json`(`normalizeRecordingPlayers` の結果から)。毎時 17 分に記録外の期限切れの削除 1 文 |
+| `src/lib/config.ts` | `probeD1` に 0004(`feed_kills`、`match_samples.roster_json`、`server_feeds.raw_enabled`、`feed_daily.kills`)を足す |
+| `src/lib/testing/sqlite-d1.ts` | `MIGRATIONS` に `0004_killfeed.sql` |
+| `src/pages/api/killfeed/kills.ts`(新規)、`src/pages/api/feed/raw/[id]/normalized.ts`(新規)、`src/pages/api/servers/[id]/feed.ts`(GET・PUT に `rawEnabled`・`killsToday`・`killLimits`) | API.md 11 章 |
+| `scripts/mock-rcon.mjs` | `MOCK_FEED_SHAPE=mixed`(17.10.10) |
+| テスト | 対応表の各候補・長い整数・外側の形 4 種・自殺・incomplete・1 バッチの上限、日次の上限(全部捨てる)、`raw_enabled = 0` でキルだけ保存、roster の鮮度(3 分)・出所が違うときの `teamkill = null`、差分の位置(同じ受信時刻の複数行)、トリガーで試合・サーバーの削除に合わせて消えること、記録外の期限切れ |
+
+**frontend-pages**
+
+| ファイル | 作業 |
+|---|---|
+| `src/components/lib/killstats.ts`(新規)+ `killstats.test.ts` | `summarizeKills`・`filterKills`・`buildKillfeedExport`・時間帯の幅の選び方・ファイル名(17.10.6) |
+| `src/components/KillfeedPanel.tsx` | 17.10.7 の並び、記録外の選択、差分の取得、現在のスコア(`useSharedStatus`) |
+| `src/components/KillStatsCards.tsx`・`KillTimelineChart.tsx`・`KillDistanceChart.tsx`・`KillLog.tsx`・`FactionBadge.tsx`(新規) | 17.10.7 の各節 |
+| `src/components/FeedRawList.tsx` | 「正規化の結果」 |
+| `src/components/ServerExtraSettings.tsx`(または `FeedStatusView.tsx`) | `rawEnabled` のスイッチ、今日のキルと上限 |
+| `src/styles/ops.css` | 統計カード・キルログの grid とカード、陣営の印、ヘッドショットの模様 |
+
+**qa-reviewer**: 名前・陣営名・武器名をテキストとして出していること(HTML として解釈しない)、Steam ID・名前がログ・エラー応答に出ないこと、375px で横スクロールが出ないこと(キルログ・表・SVG)、色だけで区別していないこと、集計の定義(17.10.6)と JSON 出力の一致。
+
+#### 17.10.12 要確認
+
+14 章の K-9〜K-14(本文の形)、C-25〜C-27(D1・CPU)、U-25〜U-31(判断)。
 
 ### 17.11 実装の分担(ファイル単位)
 
